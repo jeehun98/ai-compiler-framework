@@ -1,0 +1,89 @@
+# =========================
+# Build / Generated
+# =========================
+build/
+out/
+bin/
+lib/
+
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.ninja
+*.ninja_deps
+*.ninja_log
+compile_commands.json
+
+# =========================
+# Visual Studio / MSVC
+# =========================
+.vs/
+*.vcxproj*
+*.sln
+*.VC.db
+*.VC.VC.opendb
+*.ipch
+*.obj
+*.pdb
+*.idb
+*.ilk
+*.exp
+*.lib
+*.exe
+*.dll
+
+# =========================
+# CUDA / NVCC
+# =========================
+*.cudafe1.cpp
+*.cudafe1.gpu
+*.cudafe1.stub.c
+*.fatbin
+*.ptx
+*.sass
+*.nvcc.*
+tmpxft_*
+
+# =========================
+# Profiling / Tracing
+# =========================
+*.nsys-rep
+*.nsys-res
+*.ncu-rep
+*.qdrep
+*.qdstrm
+*.nvvp
+nvtx_*.json
+
+# =========================
+# Python
+# =========================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+
+# =========================
+# Editor / IDE
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# =========================
+# OS
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# Logs / Temp
+# =========================
+*.log
+*.tmp
