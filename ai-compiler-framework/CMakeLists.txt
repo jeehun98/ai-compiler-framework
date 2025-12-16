@@ -16,6 +16,8 @@ add_library(aicf
     src/ir/lowering.cpp
     src/backends/cuda/cuda_context.cu
     src/backends/cuda/nvtx.cu
+    src/backends/cuda/ops/gemm/launcher.cu
+
 )
 
 target_include_directories(aicf PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -31,3 +33,6 @@ set_target_properties(aicf PROPERTIES CUDA_ARCHITECTURES "86")
 
 add_executable(aicf_smoke examples/smoke.cpp)
 target_link_libraries(aicf_smoke PRIVATE aicf)
+
+add_executable(aicf_gemm_bench examples/cuda_gemm_bench.cu)
+target_link_libraries(aicf_gemm_bench PRIVATE aicf)
