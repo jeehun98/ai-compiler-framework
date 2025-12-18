@@ -9,15 +9,23 @@ option(AICF_ENABLE_NVTX "Enable NVTX profiling" ON)
 add_library(aicf
     src/core/status.cpp
     src/core/log.cpp
+    
     src/runtime/graph.cpp
     src/runtime/capture_plan.cpp
     src/runtime/graph_exec.cpp
+
     src/ir/ir.cpp
     src/ir/lowering.cpp
+
     src/backends/cuda/cuda_context.cu
     src/backends/cuda/nvtx.cu
+
+    src/backends/cuda/ops/add/launcher.cu
+    src/backends/cuda/ops/relu/launcher.cu
     src/backends/cuda/ops/gemm/launcher.cu
-    src/backends/cuda/ops/eltwise/launcher.cu
+    
+    src/backends/cuda/registry/registry.cpp
+    src/backends/cuda/registry/register_all.cpp
 )
 
 target_include_directories(aicf PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)

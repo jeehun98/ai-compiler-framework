@@ -1,14 +1,38 @@
 {
   "configurations": [
     {
-      "name": "Win64",
+      "name": "Win64-CMake",
+
+      "compileCommands": "${workspaceFolder}/ai-compiler-framework/build/compile_commands.json",
+
       "includePath": [
-        "${workspaceFolder}/src",
-        "${workspaceFolder}/include",
-        "${workspaceFolder}/src/backends",
-        "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.0/include"
+        "${workspaceFolder}/ai-compiler-framework/include",
+        "${workspaceFolder}/ai-compiler-framework/src",
+        "${workspaceFolder}/ai-compiler-framework/build",
+        "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6/include"
       ],
-      "compilerPath": "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.0/bin/nvcc.exe",
+
+      "browse": {
+        "path": [
+          "${workspaceFolder}/ai-compiler-framework/include",
+          "${workspaceFolder}/ai-compiler-framework/src",
+          "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6/include"
+        ],
+        "limitSymbolsToIncludedHeaders": true
+      },
+
+      "defines": [
+        "_DEBUG",
+        "UNICODE",
+        "_UNICODE"
+      ],
+
+      "windowsSdkVersion": "10.0.26100.0",
+
+      "compilerPath": "C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/*/bin/Hostx64/x64/cl.exe",
+
+      "cStandard": "c17",
+      "cppStandard": "c++17",
       "intelliSenseMode": "windows-msvc-x64"
     }
   ],

@@ -1,4 +1,4 @@
-#include "include/aicf/backends/cuda/registry/registry.hpp"
+#include "aicf/backends/cuda/registry/registry.hpp"
 
 namespace aicf::cuda {
 

@@ -1,10 +1,11 @@
 #pragma once
 
+#include <cuda_runtime.h>
+#include "aicf/core/status.hpp"
 #include "aicf/backends/cuda/registry/registry.hpp"
 
 namespace aicf::cuda {
 
-// NOTE: Status enum 이름은 네 프로젝트에 맞춰 조정 필요할 수 있음.
 inline aicf::Status dispatch(
     OpKind kind,
     const TensorDesc* inputs, int num_inputs,
@@ -12,6 +13,7 @@ inline aicf::Status dispatch(
     const void* attr,
     void* workspace, size_t workspace_bytes,
     cudaStream_t stream) {
+
   const auto& vs = KernelRegistry::instance().variants(kind);
 
   for (const auto& v : vs) {
@@ -20,9 +22,8 @@ inline aicf::Status dispatch(
                       attr, workspace, workspace_bytes, stream);
     }
   }
-
-  // 아래 값 이름을 네 Status에 맞춰 수정:
-  return aicf::Status::kNotSupported;
+  // 네 Status에는 NotSupported가 없으니 NotImplemented로 반환
+  return aicf::Status::NotImplemented;
 }
 
-}  // namespace aicf::cuda
+} // namespace aicf::cuda
