@@ -1,38 +1,69 @@
-#include <aicf/backends/cuda/ops/gemm/api.hpp>
-#include <aicf/core/log.hpp>
-#include "kernels.cuh"
-
 #include <cuda_runtime.h>
+
+#include "aicf/backends/cuda/registry/kernel_variant.hpp"
+#include "aicf/backends/cuda/registry/tensor_desc.hpp"
+#include "aicf/core/status.hpp"
+
+#include "aicf/backends/cuda/ops/gemm/api.hpp"  // 네 public gemm api
 
 namespace aicf::cuda {
 
-static inline cudaStream_t to_cuda_stream(Stream s) {
-    return reinterpret_cast<cudaStream_t>(s.handle);
+static aicf::Status gemm_f32_naive_launch(
+    const TensorDesc* inputs, int num_inputs,
+    TensorDesc* outputs, int num_outputs,
+    const void* attr,
+    void* /*workspace*/, size_t /*workspace_bytes*/,
+    cudaStream_t stream) {
+
+  if (num_inputs != 2 || num_outputs != 1) {
+    return aicf::Status::kInvalidArgument;
+  }
+
+  const auto* a = static_cast<const aicf::cuda::GemmAttr*>(attr); // 네 attr 이름/네임스페이스에 맞춰 수정
+  (void)a;
+
+  // TODO: 기존 gemm naive 커널/런처 호출
+  // launch_gemm_f32_naive(A,B,C,M,N,K,alpha,beta,stream);
+
+  (void)stream;
+  return aicf::Status::kSuccess;
 }
 
-Status gemm_f32(const float* A,
-                const float* B,
-                float* C,
-                int M, int N, int K,
-                Stream stream) {
-    if (!A || !B || !C) return Status::InvalidArgument;
-    if (M <= 0 || N <= 0 || K <= 0) return Status::InvalidArgument;
+static bool gemm_f32_naive_supported(
+    const TensorDesc* inputs, int num_inputs,
+    const TensorDesc* outputs, int num_outputs,
+    const void* attr) {
 
-    cudaStream_t cu_stream = to_cuda_stream(stream);
+  if (num_inputs != 2 || num_outputs != 1) return false;
 
-    dim3 block(16, 16, 1);
-    dim3 grid((N + block.x - 1) / block.x,
-              (M + block.y - 1) / block.y,
-              1);
+  if (inputs[0].dtype != DType::F32 || inputs[1].dtype != DType::F32) return false;
+  if (outputs[0].dtype != DType::F32) return false;
 
-    kernels::gemm_f32_naive_kernel<<<grid, block, 0, cu_stream>>>(A, B, C, M, N, K);
+  if (!inputs[0].contiguous || !inputs[1].contiguous || !outputs[0].contiguous) return false;
 
-    cudaError_t e = cudaGetLastError();
-    if (e != cudaSuccess) {
-        aicf::log_error("gemm_f32 launch failed: %s", cudaGetErrorString(e));
-        return Status::Error;
-    }
-    return Status::Ok;
+  // transA/transB는 초기엔 false만 지원하는 정책
+  const auto* a = static_cast<const aicf::cuda::GemmAttr*>(attr);
+  if (a && (a->transA || a->transB)) return false;
+
+  // shape 검증은 너의 TensorDesc 규칙에 맞춰 추가
+  // 예: A [M,K], B [K,N], C [M,N]
+
+  return true;
 }
 
-} // namespace aicf::cuda
+static size_t gemm_f32_naive_workspace(
+    const TensorDesc* /*inputs*/, int /*num_inputs*/,
+    const void* /*attr*/) {
+  return 0;
+}
+
+KernelVariant make_gemm_f32_naive_variant() {
+  KernelVariant v;
+  v.name = "gemm_f32_naive";
+  v.launch = gemm_f32_naive_launch;
+  v.supported = gemm_f32_naive_supported;
+  v.query_workspace = gemm_f32_naive_workspace;
+  return v;
+}
+
+}  // namespace aicf::cuda
