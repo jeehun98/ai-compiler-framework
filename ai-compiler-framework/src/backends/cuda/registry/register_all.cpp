@@ -8,8 +8,7 @@ namespace aicf::cuda {
 KernelVariant make_add_f32_variant();
 KernelVariant make_relu_f32_variant();
 KernelVariant make_gemm_f32_naive_variant();
-
-}
+}  // namespace aicf::cuda
 
 extern "C" void aicf_cuda_register_all_kernels() {
   using namespace aicf::cuda;

@@ -1,27 +1,43 @@
 #pragma once
 #include <cstdint>
+#include <cstddef>
 
 namespace aicf::cuda {
 
-// 초기에는 F32만 쓰더라도, dtype은 확장 대비로 남겨둠.
+constexpr int kMaxRank = 4;
+
 enum class DType : uint8_t {
-  F32 = 0,
-  F16 = 1,
-  BF16 = 2
+  kF32  = 0,
+  kF16  = 1,
+  kBF16 = 2,
+
+  // backward-compatible aliases
+  F32  = kF32,
+  F16  = kF16,
+  BF16 = kBF16,
 };
 
-// 초기 최소 구현: rank<=4, contiguous 중심
 struct TensorDesc {
   void* data = nullptr;
-  DType dtype = DType::F32;
+  DType dtype = DType::kF32;
 
-  int ndim = 0;
-  int64_t shape[4] = {0, 0, 0, 0};
-  int64_t stride[4] = {0, 0, 0, 0};
+  // named union for MSVC compatibility
+  union RankND {
+    int32_t rank;
+    int32_t ndim;
+    RankND() : rank(0) {}
+  } r;
 
-  bool contiguous = true;
-  int alignment = 0;  // bytes: 4,8,16...
-  int device = 0;
+  int64_t shape[kMaxRank]  = {0, 0, 0, 0};
+  int64_t stride[kMaxRank] = {0, 0, 0, 0};
+
+  bool contiguous = false;
+  int32_t alignment = 0;
+  int32_t device = 0;
+
+  // convenience accessors (선택)
+  int32_t rank() const { return r.rank; }
+  int32_t ndim() const { return r.ndim; }
 };
 
-}  // namespace aicf::cuda
+} // namespace aicf::cuda

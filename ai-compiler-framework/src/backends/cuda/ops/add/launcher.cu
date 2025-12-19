@@ -59,7 +59,8 @@ aicf::Status add_f32(const float* a,
 // Registry Variant (no attr)
 // Contract:
 //   inputs[0]=a [N], inputs[1]=b [N], outputs[0]=out [N]
-//   contiguous + dtype F32 + rank1 only
+//   v0.1: binding guarantees contiguous (and sets desc.contiguous=true)
+//   dtype must be F32 for this variant, rank1
 // -------------------------
 static aicf::Status add_variant_launch(
     const TensorDesc* inputs, int num_inputs,
@@ -74,16 +75,19 @@ static aicf::Status add_variant_launch(
   const TensorDesc& B = inputs[1];
   TensorDesc& O = outputs[0];
 
-  if (A.dtype != DType::F32 || B.dtype != DType::F32 || O.dtype != DType::F32)
+  if (A.dtype != DType::kF32 || B.dtype != DType::kF32 || O.dtype != DType::kF32)
     return aicf::Status::InvalidArgument;
 
+  // v0.1: binding guarantees contiguous, but keep the check anyway.
   if (!A.contiguous || !B.contiguous || !O.contiguous)
     return aicf::Status::InvalidArgument;
 
-  if (A.ndim != 1 || B.ndim != 1 || O.ndim != 1)
+  // TensorDesc: named union r.{rank,ndim}
+  if (A.r.ndim != 1 || B.r.ndim != 1 || O.r.ndim != 1)
     return aicf::Status::InvalidArgument;
 
   const int N = (int)O.shape[0];
+  if (N <= 0) return aicf::Status::InvalidArgument;
   if ((int)A.shape[0] != N || (int)B.shape[0] != N)
     return aicf::Status::InvalidArgument;
 
@@ -109,12 +113,12 @@ static bool add_variant_supported(
   const TensorDesc& B = inputs[1];
   const TensorDesc& O = outputs[0];
 
-  if (A.dtype != DType::F32 || B.dtype != DType::F32 || O.dtype != DType::F32) return false;
+  if (A.dtype != DType::kF32 || B.dtype != DType::kF32 || O.dtype != DType::kF32) return false;
   if (!A.contiguous || !B.contiguous || !O.contiguous) return false;
-  if (A.ndim != 1 || B.ndim != 1 || O.ndim != 1) return false;
+  if (A.r.ndim != 1 || B.r.ndim != 1 || O.r.ndim != 1) return false;
 
   const int64_t N = O.shape[0];
-  return (A.shape[0] == N) && (B.shape[0] == N);
+  return (N > 0) && (A.shape[0] == N) && (B.shape[0] == N);
 }
 
 static size_t add_variant_workspace(const TensorDesc*, int, const void*) {

@@ -2,15 +2,18 @@
 #include <cstddef>
 #include <cuda_runtime.h>
 
-#include "aicf/core/status.hpp"  // 네 프로젝트 status
+#include "aicf/core/status.hpp"
 #include "aicf/backends/cuda/registry/tensor_desc.hpp"
 
 namespace aicf::cuda {
 
+// v0.1 KernelVariant contract:
+// - supported(): "이 variant가 이 call을 처리 가능?" (cheap check)
+// - query_workspace(): v0.1에서는 0만 허용(또는 nullptr)
+// - launch(): workspace는 v0.1에서 항상 nullptr/0로 호출됨
 struct KernelVariant {
   const char* name = nullptr;
 
-  // 실행 함수
   aicf::Status (*launch)(
       const TensorDesc* inputs, int num_inputs,
       TensorDesc* outputs, int num_outputs,
@@ -18,12 +21,10 @@ struct KernelVariant {
       void* workspace, size_t workspace_bytes,
       cudaStream_t stream) = nullptr;
 
-  // workspace 필요량
   size_t (*query_workspace)(
       const TensorDesc* inputs, int num_inputs,
       const void* attr) = nullptr;
 
-  // 지원 조건
   bool (*supported)(
       const TensorDesc* inputs, int num_inputs,
       const TensorDesc* outputs, int num_outputs,

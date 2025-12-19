@@ -58,9 +58,10 @@ aicf::Status relu_f32(const float* in,
 
 // -------------------------
 // Registry Variant (no attr)
-// Contract:
+// Contract (v0.1):
 //   inputs[0]=in [N], outputs[0]=out [N]
-//   contiguous + dtype F32 + rank1 only
+//   binding guarantees contiguous + desc.contiguous=true
+//   dtype F32 only for this variant, rank1
 // -------------------------
 static aicf::Status relu_variant_launch(
     const TensorDesc* inputs, int num_inputs,
@@ -74,16 +75,17 @@ static aicf::Status relu_variant_launch(
   const TensorDesc& I = inputs[0];
   TensorDesc& O = outputs[0];
 
-  if (I.dtype != DType::F32 || O.dtype != DType::F32)
+  if (I.dtype != DType::kF32 || O.dtype != DType::kF32)
     return aicf::Status::InvalidArgument;
 
   if (!I.contiguous || !O.contiguous)
     return aicf::Status::InvalidArgument;
 
-  if (I.ndim != 1 || O.ndim != 1)
+  if (I.r.ndim != 1 || O.r.ndim != 1)
     return aicf::Status::InvalidArgument;
 
   const int N = (int)O.shape[0];
+  if (N <= 0) return aicf::Status::InvalidArgument;
   if ((int)I.shape[0] != N)
     return aicf::Status::InvalidArgument;
 
@@ -107,11 +109,12 @@ static bool relu_variant_supported(
   const TensorDesc& I = inputs[0];
   const TensorDesc& O = outputs[0];
 
-  if (I.dtype != DType::F32 || O.dtype != DType::F32) return false;
+  if (I.dtype != DType::kF32 || O.dtype != DType::kF32) return false;
   if (!I.contiguous || !O.contiguous) return false;
-  if (I.ndim != 1 || O.ndim != 1) return false;
+  if (I.r.ndim != 1 || O.r.ndim != 1) return false;
 
-  return I.shape[0] == O.shape[0];
+  const int64_t N = O.shape[0];
+  return (N > 0) && (I.shape[0] == N);
 }
 
 static size_t relu_variant_workspace(const TensorDesc*, int, const void*) {

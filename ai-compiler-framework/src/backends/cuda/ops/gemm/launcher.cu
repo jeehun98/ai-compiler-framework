@@ -42,7 +42,6 @@ __global__ void gemm_f32_naive_kernel(const float* __restrict__ A,
 // helpers
 // -------------------------
 static inline cudaStream_t to_cuda_stream(aicf::Stream s) {
-  // gemm/api.hpp 주석에 "stream.handle == nullptr" 라고 되어 있으니 handle 가정
   return (s.handle == nullptr) ? (cudaStream_t)0 : (cudaStream_t)s.handle;
 }
 
@@ -60,7 +59,6 @@ aicf::Status gemm_f32(const float* A,
 
   cudaStream_t s = to_cuda_stream(stream);
 
-  // 16x16 tile
   dim3 block(16, 16, 1);
   dim3 grid((N + block.x - 1) / block.x,
             (M + block.y - 1) / block.y,
@@ -73,10 +71,7 @@ aicf::Status gemm_f32(const float* A,
 }
 
 // -------------------------
-// Registry Variant (no attr)
-// Contract:
-//   inputs[0]=A [M,K], inputs[1]=B [K,N], outputs[0]=C [M,N]
-//   contiguous + dtype F32 + rank2 only
+// Registry Variant (no attr) - v0.1 Plan A
 // -------------------------
 static aicf::Status gemm_variant_launch(
     const TensorDesc* inputs, int num_inputs,
@@ -91,13 +86,12 @@ static aicf::Status gemm_variant_launch(
   const TensorDesc& B = inputs[1];
   TensorDesc& C = outputs[0];
 
-  if (A.dtype != DType::F32 || B.dtype != DType::F32 || C.dtype != DType::F32) {
+  if (A.dtype != DType::kF32 || B.dtype != DType::kF32 || C.dtype != DType::kF32) {
     return aicf::Status::InvalidArgument;
   }
-  if (!A.contiguous || !B.contiguous || !C.contiguous) {
-    return aicf::Status::InvalidArgument;
-  }
-  if (A.ndim != 2 || B.ndim != 2 || C.ndim != 2) {
+
+  // TensorDesc uses named union r.{rank,ndim}
+  if (A.r.rank != 2 || B.r.rank != 2 || C.r.rank != 2) {
     return aicf::Status::InvalidArgument;
   }
 
@@ -106,11 +100,12 @@ static aicf::Status gemm_variant_launch(
   const int K2 = (int)B.shape[0];
   const int N  = (int)B.shape[1];
 
+  if (M <= 0 || N <= 0 || K <= 0) return aicf::Status::InvalidArgument;
   if (K2 != K) return aicf::Status::InvalidArgument;
   if ((int)C.shape[0] != M || (int)C.shape[1] != N) return aicf::Status::InvalidArgument;
 
   aicf::Stream s{};
-  s.handle = (void*)stream;   // stream.hpp의 필드명이 handle이 아니면 여기 1줄만 바꾸면 됨
+  s.handle = (void*)stream;
 
   return aicf::cuda::gemm_f32(
       (const float*)A.data,
@@ -131,14 +126,17 @@ static bool gemm_variant_supported(
   const TensorDesc& B = inputs[1];
   const TensorDesc& C = outputs[0];
 
-  if (A.dtype != DType::F32 || B.dtype != DType::F32 || C.dtype != DType::F32) return false;
-  if (!A.contiguous || !B.contiguous || !C.contiguous) return false;
-  if (A.ndim != 2 || B.ndim != 2 || C.ndim != 2) return false;
+  if (A.dtype != DType::kF32 || B.dtype != DType::kF32 || C.dtype != DType::kF32) return false;
+  if (A.r.rank != 2 || B.r.rank != 2 || C.r.rank != 2) return false;
 
   const int64_t M = A.shape[0];
   const int64_t K = A.shape[1];
+  if (M <= 0 || K <= 0) return false;
+
   if (B.shape[0] != K) return false;
   const int64_t N = B.shape[1];
+  if (N <= 0) return false;
+
   if (C.shape[0] != M || C.shape[1] != N) return false;
 
   return true;
@@ -148,7 +146,6 @@ static size_t gemm_variant_workspace(const TensorDesc*, int, const void*) {
   return 0;
 }
 
-// register_all.cpp에서 가져다 쓸 factory
 KernelVariant make_gemm_f32_naive_variant() {
   KernelVariant v;
   v.name = "gemm_f32_naive";

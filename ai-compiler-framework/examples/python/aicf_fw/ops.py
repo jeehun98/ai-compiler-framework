@@ -1,41 +1,23 @@
 # examples/python/aicf_fw/ops.py
-from __future__ import annotations
-from typing import Optional, Any, Dict
-import torch
+import aicf_cuda
 
-from .backend import get_backend
-from .tensor import Tensor
+OP_ADD  = 0
+OP_RELU = 1
+OP_GEMM = 2
 
+def add(x, y, out):
+    aicf_cuda.op_call(OP_ADD, [x, y], [out], attrs={})
+    return out
 
-class _NvtxRange:
-    def __init__(self, name: str):
-        self.name = name
+def relu(x, out):
+    aicf_cuda.op_call(OP_RELU, [x], [out], attrs={})
+    return out
 
-    def __enter__(self):
-        if torch.cuda.is_available():
-            torch.cuda.nvtx.range_push(self.name)
-
-    def __exit__(self, exc_type, exc, tb):
-        if torch.cuda.is_available():
-            torch.cuda.nvtx.range_pop()
-
-
-def gemm(a: Tensor, b: Tensor, bias: Optional[Tensor] = None, act: Optional[str] = None,
-         attrs: Optional[Dict[str, Any]] = None) -> Tensor:
-    with _NvtxRange("op::gemm"):
-        return get_backend().gemm(a, b, bias=bias, act=act, attrs=attrs)
-
-
-def relu(x: Tensor) -> Tensor:
-    with _NvtxRange("op::relu"):
-        return get_backend().relu(x)
-
-
-def add(a: Tensor, b: Tensor) -> Tensor:
-    with _NvtxRange("op::add"):
-        return get_backend().add(a, b)
-
-
-def mse(y: Tensor, t: Tensor) -> Tensor:
-    with _NvtxRange("op::mse"):
-        return get_backend().mse(y, t)
+def gemm(a, b, out, trans_a=False, trans_b=False, alpha=1.0, beta=0.0):
+    aicf_cuda.op_call(OP_GEMM, [a, b], [out], attrs={
+        "trans_a": bool(trans_a),
+        "trans_b": bool(trans_b),
+        "alpha": float(alpha),
+        "beta": float(beta),
+    })
+    return out

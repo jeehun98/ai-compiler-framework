@@ -103,6 +103,8 @@ function(aicf_add_op_pybind target_name source_file output_name)
     ${TORCH_LIBRARIES}
     ${TORCH_PYTHON_LIBRARY}
     ${Python_LIBRARIES}
+    CUDA::cudart
+
   )
 
 
@@ -128,6 +130,9 @@ function(aicf_add_op_pybind target_name source_file output_name)
   target_compile_definitions(${target_name} PRIVATE TORCH_EXTENSION_NAME=${output_name})
 endfunction()
 
-aicf_add_op_pybind(aicf_cuda_add  src/python_bindings/add.cpp  add)
-aicf_add_op_pybind(aicf_cuda_relu src/python_bindings/relu.cpp relu)
-aicf_add_op_pybind(aicf_cuda_gemm src/python_bindings/gemm.cpp gemm)
+# Plan A: single unified module "aicf_cuda" exporting op_call()
+aicf_add_op_pybind(aicf_cuda src/python_bindings/bindings.cpp aicf_cuda)
+
+target_compile_definitions(${target_name} PRIVATE -D_GLIBCXX_USE_CXX11_ABI=0)
+
+target_link_libraries(${target_name} PRIVATE CUDA::cudart)
