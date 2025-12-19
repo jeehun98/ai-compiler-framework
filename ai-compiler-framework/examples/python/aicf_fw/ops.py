@@ -1,7 +1,6 @@
 # examples/python/aicf_fw/ops.py
 from __future__ import annotations
 from typing import Optional, Any, Dict
-
 import torch
 
 from .backend import get_backend
@@ -13,7 +12,6 @@ class _NvtxRange:
         self.name = name
 
     def __enter__(self):
-        # CUDA 없어도 코드가 죽지 않게
         if torch.cuda.is_available():
             torch.cuda.nvtx.range_push(self.name)
 
@@ -27,9 +25,16 @@ def gemm(a: Tensor, b: Tensor, bias: Optional[Tensor] = None, act: Optional[str]
     with _NvtxRange("op::gemm"):
         return get_backend().gemm(a, b, bias=bias, act=act, attrs=attrs)
 
+
 def relu(x: Tensor) -> Tensor:
     with _NvtxRange("op::relu"):
         return get_backend().relu(x)
+
+
+def add(a: Tensor, b: Tensor) -> Tensor:
+    with _NvtxRange("op::add"):
+        return get_backend().add(a, b)
+
 
 def mse(y: Tensor, t: Tensor) -> Tensor:
     with _NvtxRange("op::mse"):

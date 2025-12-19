@@ -1,12 +1,8 @@
 # examples/python/aicf_fw/backend.py
 from __future__ import annotations
-from typing import Optional
 import os
 
 from .torch_backend import TorchBackend, BackendConfig
-
-# 나중에 AicfBackend 붙일 자리:
-# from .aicf_backend import AicfBackend
 
 _GLOBAL_BACKEND = None
 
@@ -15,7 +11,7 @@ def get_backend():
     """
     Backend selector.
     기본은 TorchBackend.
-    나중에 AicfBackend 추가되면 환경변수나 config로 스위칭만 하면 됨.
+    AICF_BACKEND=aicf 로 설정하면 AicfBackend 사용(지원 안 되는 op는 내부에서 torch로 fallback).
     """
     global _GLOBAL_BACKEND
     if _GLOBAL_BACKEND is None:
@@ -23,7 +19,10 @@ def get_backend():
 
         if kind == "torch":
             _GLOBAL_BACKEND = TorchBackend(BackendConfig())
+        elif kind == "aicf":
+            from .aicf_backend import AicfBackend  # lazy import
+            _GLOBAL_BACKEND = AicfBackend(BackendConfig())
         else:
-            raise ValueError(f"Unknown backend kind: {kind} (use AICF_BACKEND=torch for now)")
+            raise ValueError(f"Unknown backend kind: {kind} (use AICF_BACKEND=torch|aicf)")
 
     return _GLOBAL_BACKEND

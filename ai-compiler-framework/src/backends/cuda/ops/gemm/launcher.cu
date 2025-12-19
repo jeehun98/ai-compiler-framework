@@ -110,4 +110,52 @@ static aicf::Status gemm_variant_launch(
   if ((int)C.shape[0] != M || (int)C.shape[1] != N) return aicf::Status::InvalidArgument;
 
   aicf::Stream s{};
-  s.handle = (void*)stream;   // stream.hpp의*
+  s.handle = (void*)stream;   // stream.hpp의 필드명이 handle이 아니면 여기 1줄만 바꾸면 됨
+
+  return aicf::cuda::gemm_f32(
+      (const float*)A.data,
+      (const float*)B.data,
+      (float*)C.data,
+      M, N, K,
+      s);
+}
+
+static bool gemm_variant_supported(
+    const TensorDesc* inputs, int num_inputs,
+    const TensorDesc* outputs, int num_outputs,
+    const void* /*attr*/) {
+
+  if (num_inputs != 2 || num_outputs != 1) return false;
+
+  const TensorDesc& A = inputs[0];
+  const TensorDesc& B = inputs[1];
+  const TensorDesc& C = outputs[0];
+
+  if (A.dtype != DType::F32 || B.dtype != DType::F32 || C.dtype != DType::F32) return false;
+  if (!A.contiguous || !B.contiguous || !C.contiguous) return false;
+  if (A.ndim != 2 || B.ndim != 2 || C.ndim != 2) return false;
+
+  const int64_t M = A.shape[0];
+  const int64_t K = A.shape[1];
+  if (B.shape[0] != K) return false;
+  const int64_t N = B.shape[1];
+  if (C.shape[0] != M || C.shape[1] != N) return false;
+
+  return true;
+}
+
+static size_t gemm_variant_workspace(const TensorDesc*, int, const void*) {
+  return 0;
+}
+
+// register_all.cpp에서 가져다 쓸 factory
+KernelVariant make_gemm_f32_naive_variant() {
+  KernelVariant v;
+  v.name = "gemm_f32_naive";
+  v.launch = gemm_variant_launch;
+  v.supported = gemm_variant_supported;
+  v.query_workspace = gemm_variant_workspace;
+  return v;
+}
+
+} // namespace aicf::cuda

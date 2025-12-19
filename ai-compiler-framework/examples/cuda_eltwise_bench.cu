@@ -1,26 +1,30 @@
+// examples/cuda_eltwise_bench.cu
+
 #include <cstdio>
 #include <vector>
 #include <cmath>
 #include <algorithm>
 #include <cuda_runtime.h>
 
-#include <aicf/backends/cuda/nvtx.hpp>
-#include <aicf/backends/cuda/ops/eltwise/api.hpp>
+#include <aicf/runtime/stream.hpp>
 
-#define CHECK_CUDA(x) do {                           \
-  cudaError_t e = (x);                               \
-  if (e != cudaSuccess) {                            \
-    printf("CUDA error %s:%d: %s\n",                 \
-           __FILE__, __LINE__, cudaGetErrorString(e)); \
-    return 1;                                        \
-  }                                                  \
-} while(0)
+#include <aicf/backends/cuda/ops/add/api.hpp>
+#include <aicf/backends/cuda/ops/relu/api.hpp>
 
 #if __has_include(<nvtx3/nvToolsExt.h>)
   #include <nvtx3/nvToolsExt.h>
 #else
   #include <nvToolsExt.h>
 #endif
+
+#define CHECK_CUDA(x) do {                                    \
+  cudaError_t e = (x);                                        \
+  if (e != cudaSuccess) {                                     \
+    printf("CUDA error %s:%d: %s\n",                           \
+           __FILE__, __LINE__, cudaGetErrorString(e));        \
+    return 1;                                                 \
+  }                                                           \
+} while(0)
 
 struct NvtxStartEnd {
   nvtxRangeId_t id;
@@ -31,12 +35,11 @@ struct NvtxStartEnd {
 };
 
 int main() {
-
-  #if AICF_ENABLE_NVTX
-    printf("[INFO] NVTX ENABLED\n");
-  #else
-    printf("[INFO] NVTX DISABLED\n");
-  #endif
+#if AICF_ENABLE_NVTX
+  printf("[INFO] NVTX ENABLED\n");
+#else
+  printf("[INFO] NVTX DISABLED\n");
+#endif
 
   constexpr int64_t N = 1 << 20;
 
@@ -55,20 +58,30 @@ int main() {
   CHECK_CUDA(cudaMemcpy(d_a, h_a.data(), N * sizeof(float), cudaMemcpyHostToDevice));
   CHECK_CUDA(cudaMemcpy(d_b, h_b.data(), N * sizeof(float), cudaMemcpyHostToDevice));
 
-  cudaStream_t stream = cudaStreamPerThread;
+  // 원하는 스트림 사용 (per-thread stream)
+  cudaStream_t s = cudaStreamPerThread;
+
+  // ✅ 네 프로젝트 방식: cudaStream_t -> aicf::Stream 래핑
+  // 네 코드베이스에서 "이미 빌드 성공했던" 그 방식을 그대로 쓰면 됨.
+  aicf::Stream stream{ reinterpret_cast<void*>(s) };
 
 
+  // --- ADD ---
   {
-    NvtxStartEnd r("aicf::eltwise::add_f32");
-    aicf::cuda::ops::eltwise::add_f32(d_out, d_a, d_b, N, stream);
-    CHECK_CUDA(cudaStreamSynchronize(stream));
-  }
-  {
-    NvtxStartEnd r("aicf::eltwise::relu_f32");
-    aicf::cuda::ops::eltwise::relu_f32(d_out, d_out, N, stream);
-    CHECK_CUDA(cudaStreamSynchronize(stream));
+    NvtxStartEnd r("aicf::cuda::add_f32");
+    // ✅ 네가 보여준 시그니처:
+    // add_f32(const float* a, const float* b, float* out, int N, aicf::Stream stream)
+    aicf::cuda::add_f32(d_a, d_b, d_out, (int)N, stream);
+    CHECK_CUDA(cudaStreamSynchronize(s));
   }
 
+  // --- RELU ---
+  {
+    NvtxStartEnd r("aicf::cuda::relu_f32");
+    // 보통 relu_f32(in, out, N, stream) 형태라 in/out 동일 버퍼도 OK
+    aicf::cuda::relu_f32(d_out, d_out, (int)N, stream);
+    CHECK_CUDA(cudaStreamSynchronize(s));
+  }
 
   CHECK_CUDA(cudaMemcpy(h_out.data(), d_out, N * sizeof(float), cudaMemcpyDeviceToHost));
 
@@ -81,8 +94,8 @@ int main() {
   printf("[OK] eltwise add+relu | N=%lld | max_abs_diff=%.6e\n",
          (long long)N, max_diff);
 
-  cudaFree(d_a);
-  cudaFree(d_b);
-  cudaFree(d_out);
+  CHECK_CUDA(cudaFree(d_a));
+  CHECK_CUDA(cudaFree(d_b));
+  CHECK_CUDA(cudaFree(d_out));
   return 0;
 }

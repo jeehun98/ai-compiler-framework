@@ -2,5 +2,6 @@
   "files.associations": {
     "*.cu": "cuda-cpp",
     "*.cuh": "cuda-cpp"
-  }
+  },
+  "cmake.sourceDirectory": "C:/Users/owner/Desktop/ai-compiler-framework/ai-compiler-framework/ai-compiler-framework"
 }
