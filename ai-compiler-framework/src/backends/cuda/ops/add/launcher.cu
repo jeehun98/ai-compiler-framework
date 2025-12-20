@@ -2,6 +2,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 
+#include <cstddef>
 #include <cstdint>
 
 #include <aicf/core/status.hpp>
@@ -41,9 +42,7 @@ __global__ void add_f16_kernel(const __half* __restrict__ a,
                                __half* __restrict__ out,
                                int N) {
   const int i = (int)(blockIdx.x * blockDim.x + threadIdx.x);
-  if (i < N) {
-    out[i] = __hadd(a[i], b[i]);
-  }
+  if (i < N) out[i] = __hadd(a[i], b[i]);
 }
 
 __global__ void add_f16x2_kernel(const __half2* __restrict__ a,
@@ -51,12 +50,10 @@ __global__ void add_f16x2_kernel(const __half2* __restrict__ a,
                                  __half2* __restrict__ out,
                                  int N2) {  // N2 = N/2
   const int i = (int)(blockIdx.x * blockDim.x + threadIdx.x);
-  if (i < N2) {
-    out[i] = __hadd2(a[i], b[i]);
-  }
+  if (i < N2) out[i] = __hadd2(a[i], b[i]);
 }
 
-} // namespace add_impl
+}  // namespace add_impl
 
 // -------------------------
 // public API implementation
@@ -103,25 +100,27 @@ aicf::Status add_f16(const void* a,
 //   binding guarantees: CUDA + contiguous (stride in desc is contiguous-by-contract)
 // -------------------------
 
-
 static size_t add_variant_workspace(const TensorDesc*, int, const void*) {
   return 0;
 }
 
-// ---- F32 variant ----
-static inline bool add_f32_variant_check(
+// Common shape check for 1D elementwise with 2 inputs / 1 output.
+// NOTE: dtype/contig check is passed as function pointer to avoid code duplication.
+static inline bool add_1d_common_check(
     const TensorDesc* inputs, int num_inputs,
-    const TensorDesc* outputs, int num_outputs) {
+    const TensorDesc* outputs, int num_outputs,
+    bool (*is_dt_contig_1d)(const TensorDesc&)) {
 
+  if (!inputs || !outputs) return false;
   if (num_inputs != 2 || num_outputs != 1) return false;
 
   const TensorDesc& A = inputs[0];
   const TensorDesc& B = inputs[1];
   const TensorDesc& O = outputs[0];
 
-  if (!aicf::cuda::shim::is_f32_contig_1d(A)) return false;
-  if (!aicf::cuda::shim::is_f32_contig_1d(B)) return false;
-  if (!aicf::cuda::shim::is_f32_contig_1d(O)) return false;
+  if (!is_dt_contig_1d(A)) return false;
+  if (!is_dt_contig_1d(B)) return false;
+  if (!is_dt_contig_1d(O)) return false;
 
   if (!aicf::cuda::shim::same_shape_1d(A, B)) return false;
   if (!aicf::cuda::shim::same_shape_1d(A, O)) return false;
@@ -129,13 +128,14 @@ static inline bool add_f32_variant_check(
   return (O.shape[0] > 0);
 }
 
+// ---- F32 variant ----
 static bool add_f32_variant_supported(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs,
     const void* /*attr*/) {
 
-  if (!inputs || !outputs) return false;
-  return add_f32_variant_check(inputs, num_inputs, outputs, num_outputs);
+  return add_1d_common_check(inputs, num_inputs, outputs, num_outputs,
+                             &aicf::cuda::shim::is_f32_contig_1d);
 }
 
 static aicf::Status add_f32_variant_launch(
@@ -145,8 +145,8 @@ static aicf::Status add_f32_variant_launch(
     void* /*workspace*/, size_t /*workspace_bytes*/,
     cudaStream_t stream) {
 
-  if (!inputs || !outputs) return aicf::Status::InvalidArgument;
-  if (!add_f32_variant_check(inputs, num_inputs, outputs, num_outputs)) {
+  if (!add_1d_common_check(inputs, num_inputs, outputs, num_outputs,
+                           &aicf::cuda::shim::is_f32_contig_1d)) {
     return aicf::Status::InvalidArgument;
   }
 
@@ -180,33 +180,13 @@ KernelVariant make_add_f32_variant() {
 }
 
 // ---- F16 naive variant ----
-static inline bool add_f16_variant_check(
-    const TensorDesc* inputs, int num_inputs,
-    const TensorDesc* outputs, int num_outputs) {
-
-  if (num_inputs != 2 || num_outputs != 1) return false;
-
-  const TensorDesc& A = inputs[0];
-  const TensorDesc& B = inputs[1];
-  const TensorDesc& O = outputs[0];
-
-  if (!aicf::cuda::shim::is_f16_contig_1d(A)) return false;
-  if (!aicf::cuda::shim::is_f16_contig_1d(B)) return false;
-  if (!aicf::cuda::shim::is_f16_contig_1d(O)) return false;
-
-  if (!aicf::cuda::shim::same_shape_1d(A, B)) return false;
-  if (!aicf::cuda::shim::same_shape_1d(A, O)) return false;
-
-  return (O.shape[0] > 0);
-}
-
 static bool add_f16_variant_supported(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs,
     const void* /*attr*/) {
 
-  if (!inputs || !outputs) return false;
-  return add_f16_variant_check(inputs, num_inputs, outputs, num_outputs);
+  return add_1d_common_check(inputs, num_inputs, outputs, num_outputs,
+                             &aicf::cuda::shim::is_f16_contig_1d);
 }
 
 static aicf::Status add_f16_variant_launch(
@@ -216,8 +196,8 @@ static aicf::Status add_f16_variant_launch(
     void* /*workspace*/, size_t /*workspace_bytes*/,
     cudaStream_t stream) {
 
-  if (!inputs || !outputs) return aicf::Status::InvalidArgument;
-  if (!add_f16_variant_check(inputs, num_inputs, outputs, num_outputs)) {
+  if (!add_1d_common_check(inputs, num_inputs, outputs, num_outputs,
+                           &aicf::cuda::shim::is_f16_contig_1d)) {
     return aicf::Status::InvalidArgument;
   }
 
@@ -251,32 +231,28 @@ KernelVariant make_add_f16_variant() {
 }
 
 // ---- F16 vec2 (half2) variant ----
-static inline bool add_f16_vec2_variant_check(
+static inline bool add_f16_vec2_check(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs) {
 
-  if (num_inputs != 2 || num_outputs != 1) return false;
+  // Base contract: f16 contig 1d + same shape
+  if (!add_1d_common_check(inputs, num_inputs, outputs, num_outputs,
+                           &aicf::cuda::shim::is_f16_contig_1d)) {
+    return false;
+  }
 
   const TensorDesc& A = inputs[0];
   const TensorDesc& B = inputs[1];
   const TensorDesc& O = outputs[0];
 
-  if (!aicf::cuda::shim::is_f16_contig_1d(A)) return false;
-  if (!aicf::cuda::shim::is_f16_contig_1d(B)) return false;
-  if (!aicf::cuda::shim::is_f16_contig_1d(O)) return false;
-
-  if (!aicf::cuda::shim::same_shape_1d(A, B)) return false;
-  if (!aicf::cuda::shim::same_shape_1d(A, O)) return false;
-
-  const int64_t N = O.shape[0];
-  if (N <= 0) return false;
-
-  // half2 requirements
+  // shape 동일이므로 O만 봐도 충분
   if (!aicf::cuda::shim::is_even_len_1d(O)) return false;
-  if (!aicf::cuda::shim::is_aligned_data(A, 4)) return false;
-  if (!aicf::cuda::shim::is_aligned_data(B, 4)) return false;
-  if (!aicf::cuda::shim::is_aligned_data(O, 4)) return false;
 
+  // half2 requires 4B alignment on data pointers
+  constexpr size_t kHalf2Align = 4;
+  if (!aicf::cuda::shim::is_aligned_data(A, kHalf2Align)) return false;
+  if (!aicf::cuda::shim::is_aligned_data(B, kHalf2Align)) return false;
+  if (!aicf::cuda::shim::is_aligned_data(O, kHalf2Align)) return false;
 
   return true;
 }
@@ -286,8 +262,7 @@ static bool add_f16_vec2_variant_supported(
     const TensorDesc* outputs, int num_outputs,
     const void* /*attr*/) {
 
-  if (!inputs || !outputs) return false;
-  return add_f16_vec2_variant_check(inputs, num_inputs, outputs, num_outputs);
+  return add_f16_vec2_check(inputs, num_inputs, outputs, num_outputs);
 }
 
 static aicf::Status add_f16_vec2_variant_launch(
@@ -297,8 +272,7 @@ static aicf::Status add_f16_vec2_variant_launch(
     void* /*workspace*/, size_t /*workspace_bytes*/,
     cudaStream_t stream) {
 
-  if (!inputs || !outputs) return aicf::Status::InvalidArgument;
-  if (!add_f16_vec2_variant_check(inputs, num_inputs, outputs, num_outputs)) {
+  if (!add_f16_vec2_check(inputs, num_inputs, outputs, num_outputs)) {
     return aicf::Status::InvalidArgument;
   }
 
@@ -324,7 +298,7 @@ static aicf::Status add_f16_vec2_variant_launch(
 KernelVariant make_add_f16_vec2_variant() {
   KernelVariant v{};
   v.name = "add_f16_vec2_half2";
-  v.priority = 10;   // vectorized wins over naive
+  v.priority = 10;  // vectorized wins over naive
   v.flags = 0;
   v.launch = add_f16_vec2_variant_launch;
   v.supported = add_f16_vec2_variant_supported;
@@ -332,4 +306,4 @@ KernelVariant make_add_f16_vec2_variant() {
   return v;
 }
 
-} // namespace aicf::cuda
+}  // namespace aicf::cuda

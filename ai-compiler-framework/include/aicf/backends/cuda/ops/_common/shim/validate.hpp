@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <cstddef>   // size_t
+#include <cstdint>
 
 #include "aicf/backends/cuda/registry/tensor_desc.hpp"
 
@@ -13,9 +14,10 @@ inline bool is_rank(const TensorDesc& t, int32_t n) { return rank(t) == n; }
 // -------- basics --------
 inline bool is_contig(const TensorDesc& t) { return t.contiguous; }
 
-inline bool is_f32(const TensorDesc& t) { return t.dtype == DType::F32; }
-inline bool is_f16(const TensorDesc& t) { return t.dtype == DType::F16; }
-inline bool is_bf16(const TensorDesc& t) { return t.dtype == DType::BF16; }
+inline bool is_f32(const TensorDesc& t) { return t.dtype == DType::kF32; }
+inline bool is_f16(const TensorDesc& t) { return t.dtype == DType::kF16; }
+inline bool is_bf16(const TensorDesc& t) { return t.dtype == DType::kBF16; }
+
 
 // -------- presets --------
 inline bool is_f32_contig_1d(const TensorDesc& t) { return is_f32(t) && is_contig(t) && is_rank(t, 1); }
@@ -54,11 +56,14 @@ inline bool gemm_shape_ok_2d(const TensorDesc& A, const TensorDesc& B, const Ten
 // ============================================================
 
 // -------- alignment helpers --------
+inline bool is_pow2(size_t x) { return x && ((x & (x - 1)) == 0); }
+
 inline bool is_aligned(const void* p, size_t bytes) {
-  // bytes must be power-of-two for this to be meaningful
+  if (!is_pow2(bytes)) return false;
   const uintptr_t x = reinterpret_cast<uintptr_t>(p);
   return (x & (static_cast<uintptr_t>(bytes) - 1u)) == 0u;
 }
+
 
 inline bool is_aligned_data(const TensorDesc& t, size_t bytes) {
   return is_aligned(t.data, bytes);
