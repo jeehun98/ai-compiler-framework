@@ -1,4 +1,7 @@
-#include "aicf/backends/cuda/registry/registry.hpp"
+﻿#include "aicf/backends/cuda/registry/registry.hpp"
+
+#include <algorithm>
+#include <vector>
 
 namespace aicf::cuda {
 
@@ -21,7 +24,7 @@ const std::vector<KernelVariant>& KernelRegistry::variants(OpKind kind) const {
 }
 
 aicf::Status Dispatch(const OpCall& call) {
-  // ---- basic validate (v0.1) ----
+  // ---- basic validate (v0.2) ----
   if (call.num_inputs < 0 || call.num_outputs < 0) return aicf::Status::InvalidArgument;
   if (call.num_inputs > 0 && !call.inputs) return aicf::Status::InvalidArgument;
   if (call.num_outputs > 0 && !call.outputs) return aicf::Status::InvalidArgument;
@@ -32,32 +35,41 @@ aicf::Status Dispatch(const OpCall& call) {
   // ---- attrs normalize ----
   const AttrPack empty{};
   const AttrPack* attrs = call.attrs ? call.attrs : &empty;
-  const void* attr_ptr = static_cast<const void*>(attrs); // KernelVariant ABI: void*
+  const void* attr_ptr = static_cast<const void*>(attrs);
 
   // ---- variants lookup ----
   const auto& vars = KernelRegistry::instance().variants(call.kind);
-  if (vars.empty()) return aicf::Status::InvalidArgument;
+  if (vars.empty()) return aicf::Status::NotImplemented;
 
-  // ---- pick first supported ----
+  // ---- choose by priority (desc), tie-breaker: registration order ----
+  // Copy pointers to avoid copying large KernelVariant structs (still small though).
+  std::vector<const KernelVariant*> order;
+  order.reserve(vars.size());
+  for (const auto& v : vars) order.push_back(&v);
+
+  std::stable_sort(order.begin(), order.end(),
+                   [](const KernelVariant* a, const KernelVariant* b) {
+                     return a->priority > b->priority;
+                   });
+
   const KernelVariant* chosen = nullptr;
-  for (const auto& v : vars) {
-    if (!v.supported || !v.launch) continue;
-    if (v.supported(call.inputs, call.num_inputs,
-                    call.outputs, call.num_outputs,
-                    attr_ptr)) {
-      chosen = &v;
+  for (const auto* v : order) {
+    if (!v->supported || !v->launch) continue;
+    if (v->supported(call.inputs, call.num_inputs,
+                     call.outputs, call.num_outputs,
+                     attr_ptr)) {
+      chosen = v;
       break;
     }
   }
   if (!chosen) return aicf::Status::NotImplemented;
 
-  // ---- workspace policy (v0.1: must be 0) ----
+  // ---- workspace policy (keep v0.1 restriction for now) ----
   if (chosen->query_workspace) {
     const size_t ws = chosen->query_workspace(call.inputs, call.num_inputs, attr_ptr);
     if (ws != 0) return aicf::Status::NotImplemented;
   }
 
-  // ---- launch (workspace disabled) ----
   return chosen->launch(
       call.inputs, call.num_inputs,
       call.outputs, call.num_outputs,

@@ -1,5 +1,5 @@
-// src/python_bindings/bindings.cpp
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 #include <torch/extension.h>
 
 #include "common.hpp"
@@ -11,9 +11,11 @@
 
 #include <cuda_runtime.h>
 
-#include <vector>
-#include <string>
+#include <algorithm>
 #include <mutex>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace py = pybind11;
 
@@ -25,10 +27,10 @@ static void ensure_kernels_registered_once() {
   });
 }
 
-// -------------------------
-// AttrPack builder (v0.1)
-// -------------------------
-static void build_attr_pack_v0(
+// AttrPack builder (v0.2)
+// - supports bool / int / float only
+// - SORT BY KEY to ensure deterministic packing
+static void build_attr_pack_v0_2(
     const py::dict& attrs,
     std::vector<std::string>& key_storage,
     std::vector<aicf::cuda::AttrKV>& kv_storage,
@@ -37,17 +39,34 @@ static void build_attr_pack_v0(
   key_storage.clear();
   kv_storage.clear();
 
-  key_storage.reserve((size_t)attrs.size());
-  kv_storage.reserve((size_t)attrs.size());
+  if (attrs.size() == 0) {
+    out_pack.items = nullptr;
+    out_pack.size  = 0;
+    return;
+  }
 
-  for (auto item : attrs) {
-    std::string k = py::cast<std::string>(item.first);
-    key_storage.emplace_back(std::move(k));
+  std::vector<std::pair<std::string, py::object>> items;
+  items.reserve((size_t)attrs.size());
+
+  for (auto it : attrs) {
+    std::string k = py::cast<std::string>(it.first);
+    py::object  v = py::reinterpret_borrow<py::object>(it.second);
+    items.emplace_back(std::move(k), std::move(v));
+  }
+
+  std::sort(items.begin(), items.end(),
+            [](const auto& a, const auto& b) { return a.first < b.first; });
+
+  key_storage.reserve(items.size());
+  kv_storage.reserve(items.size());
+
+  for (auto& kvp : items) {
+    key_storage.emplace_back(std::move(kvp.first));
 
     aicf::cuda::AttrKV kv{};
     kv.key = key_storage.back().c_str();
 
-    const py::handle v = item.second;
+    const py::object& v = kvp.second;
 
     if (py::isinstance<py::bool_>(v)) {
       kv.val.tag = aicf::cuda::AttrTag::kBool;
@@ -60,20 +79,17 @@ static void build_attr_pack_v0(
       kv.val.f32 = py::cast<float>(v);
     } else {
       throw std::runtime_error(
-        "aicf_cuda.op_call: attrs supports only bool/int/float (v0.1)");
+        "aicf_cuda.op_call: attrs supports only bool/int/float (binding v0.2)");
     }
 
     kv_storage.emplace_back(kv);
   }
 
-  out_pack.items = kv_storage.empty() ? nullptr : kv_storage.data();
+  out_pack.items = kv_storage.data();
   out_pack.size  = static_cast<int32_t>(kv_storage.size());
 }
 
-// -------------------------
-// TensorDesc builder
-// -------------------------
-static void build_descs_v0(
+static void build_descs_v0_2(
     const py::sequence& seq,
     std::vector<aicf::cuda::TensorDesc>& out,
     const char* what) {
@@ -83,12 +99,17 @@ static void build_descs_v0(
 
   for (auto h : seq) {
     torch::Tensor t = py::cast<torch::Tensor>(h);
-    aicf_py::check_tensor_v0(t, what);
-    out.emplace_back(aicf_py::to_desc_v0(t));
+    aicf_py::check_tensor_v0_2(t, what);
+    out.emplace_back(aicf_py::to_contig_desc_v0_2(t));
   }
 }
 
-// shared implementation for both overloads
+static std::string op_fail_msg(aicf::cuda::OpKind kind, aicf::Status st) {
+  return std::string("aicf_cuda.op_call failed: kind=")
+       + std::to_string((int)kind)
+       + " status=" + aicf::status_to_string(st);
+}
+
 static void op_call_impl(
     aicf::cuda::OpKind kind,
     const py::sequence& inputs,
@@ -97,21 +118,21 @@ static void op_call_impl(
 
   std::vector<aicf::cuda::TensorDesc> in_descs;
   std::vector<aicf::cuda::TensorDesc> out_descs;
-  build_descs_v0(inputs,  in_descs,  "inputs");
-  build_descs_v0(outputs, out_descs, "outputs");
+  build_descs_v0_2(inputs,  in_descs,  "inputs");
+  build_descs_v0_2(outputs, out_descs, "outputs");
 
   aicf::cuda::AttrPack pack{};
   std::vector<std::string> key_storage;
   std::vector<aicf::cuda::AttrKV> kv_storage;
   const void* attr_ptr = nullptr;
 
-  if (attrs && attrs.size() > 0) {
-    build_attr_pack_v0(attrs, key_storage, kv_storage, pack);
+  if (attrs.size() > 0) {
+    build_attr_pack_v0_2(attrs, key_storage, kv_storage, pack);
     attr_ptr = &pack;
   }
 
-  // v0.1: stream = nullptr (backend decides)
-  const cudaStream_t stream = nullptr;
+  // IMPORTANT: pass PyTorch current stream
+  const cudaStream_t stream = aicf_py::current_cuda_stream();
 
   const aicf::Status st = aicf::cuda::dispatch_v0(
       kind,
@@ -121,26 +142,21 @@ static void op_call_impl(
       stream);
 
   if (!aicf::ok(st)) {
-    throw std::runtime_error(
-      std::string("aicf_cuda.op_call failed: kind=")
-      + std::to_string((int)kind)
-      + " status=" + aicf::status_to_string(st));
+    throw std::runtime_error(op_fail_msg(kind, st));
   }
 }
 
-PYBIND11_MODULE(aicf_cuda, m) {
+PYBIND11_MODULE(_C, m) {
   m.doc() = "AICF CUDA unified bindings (Plan A): op_call";
 
   ensure_kernels_registered_once();
 
-  // expose OpKind enum
   py::enum_<aicf::cuda::OpKind>(m, "OpKind")
       .value("EltwiseAdd",  aicf::cuda::OpKind::EltwiseAdd)
       .value("EltwiseRelu", aicf::cuda::OpKind::EltwiseRelu)
       .value("Gemm",        aicf::cuda::OpKind::Gemm)
       .export_values();
 
-  // op_call(kind: OpKind, inputs, outputs, attrs={})
   m.def(
     "op_call",
     [](aicf::cuda::OpKind kind,
@@ -155,7 +171,6 @@ PYBIND11_MODULE(aicf_cuda, m) {
     py::arg("attrs") = py::dict()
   );
 
-  // optional compatibility overload: op_call(kind: int, ...)
   m.def(
     "op_call",
     [](int kind,

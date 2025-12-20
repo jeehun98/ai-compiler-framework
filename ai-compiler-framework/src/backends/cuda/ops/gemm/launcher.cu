@@ -10,6 +10,14 @@
 #include <aicf/backends/cuda/registry/kernel_variant.hpp>
 #include <aicf/backends/cuda/registry/tensor_desc.hpp>
 
+// common shim
+#include "aicf/backends/cuda/ops/_common/shim/launch.hpp"
+#include "aicf/backends/cuda/ops/_common/shim/status.hpp"
+#include "aicf/backends/cuda/ops/_common/shim/validate.hpp"
+
+// optional (future): attrs helpers
+// #include "aicf/backends/cuda/ops/_common/shim/attrs.hpp"
+
 #include "kernels.cuh"
 
 namespace aicf::cuda {
@@ -20,16 +28,15 @@ namespace aicf::cuda {
 namespace gemm_impl {
 
 __global__ void gemm_f32_naive_kernel(const float* __restrict__ A,
-                                     const float* __restrict__ B,
-                                     float* __restrict__ C,
-                                     int M, int N, int K) {
+                                      const float* __restrict__ B,
+                                      float* __restrict__ C,
+                                      int M, int N, int K) {
   const int row = (int)(blockIdx.y * blockDim.y + threadIdx.y);
   const int col = (int)(blockIdx.x * blockDim.x + threadIdx.x);
   if (row >= M || col >= N) return;
 
   float acc = 0.0f;
   const int a_row_base = row * K;
-  // B is row-major [K,N]
   for (int kk = 0; kk < K; ++kk) {
     acc += A[a_row_base + kk] * B[kk * N + col];
   }
@@ -37,13 +44,6 @@ __global__ void gemm_f32_naive_kernel(const float* __restrict__ A,
 }
 
 } // namespace gemm_impl
-
-// -------------------------
-// helpers
-// -------------------------
-static inline cudaStream_t to_cuda_stream(aicf::Stream s) {
-  return (s.handle == nullptr) ? (cudaStream_t)0 : (cudaStream_t)s.handle;
-}
 
 // -------------------------
 // public API implementation
@@ -57,7 +57,7 @@ aicf::Status gemm_f32(const float* A,
     return aicf::Status::InvalidArgument;
   }
 
-  cudaStream_t s = to_cuda_stream(stream);
+  cudaStream_t s = aicf::cuda::shim::to_cuda_stream(stream);
 
   dim3 block(16, 16, 1);
   dim3 grid((N + block.x - 1) / block.x,
@@ -66,59 +66,23 @@ aicf::Status gemm_f32(const float* A,
 
   gemm_impl::gemm_f32_naive_kernel<<<grid, block, 0, s>>>(A, B, C, M, N, K);
 
-  const cudaError_t e = cudaGetLastError();
-  return (e == cudaSuccess) ? aicf::Status::Ok : aicf::Status::Error;
+  return aicf::cuda::shim::cuda_last_error_to_status();
 }
 
 // -------------------------
-// Registry Variant (no attr) - v0.1 Plan A
+// Registry Variant - v0.2 Plan A (no workspace, no attr semantics yet)
+//
+// Contract:
+//   inputs[0]=A [M,K], inputs[1]=B [K,N], outputs[0]=C [M,N]
+//   binding guarantees: CUDA + contiguous (stride in desc is contiguous-by-contract)
+//
+// This variant supports:
+//   - F32 only
 // -------------------------
-static aicf::Status gemm_variant_launch(
+
+static inline bool gemm_variant_check_2d(
     const TensorDesc* inputs, int num_inputs,
-    TensorDesc* outputs, int num_outputs,
-    const void* /*attr*/,
-    void* /*workspace*/, size_t /*workspace_bytes*/,
-    cudaStream_t stream) {
-
-  if (num_inputs != 2 || num_outputs != 1) return aicf::Status::InvalidArgument;
-
-  const TensorDesc& A = inputs[0];
-  const TensorDesc& B = inputs[1];
-  TensorDesc& C = outputs[0];
-
-  if (A.dtype != DType::kF32 || B.dtype != DType::kF32 || C.dtype != DType::kF32) {
-    return aicf::Status::InvalidArgument;
-  }
-
-  // TensorDesc uses named union r.{rank,ndim}
-  if (A.r.rank != 2 || B.r.rank != 2 || C.r.rank != 2) {
-    return aicf::Status::InvalidArgument;
-  }
-
-  const int M  = (int)A.shape[0];
-  const int K  = (int)A.shape[1];
-  const int K2 = (int)B.shape[0];
-  const int N  = (int)B.shape[1];
-
-  if (M <= 0 || N <= 0 || K <= 0) return aicf::Status::InvalidArgument;
-  if (K2 != K) return aicf::Status::InvalidArgument;
-  if ((int)C.shape[0] != M || (int)C.shape[1] != N) return aicf::Status::InvalidArgument;
-
-  aicf::Stream s{};
-  s.handle = (void*)stream;
-
-  return aicf::cuda::gemm_f32(
-      (const float*)A.data,
-      (const float*)B.data,
-      (float*)C.data,
-      M, N, K,
-      s);
-}
-
-static bool gemm_variant_supported(
-    const TensorDesc* inputs, int num_inputs,
-    const TensorDesc* outputs, int num_outputs,
-    const void* /*attr*/) {
+    const TensorDesc* outputs, int num_outputs) {
 
   if (num_inputs != 2 || num_outputs != 1) return false;
 
@@ -126,29 +90,77 @@ static bool gemm_variant_supported(
   const TensorDesc& B = inputs[1];
   const TensorDesc& C = outputs[0];
 
-  if (A.dtype != DType::kF32 || B.dtype != DType::kF32 || C.dtype != DType::kF32) return false;
-  if (A.r.rank != 2 || B.r.rank != 2 || C.r.rank != 2) return false;
+  if (!aicf::cuda::shim::is_f32_contig_2d(A)) return false;
+  if (!aicf::cuda::shim::is_f32_contig_2d(B)) return false;
+  if (!aicf::cuda::shim::is_f32_contig_2d(C)) return false;
 
-  const int64_t M = A.shape[0];
-  const int64_t K = A.shape[1];
-  if (M <= 0 || K <= 0) return false;
+  if (!aicf::cuda::shim::gemm_shape_ok_2d(A, B, C)) return false;
 
-  if (B.shape[0] != K) return false;
-  const int64_t N = B.shape[1];
-  if (N <= 0) return false;
-
-  if (C.shape[0] != M || C.shape[1] != N) return false;
+  // extra guard
+  if (A.shape[0] <= 0 || A.shape[1] <= 0 || B.shape[1] <= 0) return false;
 
   return true;
+}
+
+static bool gemm_variant_supported(
+    const TensorDesc* inputs, int num_inputs,
+    const TensorDesc* outputs, int num_outputs,
+    const void* /*attr*/) {
+
+  if (!inputs || !outputs) return false;
+  return gemm_variant_check_2d(inputs, num_inputs, outputs, num_outputs);
 }
 
 static size_t gemm_variant_workspace(const TensorDesc*, int, const void*) {
   return 0;
 }
 
+static aicf::Status gemm_variant_launch(
+    const TensorDesc* inputs, int num_inputs,
+    TensorDesc* outputs, int num_outputs,
+    const void* /*attr*/,
+    void* /*workspace*/, size_t /*workspace_bytes*/,
+    cudaStream_t stream) {
+
+  if (!inputs || !outputs) return aicf::Status::InvalidArgument;
+
+  if (!gemm_variant_check_2d(inputs, num_inputs, outputs, num_outputs)) {
+    return aicf::Status::InvalidArgument;
+  }
+
+  const TensorDesc& A = inputs[0];
+  const TensorDesc& B = inputs[1];
+  TensorDesc& C = outputs[0];
+
+  const int M = static_cast<int>(A.shape[0]);
+  const int K = static_cast<int>(A.shape[1]);
+  const int N = static_cast<int>(B.shape[1]);
+
+  // Direct kernel launch on provided cudaStream_t.
+  // (binding should pass PyTorch current stream)
+  dim3 block(16, 16, 1);
+  dim3 grid((N + block.x - 1) / block.x,
+            (M + block.y - 1) / block.y,
+            1);
+
+  gemm_impl::gemm_f32_naive_kernel<<<grid, block, 0, stream>>>(
+      (const float*)A.data,
+      (const float*)B.data,
+      (float*)C.data,
+      M, N, K);
+
+  return aicf::cuda::shim::cuda_last_error_to_status();
+
+  // Alternative (keep public API path):
+  // const aicf::Stream s = aicf::cuda::shim::from_cuda_stream(stream);
+  // return aicf::cuda::gemm_f32((const float*)A.data, (const float*)B.data, (float*)C.data, M, N, K, s);
+}
+
 KernelVariant make_gemm_f32_naive_variant() {
-  KernelVariant v;
+  KernelVariant v{};
   v.name = "gemm_f32_naive";
+  v.priority = 0;   // future: tiled/tc variants > naive
+  v.flags = 0;
   v.launch = gemm_variant_launch;
   v.supported = gemm_variant_supported;
   v.query_workspace = gemm_variant_workspace;

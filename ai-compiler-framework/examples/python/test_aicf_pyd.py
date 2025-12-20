@@ -2,10 +2,10 @@ import os
 import sys
 from pathlib import Path
 
-# 이 파일(examples/python/test_aicf_pyd.py) 기준으로 repo 루트 추정
-REPO_ROOT = Path(__file__).resolve().parents[2]          # examples/python -> repo
+# 이 파일(examples/python/test_aicf_pyd.py) 기준 repo 루트 추정
+REPO_ROOT = Path(__file__).resolve().parents[2]
 PYMOD_DIR  = REPO_ROOT / "build" / "python"              # build/python
-PKG_DIR    = PYMOD_DIR / "aicf_cuda"                     # build/python/aicf_cuda
+PKG_DIR    = PYMOD_DIR / "aicf_cuda"                     # build/python/aicf_cuda (dll/pyd dir)
 
 # 파이썬 모듈 탐색 경로에 build/python 추가
 sys.path.insert(0, str(PYMOD_DIR))
@@ -16,10 +16,8 @@ if os.name == "nt":
     os.add_dll_directory(str(PKG_DIR))
 
 import torch
+import aicf_cuda as aicf
 
-import aicf_cuda.add as aicf_add
-import aicf_cuda.relu as aicf_relu
-import aicf_cuda.gemm as aicf_gemm
 
 def check(name, got, ref, atol=1e-4, rtol=1e-4):
     max_abs = (got - ref).abs().max().item()
@@ -34,22 +32,21 @@ def test_add():
     b = torch.randn(1024, device="cuda", dtype=torch.float32)
     out = torch.empty_like(a)
 
-    ok = aicf_add.add_f32(a, b, out)
-    assert ok
+    # 성공 시 return None, 실패 시 exception
+    aicf.op_call(aicf.OpKind.EltwiseAdd, [a, b], [out], {})
 
     ref = a + b
-    check("add_f32", out, ref)
+    check("EltwiseAdd(f32)", out, ref)
 
 
 def test_relu():
     x = torch.randn(2048, device="cuda", dtype=torch.float32)
     out = torch.empty_like(x)
 
-    ok = aicf_relu.relu_f32(x, out)
-    assert ok
+    aicf.op_call(aicf.OpKind.EltwiseRelu, [x], [out], {})
 
     ref = torch.relu(x)
-    check("relu_f32", out, ref)
+    check("EltwiseRelu(f32)", out, ref)
 
 
 def test_gemm():
@@ -58,11 +55,10 @@ def test_gemm():
     B = torch.randn(K, N, device="cuda", dtype=torch.float32)
     C = torch.empty(M, N, device="cuda", dtype=torch.float32)
 
-    ok = aicf_gemm.gemm_f32(A, B, C)
-    assert ok
+    aicf.op_call(aicf.OpKind.Gemm, [A, B], [C], {})
 
     ref = A @ B
-    check("gemm_f32", C, ref, atol=2e-3, rtol=2e-3)  # naive float 누적이라 오차 조금 허용
+    check("Gemm(f32)", C, ref, atol=2e-3, rtol=2e-3)  # naive float 누적 오차 허용
 
 
 if __name__ == "__main__":

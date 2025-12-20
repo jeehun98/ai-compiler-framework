@@ -1,4 +1,5 @@
 #pragma once
+
 #include <cstdint>
 #include <cstddef>
 
@@ -11,7 +12,7 @@ enum class DType : uint8_t {
   kF16  = 1,
   kBF16 = 2,
 
-  // backward-compatible aliases
+  // backward-compatible aliases (keep)
   F32  = kF32,
   F16  = kF16,
   BF16 = kBF16,
@@ -24,7 +25,7 @@ struct TensorDesc {
   // named union for MSVC compatibility
   union RankND {
     int32_t rank;
-    int32_t ndim;
+    int32_t ndim; // alias field (ok)
     RankND() : rank(0) {}
   } r;
 
@@ -35,9 +36,14 @@ struct TensorDesc {
   int32_t alignment = 0;
   int32_t device = 0;
 
-  // convenience accessors (선택)
+  // Canonical accessor: rank only.
+  // NOTE: keep this name distinct from "ndim" to avoid field/method confusion.
   int32_t rank() const { return r.rank; }
-  int32_t ndim() const { return r.ndim; }
+
+  // v0.2: REMOVE ndim() to avoid accidental "t.ndim" binding-to-method issues.
+  // If you really need it, use t.r.ndim or t.rank().
+  //
+  // int32_t ndim() const { return r.ndim; }  // <-- DO NOT KEEP
 };
 
 } // namespace aicf::cuda

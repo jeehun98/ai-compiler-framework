@@ -1,5 +1,7 @@
 #pragma once
+
 #include <cstddef>
+#include <cstdint>
 #include <cuda_runtime.h>
 
 #include "aicf/core/status.hpp"
@@ -7,12 +9,22 @@
 
 namespace aicf::cuda {
 
-// v0.1 KernelVariant contract:
-// - supported(): "이 variant가 이 call을 처리 가능?" (cheap check)
-// - query_workspace(): v0.1에서는 0만 허용(또는 nullptr)
-// - launch(): workspace는 v0.1에서 항상 nullptr/0로 호출됨
+// v0.2 KernelVariant contract:
+// - supported(): cheap feasibility check (shape/dtype/rank/attrs)
+// - query_workspace(): optional; if present may return >0 (future v0.3+)
+// - launch(): invoked with workspace ptr/bytes; v0.1 policy may still pass nullptr/0
+//
+// Selection policy (suggested):
+// - higher priority wins
+// - if equal priority, registry order is tie-breaker
 struct KernelVariant {
   const char* name = nullptr;
+
+  // higher = earlier selection
+  int priority = 0;
+
+  // reserved for future policies (arch/capture_safe/etc.)
+  uint32_t flags = 0;
 
   aicf::Status (*launch)(
       const TensorDesc* inputs, int num_inputs,
