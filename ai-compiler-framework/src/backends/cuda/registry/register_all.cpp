@@ -12,9 +12,11 @@ KernelVariant make_relu_f32_variant();
 KernelVariant make_gemm_f32_naive_variant();
 
 // Future placeholders (optional)
-// KernelVariant make_add_f16_variant();
-// KernelVariant make_relu_f16_variant();
+KernelVariant make_add_f16_variant();
+KernelVariant make_relu_f16_variant();
 // KernelVariant make_gemm_f16_variant();
+
+KernelVariant make_add_f16_vec2_variant();
 
 }  // namespace aicf::cuda
 
@@ -27,14 +29,21 @@ extern "C" void aicf_cuda_register_all_kernels() {
   {
     auto v = make_add_f32_variant();     // v.priority can be set in factory
     R.register_kernel(OpKind::EltwiseAdd, v);
-    // R.register_kernel(OpKind::EltwiseAdd, make_add_f16_variant());
+    
+    auto v16 = make_add_f16_variant();
+    R.register_kernel(OpKind::EltwiseAdd, v16);
   }
 
   // EltwiseRelu
   {
     auto v = make_relu_f32_variant();
     R.register_kernel(OpKind::EltwiseRelu, v);
-    // R.register_kernel(OpKind::EltwiseRelu, make_relu_f16_variant());
+    
+    auto v16 = make_relu_f16_variant();
+    R.register_kernel(OpKind::EltwiseRelu, make_relu_f16_variant());
+
+    R.register_kernel(OpKind::EltwiseAdd, make_add_f16_vec2_variant());   // half2 (priority=10)
+
   }
 
   // Gemm

@@ -8,4 +8,9 @@ __global__ void add_f32_kernel(const float* __restrict__ a,
                               float* __restrict__ out,
                               int N);
 
+__global__ void add_f16_kernel(const void* __restrict__ a,
+                              const void* __restrict__ b,
+                              void* __restrict__ out,
+                              int N);
+
 } // namespace aicf::cuda::add_impl
