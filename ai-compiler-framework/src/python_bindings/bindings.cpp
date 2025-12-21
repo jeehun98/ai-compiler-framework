@@ -1,6 +1,8 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>   // at::cuda::getDefaultCUDAStream 등
+
 
 #include "common.hpp"
 
@@ -146,6 +148,30 @@ static void op_call_impl(
   }
 }
 
+static inline void cuda_check(cudaError_t e, const char* what) {
+  if (e != cudaSuccess) {
+    throw std::runtime_error(std::string("[CUDA] ") + what + ": " + cudaGetErrorString(e));
+  }
+}
+
+struct CudaGraphState {
+  bool capturing = false;
+  bool captured  = false;
+  cudaGraph_t graph = nullptr;
+  cudaGraphExec_t exec = nullptr;
+
+  void reset() {
+    if (exec)  { cudaGraphExecDestroy(exec); exec = nullptr; }
+    if (graph) { cudaGraphDestroy(graph); graph = nullptr; }
+    capturing = false;
+    captured  = false;
+  }
+};
+
+static CudaGraphState g_graph;
+static std::mutex g_graph_mu;
+
+
 PYBIND11_MODULE(_C, m) {
   m.doc() = "AICF CUDA unified bindings (Plan A): op_call";
 
@@ -184,4 +210,60 @@ PYBIND11_MODULE(_C, m) {
     py::arg("outputs"),
     py::arg("attrs") = py::dict()
   );
+
+    m.def("capture_begin", []() {
+    std::lock_guard<std::mutex> lock(g_graph_mu);
+
+    if (g_graph.capturing) {
+      throw std::runtime_error("capture_begin called while already capturing");
+    }
+
+    // 기존 그래프가 있으면 날림 (원하면 유지 정책으로 바꿔도 됨)
+    g_graph.reset();
+
+    const cudaStream_t stream = aicf_py::current_cuda_stream();
+    // Global 모드가 제일 단순. 필요하면 Relaxed/ThreadLocal로 바꿔도 됨.
+    cuda_check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal),
+               "cudaStreamBeginCapture");
+    g_graph.capturing = true;
+  });
+
+  m.def("capture_end", []() {
+    std::lock_guard<std::mutex> lock(g_graph_mu);
+
+    if (!g_graph.capturing) {
+      throw std::runtime_error("capture_end called but not capturing");
+    }
+
+    const cudaStream_t stream = aicf_py::current_cuda_stream();
+    cudaGraph_t graph = nullptr;
+    cuda_check(cudaStreamEndCapture(stream, &graph), "cudaStreamEndCapture");
+    g_graph.graph = graph;
+
+    cudaGraphExec_t exec = nullptr;
+    // flags는 0으로 시작. 필요하면 cudaGraphInstantiateFlagAutoFreeOnLaunch 등 검토.
+    cuda_check(cudaGraphInstantiate(&exec, g_graph.graph, nullptr, nullptr, 0),
+               "cudaGraphInstantiate");
+    g_graph.exec = exec;
+
+    g_graph.capturing = false;
+    g_graph.captured  = true;
+  });
+
+  m.def("replay", []() {
+    std::lock_guard<std::mutex> lock(g_graph_mu);
+
+    if (!g_graph.captured || !g_graph.exec) {
+      throw std::runtime_error("replay called but no captured graph exists");
+    }
+
+    const cudaStream_t stream = aicf_py::current_cuda_stream();
+    cuda_check(cudaGraphLaunch(g_graph.exec, stream), "cudaGraphLaunch");
+  });
+
+  m.def("capture_reset", []() {
+    std::lock_guard<std::mutex> lock(g_graph_mu);
+    g_graph.reset();
+  });
+
 }
