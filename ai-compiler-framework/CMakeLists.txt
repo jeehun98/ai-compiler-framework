@@ -153,4 +153,5 @@ function(aicf_add_op_pybind target_name source_file output_name)
 endfunction()
 
 # Plan A: single unified module "aicf_cuda" exporting op_call()
-aicf_add_op_pybind(aicf_cuda src/python_bindings/bindings.cpp aicf_cuda)
+aicf_add_op_pybind(aicf_cuda_C src/python_bindings/bindings.cpp _C)
+

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Iterable, Tuple, Any, Optional
+from typing import Iterable, Tuple, Any, Optional, Iterator
 
 import torch
 
@@ -18,6 +18,18 @@ class TrainerConfig:
     mode: str = "eager"      # "eager" | "bench" | "capture"
     log_every: int = 10
 
+    # orchestration
+    warmup_steps: int = 0            # kernel/alloc 안정화 + (실제 학습도 수행)
+    capture_at_step: int = -1        # -1 => warmup 직후 바로 캡처
+    validate_every: int = 0          # 0 => off. capture replay 중 가끔 eager fwd loss 비교
+
+    # profiling
+    profile_step: Optional[int] = None
+    sync_each_step: bool = False
+
+    # capture correctness constraints
+    strict_capture_requires_bind: bool = True
+
 
 class Trainer:
     def __init__(
@@ -31,91 +43,217 @@ class Trainer:
         self.loss_fn = loss_fn
         self.optimizer = optimizer
         self.cfg = cfg or TrainerConfig()
+
+        self._apply_env_overrides()
+
         get_backend().set_mode(self.cfg.mode)
 
-    def train_step(self, batch):
-        x, t = batch
+        # capture mode: replay 후 loss를 읽기 위한 참조(캡처 때 반환된 loss 텐서)
+        self._captured_loss_ref: Optional[Any] = None
 
-        # ✅ grad 초기화 (누적 방지) - leaf 텐서 인플레이스 문제 회피 포함
-        # NOTE: p.data.t.grad = None 이 가장 깔끔함 (zero_도 가능)
+    # -----------------------
+    # Step decomposition
+    # -----------------------
+    def _zero_grad(self) -> None:
+        if hasattr(self.optimizer, "zero_grad"):
+            try:
+                self.optimizer.zero_grad(self.model.parameters())
+                return
+            except TypeError:
+                self.optimizer.zero_grad()
+                return
+
         with torch.no_grad():
             for p in self.model.parameters():
-                if p.data.t.grad is not None:
-                    p.data.t.grad = None
+                if hasattr(p, "data") and hasattr(p.data, "t"):
+                    if p.data.t.grad is not None:
+                        p.data.t.grad = None
 
+    def _forward_loss(self, batch) -> Any:
+        x, t = batch
         y = self.model(x)
         loss = self.loss_fn(y, t)
-
-        # backward
-        loss.t.backward()
-
-        # (디버그용) 첫 파라미터 grad 확인
-        if int(os.environ.get("AICF_DEBUG_GRAD", "0")) == 1:
-            p0 = next(iter(self.model.parameters()))
-            g = p0.data.t.grad
-            print(
-                "grad none?", g is None,
-                "grad mean:", (g.abs().mean().item() if g is not None else None)
-            )
-
-        # optimizer step (Optimizer 내부에서 torch.no_grad() 처리 권장)
-        self.optimizer.step(self.model.parameters())
         return loss
 
-    def fit(self, dataloader: Iterable[Tuple[Any, Any]], steps: int):
+    def _backward_opt(self, loss) -> None:
+        loss.t.backward()
+        self.optimizer.step(self.model.parameters())
+
+    def train_step_eager(self, batch) -> Any:
+        self._zero_grad()
+        loss = self._forward_loss(batch)
+        self._backward_opt(loss)
+        return loss
+
+    @torch.no_grad()
+    def _forward_loss_nograd(self, batch) -> float:
+        loss = self._forward_loss(batch)
+        if hasattr(loss, "t"):
+            return float(loss.t.item())
+        return float(loss.item())
+
+    def _loss_to_float(self, loss_like: Any) -> Optional[float]:
+        if loss_like is None:
+            return None
+        if hasattr(loss_like, "t"):
+            try:
+                return float(loss_like.t.item())
+            except Exception:
+                return None
+        if hasattr(loss_like, "item"):
+            try:
+                return float(loss_like.item())
+            except Exception:
+                return None
+        try:
+            return float(loss_like)
+        except Exception:
+            return None
+
+    # -----------------------
+    # Backend bind shim
+    # -----------------------
+    def _backend_bind_batch(self, backend, batch) -> None:
+        if hasattr(backend, "bind_batch"):
+            backend.bind_batch(batch)
+            return
+        if hasattr(backend, "set_inputs"):
+            backend.set_inputs(batch)
+            return
+
+        if self.cfg.strict_capture_requires_bind:
+            raise RuntimeError(
+                "capture mode requires backend.bind_batch(batch) or backend.set_inputs(batch)."
+            )
+
+    def _maybe_sync(self) -> None:
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+    def _maybe_profile_sync(self, step: int) -> bool:
+        return self.cfg.profile_step is not None and step == self.cfg.profile_step
+
+    # -----------------------
+    # Main loop
+    # -----------------------
+    def fit(self, dataloader: Iterable[Tuple[Any, Any]], steps: int) -> None:
         backend = get_backend()
+        it: Iterator[Tuple[Any, Any]] = iter(dataloader)
 
-        # --- profiling controls (env) ---
-        # AICF_WARMUP_STEPS: 이 step까지는 그냥 굴려서 안정화
-        # AICF_PROFILE_STEP: 특정 step에서만 동기화로 커널을 "한 덩어리"로 모음
-        # AICF_SYNC_EACH_STEP: 디버깅용 강제 동기화
-        warmup_steps = int(os.environ.get("AICF_WARMUP_STEPS", "0"))
-        profile_step_env = os.environ.get("AICF_PROFILE_STEP", None)
-        profile_step = int(profile_step_env) if profile_step_env is not None else None
-        sync_each = int(os.environ.get("AICF_SYNC_EACH_STEP", "0"))
+        # -------- Phase 0: warmup (real training) --------
+        warmup_n = max(0, int(self.cfg.warmup_steps))
+        for step in range(min(warmup_n, steps)):
+            batch = next(it)
 
-        # --- capture mode ---
-        if self.cfg.mode == "capture":
-            sample = next(iter(dataloader))
-            backend.warmup(self.model, sample)
-            backend.capture_begin()
-            self.train_step(sample)  # 캡처 대상
-            backend.capture_end()
+            do_profile = self._maybe_profile_sync(step)
+            if do_profile:
+                self._maybe_sync()
 
-        for step, batch in enumerate(dataloader):
-            if step >= steps:
-                break
+            loss = self.train_step_eager(batch)
 
-            # warmup 구간: 그대로 train_step 수행 후 continue (커널 캐시/알고리즘 선택 안정화)
-            if step < warmup_steps:
-                if self.cfg.mode != "capture":
-                    _ = self.train_step(batch)
-                else:
-                    _ = backend.replay() or None
-                continue
-
-            do_profile = (profile_step is not None and step == profile_step)
-
-            if do_profile and torch.cuda.is_available():
-                torch.cuda.synchronize()
-
-            loss = self.train_step(batch) if self.cfg.mode != "capture" else (backend.replay() or None)
-
-            if do_profile and torch.cuda.is_available():
-                torch.cuda.synchronize()
-
-            if sync_each and torch.cuda.is_available():
-                torch.cuda.synchronize()
+            if do_profile or self.cfg.sync_each_step:
+                self._maybe_sync()
 
             if (step % self.cfg.log_every) == 0:
-                # loss가 Tensor 래퍼일 수도 / None 일 수도 있으니 안전하게 처리
-                if loss is None:
-                    print(f"[step {step}] loss=None")
-                else:
-                    # Tensor 래퍼면 .t.item(), torch tensor면 .item()
-                    val = loss.t.item() if hasattr(loss, "t") else loss.item()
-                    print(f"[step {step}] loss={val:.4f}")
+                v = self._loss_to_float(loss)
+                print(f"[step {step}] loss={v:.4f}" if v is not None else f"[step {step}] loss=None")
 
-                # bench 모드면 op breakdown 같은 것도 출력 가능
+        if warmup_n >= steps:
+            return
+
+        # -------- Phase 1: capture orchestration --------
+        captured = False
+        capture_step = self.cfg.capture_at_step
+        if capture_step < 0:
+            capture_step = warmup_n  # warmup 직후
+
+        current_step = warmup_n
+
+        while current_step < steps:
+            batch = next(it)
+
+            do_profile = self._maybe_profile_sync(current_step)
+            if do_profile:
+                self._maybe_sync()
+
+            # ---- non-capture mode (eager/bench) ----
+            if self.cfg.mode != "capture":
+                loss = self.train_step_eager(batch)
+
+            # ---- capture mode ----
+            else:
+                if (not captured) and (current_step == capture_step):
+                    # 1) backend가 고정 입력 버퍼를 제공하면 반드시 그걸로 캡처
+                    if hasattr(backend, "prepare_capture_batch"):
+                        cap_batch = backend.prepare_capture_batch(batch)
+                    else:
+                        # prepare_capture_batch가 없으면 capture는 의미가 없음(포인터 불일치)
+                        raise RuntimeError(
+                            "capture mode requires backend.prepare_capture_batch(batch) "
+                            "to create fixed input buffers for CUDA Graph."
+                        )
+
+                    if hasattr(backend, "warmup"):
+                        backend.warmup(self.model, cap_batch)
+
+                    # 2) 캡처
+                    backend.capture_begin()
+                    loss = self.train_step_eager(cap_batch)  # ✅ fixed buffers used here
+                    backend.capture_end()
+
+                    # 3) replay 후 loss를 읽기 위한 참조 저장
+                    self._captured_loss_ref = loss
+                    captured = True
+
+                else:
+                    # 4) 매 step: 데이터만 copy_로 갱신 후 replay
+                    self._backend_bind_batch(backend, batch)
+                    _ = backend.replay()
+
+                    # replay가 값을 써넣는 텐서를 읽어옴
+                    loss = self._captured_loss_ref
+
+                # 5) optional validation: replay loss vs eager fwd loss
+                if self.cfg.validate_every and (current_step % self.cfg.validate_every == 0):
+                    eager_loss = self._forward_loss_nograd(batch)
+                    replay_loss = self._loss_to_float(self._captured_loss_ref)
+                    if replay_loss is not None:
+                        diff = abs(replay_loss - eager_loss)
+                        if diff > 1e-3:
+                            print(
+                                f"[validate step {current_step}] "
+                                f"replay_loss={replay_loss:.6f} eager_fwd_loss={eager_loss:.6f} diff={diff:.6f}"
+                            )
+
+            if do_profile or self.cfg.sync_each_step:
+                self._maybe_sync()
+
+            # ---- logging ----
+            if (current_step % self.cfg.log_every) == 0:
+                v = self._loss_to_float(loss)
+                print(f"[step {current_step}] loss={v:.4f}" if v is not None else f"[step {current_step}] loss=None")
+
                 if hasattr(backend, "profiler") and backend.profiler is not None:
                     backend.profiler.maybe_report()
+
+            current_step += 1
+
+    # -----------------------
+    # Env override compatibility
+    # -----------------------
+    def _apply_env_overrides(self) -> None:
+        self.cfg.warmup_steps = int(os.environ.get("AICF_WARMUP_STEPS", str(self.cfg.warmup_steps)))
+
+        profile_step_env = os.environ.get("AICF_PROFILE_STEP", None)
+        if profile_step_env is not None:
+            self.cfg.profile_step = int(profile_step_env)
+
+        self.cfg.sync_each_step = bool(int(os.environ.get("AICF_SYNC_EACH_STEP", "1" if self.cfg.sync_each_step else "0")))
+
+        validate_every_env = os.environ.get("AICF_VALIDATE_EVERY", None)
+        if validate_every_env is not None:
+            self.cfg.validate_every = int(validate_every_env)
+
+        capture_at_env = os.environ.get("AICF_CAPTURE_AT_STEP", None)
+        if capture_at_env is not None:
+            self.cfg.capture_at_step = int(capture_at_env)

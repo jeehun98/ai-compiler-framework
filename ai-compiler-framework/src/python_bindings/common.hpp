@@ -1,94 +1,164 @@
-#pragma once
+﻿#pragma once
+
 #include <torch/extension.h>
+#include <cuda_runtime.h>
+
+// PyTorch current CUDA stream
+#include <c10/cuda/CUDAStream.h>
 
 #include <aicf/core/status.hpp>
-#include <aicf/runtime/stream.hpp>
-
 #include <aicf/backends/cuda/registry/tensor_desc.hpp>
-#include <aicf/backends/cuda/registry/attr_pack.hpp>
+
+#include <cstdint>
+#include <sstream>
+#include <string>
 
 namespace aicf_py {
 
-// -------------------------
-// 1) Tensor validation (v0.1)
-// - CUDA + contiguous + f16/f32 only
-// -------------------------
-inline bool is_cuda_contig(const torch::Tensor& t) {
-  return t.defined() && t.is_cuda() && t.is_contiguous();
+// ============================================================
+// helpers (debug string)
+// ============================================================
+
+inline const char* dtype_name(const torch::Tensor& t) {
+  switch (t.scalar_type()) {
+    case at::kHalf:  return "float16";
+    case at::kFloat: return "float32";
+    default:         return "other";
+  }
 }
 
-inline bool is_cuda_f16_or_f32(const torch::Tensor& t) {
-  const auto st = t.scalar_type();
-  return st == at::kHalf || st == at::kFloat;
+inline std::string tensor_brief(const torch::Tensor& t) {
+  std::ostringstream oss;
+  oss << "defined=" << (t.defined() ? "true" : "false");
+  if (!t.defined()) return oss.str();
+
+  oss << " device=" << (t.is_cuda() ? "cuda" : "cpu");
+  oss << " dtype=" << dtype_name(t);
+  oss << " contig=" << (t.is_contiguous() ? "true" : "false");
+  oss << " rank=" << t.dim();
+  oss << " shape=[";
+  for (int i = 0; i < t.dim(); ++i) {
+    oss << t.size(i);
+    if (i + 1 < t.dim()) oss << ",";
+  }
+  oss << "]";
+  return oss.str();
 }
 
-inline void check_tensor_v0(const torch::Tensor& t, const char* what) {
-  TORCH_CHECK(t.defined(), what, ": undefined tensor");
-  TORCH_CHECK(t.is_cuda(), what, ": must be CUDA tensor");
-  TORCH_CHECK(t.is_contiguous(), what, ": must be contiguous (v0.1)");
-  TORCH_CHECK(is_cuda_f16_or_f32(t), what, ": dtype must be float16 or float32 (v0.1)");
-}
+// ============================================================
+// dtype conversion (strict)
+// ============================================================
 
-// -------------------------
-// 2) TensorDesc conversion (v0.1)
-// - rank <= kMaxRank
-// - stride is treated as contiguous stride by spec
-// - contiguous flag is explicitly set true
-// -------------------------
-inline aicf::cuda::DType to_aicf_dtype(const torch::Tensor& t) {
+inline aicf::cuda::DType to_aicf_dtype_strict(const torch::Tensor& t) {
   if (t.scalar_type() == at::kHalf)  return aicf::cuda::DType::kF16;
   if (t.scalar_type() == at::kFloat) return aicf::cuda::DType::kF32;
-  // should be filtered by check_tensor_v0()
-  return aicf::cuda::DType::kF32;
+  TORCH_CHECK(false, "unsupported dtype. got: ", tensor_brief(t));
 }
 
-inline aicf::cuda::TensorDesc to_desc_v0(const torch::Tensor& t) {
-  aicf::cuda::TensorDesc d{};
-  d.data  = reinterpret_cast<void*>(t.data_ptr());
-  d.dtype = to_aicf_dtype(t);
+// ============================================================
+// v0.2 Tensor validation (contiguous contract)
+// ============================================================
+
+inline void check_tensor_v0_2(const torch::Tensor& t, const char* what) {
+  TORCH_CHECK(t.defined(), what, ": undefined tensor");
+  TORCH_CHECK(t.is_cuda(),
+              what, ": must be CUDA tensor. got: ", tensor_brief(t));
+  TORCH_CHECK(t.is_contiguous(),
+              what, ": must be contiguous (binding v0.2). got: ", tensor_brief(t));
+
+  const auto st = t.scalar_type();
+  TORCH_CHECK(st == at::kHalf || st == at::kFloat,
+              what, ": dtype must be float16 or float32 (binding v0.2). got: ",
+              tensor_brief(t));
 
   const int64_t rank64 = t.dim();
-  TORCH_CHECK(rank64 >= 0 && rank64 <= aicf::cuda::kMaxRank, "rank too large");
+  TORCH_CHECK(rank64 >= 0 && rank64 <= aicf::cuda::kMaxRank,
+              what, ": rank out of range. got rank=", rank64,
+              " (kMaxRank=", aicf::cuda::kMaxRank, ")");
+}
 
-  // TensorDesc uses named union: d.r.rank / d.r.ndim
-  d.r.rank = static_cast<int32_t>(rank64);
+// ============================================================
+// v0.2 TensorDesc conversion (contiguous-only)
+// ============================================================
 
-  for (int i = 0; i < d.r.rank; ++i) {
+inline aicf::cuda::TensorDesc to_contig_desc_v0_2(const torch::Tensor& t) {
+  check_tensor_v0_2(t, "to_contig_desc_v0_2(t)");
+
+  aicf::cuda::TensorDesc d{};
+  d.data  = const_cast<void*>(t.data_ptr());
+  d.dtype = to_aicf_dtype_strict(t);
+
+  const int32_t r = static_cast<int32_t>(t.dim());
+  d.r.rank = r;
+
+  for (int i = 0; i < r; ++i) {
     d.shape[i] = t.size(i);
   }
 
-  // contiguous stride from shape (spec-fixed)
+  // contiguous stride derived from shape
   int64_t st = 1;
-  for (int i = d.r.rank - 1; i >= 0; --i) {
+  for (int i = r - 1; i >= 0; --i) {
     d.stride[i] = st;
     st *= d.shape[i];
   }
 
-  // v0.1 contract: binding only accepts contiguous tensors
   d.contiguous = true;
-
-  // optional metadata (keep defaults)
-  // d.alignment = 0;
-  // d.device = 0;
-
+  d.alignment  = 0;
+  d.device     = 0;
   return d;
 }
 
-// -------------------------
-// 3) Status handling
-// -------------------------
-inline bool status_ok(aicf::Status s) {
-  return aicf::ok(s);
+// ============================================================
+// v0.3 Tensor validation (stride-aware)
+// ============================================================
+
+inline void check_tensor_v0_3(const torch::Tensor& t, const char* what) {
+  TORCH_CHECK(t.defined(), what, ": undefined tensor");
+  TORCH_CHECK(t.is_cuda(),
+              what, ": must be CUDA tensor. got: ", tensor_brief(t));
+
+  const auto st = t.scalar_type();
+  TORCH_CHECK(st == at::kHalf || st == at::kFloat,
+              what, ": dtype must be float16 or float32 (binding v0.3). got: ",
+              tensor_brief(t));
+
+  const int64_t rank64 = t.dim();
+  TORCH_CHECK(rank64 >= 0 && rank64 <= aicf::cuda::kMaxRank,
+              what, ": rank out of range. got rank=", rank64,
+              " (kMaxRank=", aicf::cuda::kMaxRank, ")");
 }
 
-// -------------------------
-// 4) Stream policy (v0.1)
-// - default: nullptr handle (runtime decides current stream)
-// -------------------------
-inline aicf::Stream default_stream() {
-  aicf::Stream s{};
-  s.handle = nullptr;
-  return s;
+// ============================================================
+// v0.3 TensorDesc conversion (stride-aware)
+// ============================================================
+
+inline aicf::cuda::TensorDesc to_desc_v0_3(const torch::Tensor& t) {
+  check_tensor_v0_3(t, "to_desc_v0_3(t)");
+
+  aicf::cuda::TensorDesc d{};
+  d.data  = const_cast<void*>(t.data_ptr());
+  d.dtype = to_aicf_dtype_strict(t);
+
+  const int32_t r = static_cast<int32_t>(t.dim());
+  d.r.rank = r;
+
+  for (int i = 0; i < r; ++i) {
+    d.shape[i]  = t.size(i);
+    d.stride[i] = t.stride(i);         // ✅ real stride
+  }
+
+  d.contiguous = t.is_contiguous();
+  d.alignment  = 0;
+  d.device     = 0;
+  return d;
+}
+
+// ============================================================
+// Stream policy (PyTorch current stream)
+// ============================================================
+
+inline cudaStream_t current_cuda_stream() {
+  return c10::cuda::getCurrentCUDAStream().stream();
 }
 
 } // namespace aicf_py
