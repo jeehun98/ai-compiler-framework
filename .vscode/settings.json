@@ -3,5 +3,5 @@
     "*.cu": "cuda-cpp",
     "*.cuh": "cuda-cpp"
   },
-  "cmake.sourceDirectory": "C:/Users/owner/Desktop/ai-compiler-framework/ai-compiler-framework/ai-compiler-framework"
+  "cmake.sourceDirectory": "C:/Users/as042/OneDrive/Desktop/aicf/ai-compiler-framework/ai-compiler-framework"
 }
