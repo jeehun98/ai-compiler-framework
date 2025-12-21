@@ -101,8 +101,8 @@ static void build_descs_v0_2(
 
   for (auto h : seq) {
     torch::Tensor t = py::cast<torch::Tensor>(h);
-    aicf_py::check_tensor_v0_2(t, what);
-    out.emplace_back(aicf_py::to_contig_desc_v0_2(t));
+    aicf_py::check_tensor_v0_3(t, what);
+    out.emplace_back(aicf_py::to_desc_v0_3(t));
   }
 }
 
@@ -181,6 +181,7 @@ PYBIND11_MODULE(_C, m) {
       .value("EltwiseAdd",  aicf::cuda::OpKind::EltwiseAdd)
       .value("EltwiseRelu", aicf::cuda::OpKind::EltwiseRelu)
       .value("Gemm",        aicf::cuda::OpKind::Gemm)
+      .value("BiasAdd",     aicf::cuda::OpKind::BiasAdd)
       .export_values();
 
   m.def(

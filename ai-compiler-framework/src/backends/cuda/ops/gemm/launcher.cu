@@ -9,6 +9,7 @@
 // registry glue
 #include <aicf/backends/cuda/registry/kernel_variant.hpp>
 #include <aicf/backends/cuda/registry/tensor_desc.hpp>
+#include <aicf/backends/cuda/registry/attr_pack.hpp>   // ✅ NEW: AttrPack
 
 // common shim
 #include "aicf/backends/cuda/ops/_common/shim/launch.hpp"
@@ -19,6 +20,8 @@
 // #include "aicf/backends/cuda/ops/_common/shim/attrs.hpp"
 
 #include "kernels.cuh"
+
+#include <string_view>   // ✅ NEW
 
 namespace aicf::cuda {
 
@@ -39,6 +42,26 @@ __global__ void gemm_f32_naive_kernel(const float* __restrict__ A,
   const int a_row_base = row * K;
   for (int kk = 0; kk < K; ++kk) {
     acc += A[a_row_base + kk] * B[kk * N + col];
+  }
+  C[row * N + col] = acc;
+}
+
+// B is stored as [N,K] with arbitrary stride, and we interpret it as transposed:
+//   logical B^T has shape [K,N], where B^T[kk, col] = B[col, kk]
+__global__ void gemm_f32_naive_transB_kernel(const float* __restrict__ A,
+                                            const float* __restrict__ B, // stored as [N,K]
+                                            float* __restrict__ C,
+                                            int M, int N, int K,
+                                            int64_t B_stride0, int64_t B_stride1) {
+  const int row = (int)(blockIdx.y * blockDim.y + threadIdx.y);
+  const int col = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+  if (row >= M || col >= N) return;
+
+  float acc = 0.0f;
+  const int a_row_base = row * K;
+  for (int kk = 0; kk < K; ++kk) {
+    const float b = B[(int64_t)col * B_stride0 + (int64_t)kk * B_stride1];
+    acc += A[a_row_base + kk] * b;
   }
   C[row * N + col] = acc;
 }
@@ -70,19 +93,51 @@ aicf::Status gemm_f32(const float* A,
 }
 
 // -------------------------
-// Registry Variant - v0.2 Plan A (no workspace, no attr semantics yet)
+// Attr helpers (local, minimal)
+// -------------------------
+static inline bool attr_get_bool(const void* attr, const char* key, bool default_val) {
+  if (!attr) return default_val;
+  const auto* pack = static_cast<const aicf::cuda::AttrPack*>(attr);
+  if (!pack->items || pack->size <= 0) return default_val;
+
+  const std::string_view k(key);
+  for (int i = 0; i < pack->size; ++i) {
+    const auto& kv = pack->items[i];
+    if (!kv.key) continue;
+    if (std::string_view(kv.key) == k) {
+      if (kv.val.tag == aicf::cuda::AttrTag::kBool) return kv.val.b32 != 0;
+      return default_val;
+    }
+  }
+  return default_val;
+}
+
+static inline bool is_f32_2d(const TensorDesc& T) {
+  return (T.dtype == DType::kF32) && (T.rank() == 2);
+}
+
+// -------------------------
+// Registry Variant - v0.3 Plan A (no workspace, minimal attr semantics)
 //
-// Contract:
-//   inputs[0]=A [M,K], inputs[1]=B [K,N], outputs[0]=C [M,N]
-//   binding guarantees: CUDA + contiguous (stride in desc is contiguous-by-contract)
+// Contract (base):
+//   - A: [M,K] contiguous f32
+//   - C: [M,N] contiguous f32
+//   - B:
+//       * transB=false: [K,N] contiguous f32
+//       * transB=true : [N,K] f32 with stride (view ok)
 //
-// This variant supports:
-//   - F32 only
+// Attr semantics (minimal):
+//   - transB : bool (default false)
+//
+// Notes:
+//   - This keeps A/C contig-only for simplicity.
+//   - B is allowed to be non-contiguous only in transB=true path.
 // -------------------------
 
-static inline bool gemm_variant_check_2d(
+static inline bool gemm_variant_check_2d_ex(
     const TensorDesc* inputs, int num_inputs,
-    const TensorDesc* outputs, int num_outputs) {
+    const TensorDesc* outputs, int num_outputs,
+    bool transB) {
 
   if (num_inputs != 2 || num_outputs != 1) return false;
 
@@ -90,14 +145,31 @@ static inline bool gemm_variant_check_2d(
   const TensorDesc& B = inputs[1];
   const TensorDesc& C = outputs[0];
 
+  // A, C: keep strict contig (simple baseline)
   if (!aicf::cuda::shim::is_f32_contig_2d(A)) return false;
-  if (!aicf::cuda::shim::is_f32_contig_2d(B)) return false;
   if (!aicf::cuda::shim::is_f32_contig_2d(C)) return false;
 
-  if (!aicf::cuda::shim::gemm_shape_ok_2d(A, B, C)) return false;
+  // B: f32 2D required
+  if (!is_f32_2d(B)) return false;
 
-  // extra guard
-  if (A.shape[0] <= 0 || A.shape[1] <= 0 || B.shape[1] <= 0) return false;
+  const int64_t M = A.shape[0];
+  const int64_t K = A.shape[1];
+  const int64_t N = C.shape[1];
+
+  if (M <= 0 || N <= 0 || K <= 0) return false;
+  if (C.shape[0] != M) return false;
+
+  if (!transB) {
+    // B must be contiguous [K,N]
+    if (!aicf::cuda::shim::is_f32_contig_2d(B)) return false;
+    if (B.shape[0] != K || B.shape[1] != N) return false;
+  } else {
+    // B is stored as [N,K] with arbitrary stride
+    if (B.shape[0] != N || B.shape[1] != K) return false;
+    if (B.stride[0] <= 0 || B.stride[1] <= 0) return false;
+    // optional: allow contiguous too (works)
+    // no further restriction
+  }
 
   return true;
 }
@@ -105,10 +177,11 @@ static inline bool gemm_variant_check_2d(
 static bool gemm_variant_supported(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs,
-    const void* /*attr*/) {
+    const void* attr) {
 
   if (!inputs || !outputs) return false;
-  return gemm_variant_check_2d(inputs, num_inputs, outputs, num_outputs);
+  const bool transB = attr_get_bool(attr, "transB", false);
+  return gemm_variant_check_2d_ex(inputs, num_inputs, outputs, num_outputs, transB);
 }
 
 static size_t gemm_variant_workspace(const TensorDesc*, int, const void*) {
@@ -118,13 +191,15 @@ static size_t gemm_variant_workspace(const TensorDesc*, int, const void*) {
 static aicf::Status gemm_variant_launch(
     const TensorDesc* inputs, int num_inputs,
     TensorDesc* outputs, int num_outputs,
-    const void* /*attr*/,
+    const void* attr,
     void* /*workspace*/, size_t /*workspace_bytes*/,
     cudaStream_t stream) {
 
   if (!inputs || !outputs) return aicf::Status::InvalidArgument;
 
-  if (!gemm_variant_check_2d(inputs, num_inputs, outputs, num_outputs)) {
+  const bool transB = attr_get_bool(attr, "transB", false);
+
+  if (!gemm_variant_check_2d_ex(inputs, num_inputs, outputs, num_outputs, transB)) {
     return aicf::Status::InvalidArgument;
   }
 
@@ -134,26 +209,30 @@ static aicf::Status gemm_variant_launch(
 
   const int M = static_cast<int>(A.shape[0]);
   const int K = static_cast<int>(A.shape[1]);
-  const int N = static_cast<int>(B.shape[1]);
+  const int N = static_cast<int>(C.shape[1]);
 
-  // Direct kernel launch on provided cudaStream_t.
-  // (binding should pass PyTorch current stream)
   dim3 block(16, 16, 1);
   dim3 grid((N + block.x - 1) / block.x,
             (M + block.y - 1) / block.y,
             1);
 
-  gemm_impl::gemm_f32_naive_kernel<<<grid, block, 0, stream>>>(
-      (const float*)A.data,
-      (const float*)B.data,
-      (float*)C.data,
-      M, N, K);
+  if (!transB) {
+    gemm_impl::gemm_f32_naive_kernel<<<grid, block, 0, stream>>>(
+        (const float*)A.data,
+        (const float*)B.data,
+        (float*)C.data,
+        M, N, K);
+  } else {
+    const int64_t bs0 = B.stride[0];
+    const int64_t bs1 = B.stride[1];
+    gemm_impl::gemm_f32_naive_transB_kernel<<<grid, block, 0, stream>>>(
+        (const float*)A.data,
+        (const float*)B.data,
+        (float*)C.data,
+        M, N, K, bs0, bs1);
+  }
 
   return aicf::cuda::shim::cuda_last_error_to_status();
-
-  // Alternative (keep public API path):
-  // const aicf::Stream s = aicf::cuda::shim::from_cuda_stream(stream);
-  // return aicf::cuda::gemm_f32((const float*)A.data, (const float*)B.data, (float*)C.data, M, N, K, s);
 }
 
 KernelVariant make_gemm_f32_naive_variant() {
