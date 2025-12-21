@@ -32,6 +32,9 @@ extern "C" void aicf_cuda_register_all_kernels() {
     
     auto v16 = make_add_f16_variant();
     R.register_kernel(OpKind::EltwiseAdd, v16);
+
+    R.register_kernel(OpKind::EltwiseAdd, make_add_f16_vec2_variant());   // half2 (priority=10)
+
   }
 
   // EltwiseRelu
@@ -40,9 +43,8 @@ extern "C" void aicf_cuda_register_all_kernels() {
     R.register_kernel(OpKind::EltwiseRelu, v);
     
     auto v16 = make_relu_f16_variant();
-    R.register_kernel(OpKind::EltwiseRelu, make_relu_f16_variant());
+    R.register_kernel(OpKind::EltwiseRelu, v16);
 
-    R.register_kernel(OpKind::EltwiseAdd, make_add_f16_vec2_variant());   // half2 (priority=10)
 
   }
 
