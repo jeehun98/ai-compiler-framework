@@ -31,6 +31,7 @@ add_library(aicf
     src/backends/cuda/ops/add/launcher.cu
     src/backends/cuda/ops/relu/launcher.cu
     src/backends/cuda/ops/gemm/launcher.cu
+    src/backends/cuda/ops/bias_add/launcher.cu
 
     src/backends/cuda/registry/registry.cpp
     src/backends/cuda/registry/register_all.cpp
