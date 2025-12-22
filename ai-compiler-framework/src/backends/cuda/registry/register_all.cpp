@@ -9,7 +9,10 @@ namespace aicf::cuda {
 // Factories (v0.2): set name/priority inside each factory.
 KernelVariant make_add_f32_variant();
 KernelVariant make_relu_f32_variant();
+
 KernelVariant make_gemm_f32_naive_variant();
+KernelVariant make_gemm_f16_tc_wmma_variant();
+
 
 // ✅ NEW: BiasAdd factory
 KernelVariant make_bias_add_f32_variant();
@@ -50,10 +53,15 @@ extern "C" void aicf_cuda_register_all_kernels() {
 
   // Gemm
   {
+    // TC GEMM (fp16 + tensor core) — priority 높음
+    auto v_tc = make_gemm_f16_tc_wmma_variant();
+    R.register_kernel(OpKind::Gemm, v_tc);
+
+    // Fallback: naive f32
     auto v = make_gemm_f32_naive_variant();
     R.register_kernel(OpKind::Gemm, v);
-    // R.register_kernel(OpKind::Gemm, make_gemm_f16_variant());
   }
+
 
   // ✅ NEW: BiasAdd
   {
