@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 # 이 파일(examples/python/test_aicf_pyd.py) 기준 repo 루트 추정
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 PYMOD_DIR  = REPO_ROOT / "build" / "python"              # build/python
 PKG_DIR    = PYMOD_DIR / "aicf_cuda"                     # build/python/aicf_cuda (dll/pyd dir)
 
