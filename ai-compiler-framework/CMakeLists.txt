@@ -32,6 +32,7 @@ add_library(aicf
     src/backends/cuda/ops/relu/launcher.cu
     src/backends/cuda/ops/gemm/launcher.cu
     src/backends/cuda/ops/bias_add/launcher.cu
+    src/backends/cuda/ops/reduce_sum/launcher.cu  # ✅ NEW
 
     src/backends/cuda/registry/registry.cpp
     src/backends/cuda/registry/register_all.cpp
@@ -155,4 +156,3 @@ endfunction()
 
 # Plan A: single unified module "aicf_cuda" exporting op_call()
 aicf_add_op_pybind(aicf_cuda_C src/python_bindings/bindings.cpp _C)
-

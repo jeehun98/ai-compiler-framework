@@ -182,6 +182,7 @@ PYBIND11_MODULE(_C, m) {
       .value("EltwiseRelu", aicf::cuda::OpKind::EltwiseRelu)
       .value("Gemm",        aicf::cuda::OpKind::Gemm)
       .value("BiasAdd",     aicf::cuda::OpKind::BiasAdd)
+      .value("ReduceSum",   aicf::cuda::OpKind::ReduceSum)
       .export_values();
 
   m.def(
