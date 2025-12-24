@@ -20,6 +20,9 @@ KernelVariant make_relu_bwd_f32_variant();
 
 // ✅ NEW: SGD step
 KernelVariant make_sgd_step_f32_variant();
+KernelVariant make_sgd_step_f16_variant();
+KernelVariant make_sgd_step_f16_half2_variant();
+
 
 // Future placeholders
 KernelVariant make_add_f16_variant();
@@ -74,6 +77,9 @@ extern "C" void aicf_cuda_register_all_kernels() {
 
   // ✅ SgdStep
   {
+    R.register_kernel(OpKind::SgdStep, make_sgd_step_f16_half2_variant());
+    R.register_kernel(OpKind::SgdStep, make_sgd_step_f16_variant());
     R.register_kernel(OpKind::SgdStep, make_sgd_step_f32_variant());
   }
+
 }
