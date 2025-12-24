@@ -8,7 +8,9 @@ enum class OpKind : int {
   Gemm        = 2,
   BiasAdd     = 3,
   ReduceSum   = 4,
-  _Count      = 5
+  MseGrad     = 5,
+  ReluBwd     = 6,
+  _Count      = 7
 };
 
 }  // namespace aicf::cuda

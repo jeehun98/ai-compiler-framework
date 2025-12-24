@@ -6,24 +6,23 @@
 
 namespace aicf::cuda {
 
-// Factories (v0.2): set name/priority inside each factory.
+// Factories
 KernelVariant make_add_f32_variant();
 KernelVariant make_relu_f32_variant();
 
 KernelVariant make_gemm_f32_naive_variant();
 KernelVariant make_gemm_f16_tc_wmma_variant();
 
-// BiasAdd
 KernelVariant make_bias_add_f32_variant();
-
-// ✅ NEW: ReduceSum (bias_add backward 용)
 KernelVariant make_reduce_sum_lastdim_f32_variant();
+KernelVariant make_mse_grad_f32_variant();
 
-// Future placeholders (optional)
+// ✅ NEW: ReLU backward
+KernelVariant make_relu_bwd_f32_variant();
+
+// Future placeholders
 KernelVariant make_add_f16_variant();
 KernelVariant make_relu_f16_variant();
-// KernelVariant make_gemm_f16_variant();
-
 KernelVariant make_add_f16_vec2_variant();
 
 }  // namespace aicf::cuda
@@ -35,44 +34,40 @@ extern "C" void aicf_cuda_register_all_kernels() {
 
   // EltwiseAdd
   {
-    auto v = make_add_f32_variant();
-    R.register_kernel(OpKind::EltwiseAdd, v);
-
-    auto v16 = make_add_f16_variant();
-    R.register_kernel(OpKind::EltwiseAdd, v16);
-
-    R.register_kernel(OpKind::EltwiseAdd, make_add_f16_vec2_variant()); // half2 (priority=10)
+    R.register_kernel(OpKind::EltwiseAdd, make_add_f32_variant());
+    R.register_kernel(OpKind::EltwiseAdd, make_add_f16_variant());
+    R.register_kernel(OpKind::EltwiseAdd, make_add_f16_vec2_variant());
   }
 
   // EltwiseRelu
   {
-    auto v = make_relu_f32_variant();
-    R.register_kernel(OpKind::EltwiseRelu, v);
-
-    auto v16 = make_relu_f16_variant();
-    R.register_kernel(OpKind::EltwiseRelu, v16);
+    R.register_kernel(OpKind::EltwiseRelu, make_relu_f32_variant());
+    R.register_kernel(OpKind::EltwiseRelu, make_relu_f16_variant());
   }
 
   // Gemm
   {
-    // TC GEMM (fp16 + tensor core) — priority 높음
-    auto v_tc = make_gemm_f16_tc_wmma_variant();
-    R.register_kernel(OpKind::Gemm, v_tc);
-
-    // Fallback: naive f32
-    auto v = make_gemm_f32_naive_variant();
-    R.register_kernel(OpKind::Gemm, v);
+    R.register_kernel(OpKind::Gemm, make_gemm_f16_tc_wmma_variant());
+    R.register_kernel(OpKind::Gemm, make_gemm_f32_naive_variant());
   }
 
   // BiasAdd
   {
-    auto v = make_bias_add_f32_variant();
-    R.register_kernel(OpKind::BiasAdd, v);
+    R.register_kernel(OpKind::BiasAdd, make_bias_add_f32_variant());
   }
 
-  // ✅ ReduceSum (BiasAdd backward: dB = sum(dZ, axis=0))
+  // ReduceSum
   {
-    auto v = make_reduce_sum_lastdim_f32_variant();
-    R.register_kernel(OpKind::ReduceSum, v);
+    R.register_kernel(OpKind::ReduceSum, make_reduce_sum_lastdim_f32_variant());
+  }
+
+  // MseGrad
+  {
+    R.register_kernel(OpKind::MseGrad, make_mse_grad_f32_variant());
+  }
+
+  // ✅ ReLU backward
+  {
+    R.register_kernel(OpKind::ReluBwd, make_relu_bwd_f32_variant());
   }
 }
