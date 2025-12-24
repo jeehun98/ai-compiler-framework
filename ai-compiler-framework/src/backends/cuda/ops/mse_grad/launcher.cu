@@ -40,8 +40,33 @@ aicf::Status mse_grad_f32(const float* pred,
   const int block = 256;
   const int grid = (int)((numel + block - 1) / block);
 
-  mse_grad_impl::mse_grad_f32_kernel<<<grid, block, 0, s>>>(pred, target, dPred, numel, scale);
+  mse_grad_impl::mse_grad_f32_kernel<<<grid, block, 0, s>>>(
+      pred, target, dPred, numel, scale);
+
   return aicf::cuda::shim::cuda_last_error_to_status();
+}
+
+// -------------------------
+// Attr helpers (binding v0.2 compatible)
+// -------------------------
+static inline bool attr_get_f32(const void* attr, const char* key, float* out_val) {
+  if (!attr || !out_val) return false;
+  const auto* pack = static_cast<const aicf::cuda::AttrPack*>(attr);
+  if (!pack->items || pack->size <= 0) return false;
+
+  const std::string_view k(key);
+  for (int i = 0; i < pack->size; ++i) {
+    const auto& kv = pack->items[i];
+    if (!kv.key) continue;
+    if (std::string_view(kv.key) == k) {
+      if (kv.val.tag == aicf::cuda::AttrTag::kF32) {
+        *out_val = kv.val.f32;
+        return true;
+      }
+      return false;
+    }
+  }
+  return false;
 }
 
 // -------------------------
@@ -92,6 +117,7 @@ static inline bool mse_grad_check(
     const TensorDesc* outputs, int num_outputs) {
 
   if (num_inputs != 2 || num_outputs != 1) return false;
+
   const TensorDesc& P = inputs[0];
   const TensorDesc& T = inputs[1];
   const TensorDesc& G = outputs[0];
@@ -141,12 +167,8 @@ static aicf::Status mse_grad_launch(
   if (!compute_numel(P, &numel)) return aicf::Status::InvalidArgument;
 
   float scale = 0.0f;
-  bool has_scale = false;
+  const bool has_scale = attr_get_f32(attr, "scale", &scale);
 
-  if (attr) {
-    const auto* pack = static_cast<const aicf::cuda::AttrPack*>(attr);
-    has_scale = pack->get_f32("scale", &scale);
-  }
   if (!has_scale) {
     scale = 2.0f / (float)numel;
   }
