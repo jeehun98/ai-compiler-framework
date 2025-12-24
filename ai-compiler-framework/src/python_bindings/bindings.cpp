@@ -185,6 +185,7 @@ PYBIND11_MODULE(_C, m) {
       .value("ReduceSum",   aicf::cuda::OpKind::ReduceSum)
       .value("MseGrad",     aicf::cuda::OpKind::MseGrad)
       .value("ReluBwd",     aicf::cuda::OpKind::ReluBwd)
+      .value("SgdStep",     aicf::cuda::OpKind::SgdStep)
       .export_values();
 
   m.def(

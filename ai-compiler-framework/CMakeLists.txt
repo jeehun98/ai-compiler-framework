@@ -35,6 +35,7 @@ add_library(aicf
     src/backends/cuda/ops/reduce_sum/launcher.cu  
     src/backends/cuda/ops/mse_grad/launcher.cu
     src/backends/cuda/ops/relu_bwd/launcher.cu
+    src/backends/cuda/ops/sgd_step/launcher.cu
 
 
     src/backends/cuda/registry/registry.cpp

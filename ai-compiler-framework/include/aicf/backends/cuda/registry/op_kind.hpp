@@ -10,7 +10,8 @@ enum class OpKind : int {
   ReduceSum   = 4,
   MseGrad     = 5,
   ReluBwd     = 6,
-  _Count      = 7
+  SgdStep     = 7,
+  _Count      = 8
 };
 
 }  // namespace aicf::cuda

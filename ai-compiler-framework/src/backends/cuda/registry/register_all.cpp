@@ -16,9 +16,10 @@ KernelVariant make_gemm_f16_tc_wmma_variant();
 KernelVariant make_bias_add_f32_variant();
 KernelVariant make_reduce_sum_lastdim_f32_variant();
 KernelVariant make_mse_grad_f32_variant();
-
-// ✅ NEW: ReLU backward
 KernelVariant make_relu_bwd_f32_variant();
+
+// ✅ NEW: SGD step
+KernelVariant make_sgd_step_f32_variant();
 
 // Future placeholders
 KernelVariant make_add_f16_variant();
@@ -66,8 +67,13 @@ extern "C" void aicf_cuda_register_all_kernels() {
     R.register_kernel(OpKind::MseGrad, make_mse_grad_f32_variant());
   }
 
-  // ✅ ReLU backward
+  // ReluBwd
   {
     R.register_kernel(OpKind::ReluBwd, make_relu_bwd_f32_variant());
+  }
+
+  // ✅ SgdStep
+  {
+    R.register_kernel(OpKind::SgdStep, make_sgd_step_f32_variant());
   }
 }
