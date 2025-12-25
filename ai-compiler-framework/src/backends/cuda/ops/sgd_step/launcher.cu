@@ -1,5 +1,6 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cstdint>
 
 #include <aicf/core/status.hpp>
 
@@ -13,10 +14,57 @@
 
 #include "kernels.cuh"
 
-#include <cstdint>
 #include <string_view>
 
 namespace aicf::cuda {
+
+// -------------------------
+// kernels (definitions live here)
+// -------------------------
+namespace sgd_step_impl {
+
+__global__ void sgd_step_f32_kernel(float* __restrict__ param,
+                                   const float* __restrict__ grad,
+                                   int64_t numel,
+                                   float lr) {
+  int64_t i = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
+  if (i >= numel) return;
+  param[i] = param[i] - lr * grad[i];
+}
+
+__global__ void sgd_step_f16_kernel(__half* __restrict__ param,
+                                   const __half* __restrict__ grad,
+                                   int64_t numel,
+                                   float lr) {
+  int64_t i = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
+  if (i >= numel) return;
+
+  float p = __half2float(param[i]);
+  float g = __half2float(grad[i]);
+  p -= lr * g;
+  param[i] = __float2half_rn(p);
+}
+
+__global__ void sgd_step_f16_half2_kernel(__half2* __restrict__ param2,
+                                         const __half2* __restrict__ grad2,
+                                         int64_t numel2,
+                                         float lr) {
+  int64_t i = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
+  if (i >= numel2) return;
+
+  __half2 p2 = param2[i];
+  __half2 g2 = grad2[i];
+
+  float2 pf = __half22float2(p2);
+  float2 gf = __half22float2(g2);
+
+  pf.x -= lr * gf.x;
+  pf.y -= lr * gf.y;
+
+  param2[i] = __floats2half2_rn(pf.x, pf.y);
+}
+
+} // namespace sgd_step_impl
 
 // -------------------------
 // Attr helper: lr (float)
@@ -66,19 +114,20 @@ static inline bool ptr_aligned_4(const void* p) {
   return ((uintptr_t)p & 0x3u) == 0;
 }
 
+static inline int clamp_grid_1d(int blocks) {
+  return (blocks > 65535) ? 65535 : blocks;
+}
+
+static size_t sgd_step_workspace(const TensorDesc*, int, const void*) { return 0; }
+
 // ============================================================================
 // Variant: SGDStep f32
-// Contract:
-//   inputs[0]=param f32 contig any-rank>=1
-//   inputs[1]=grad  f32 contig same shape
-//   outputs[0]=param_out f32 contig same shape (in-place OK)
-// Attr:
-//   lr : f32 (optional)
 // ============================================================================
 static inline bool sgd_step_check_f32(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs) {
 
+  if (!inputs || !outputs) return false;
   if (num_inputs != 2 || num_outputs != 1) return false;
 
   const TensorDesc& P = inputs[0];
@@ -91,21 +140,14 @@ static inline bool sgd_step_check_f32(
 
   int64_t numel = 0;
   if (!compute_numel(P, &numel)) return false;
-  if (numel <= 0) return false;
-  return true;
+  return (numel > 0);
 }
 
 static bool sgd_step_supported_f32(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs,
     const void* /*attr*/) {
-
-  if (!inputs || !outputs) return false;
   return sgd_step_check_f32(inputs, num_inputs, outputs, num_outputs);
-}
-
-static size_t sgd_step_workspace(const TensorDesc*, int, const void*) {
-  return 0;
 }
 
 static aicf::Status sgd_step_launch_f32(
@@ -115,29 +157,27 @@ static aicf::Status sgd_step_launch_f32(
     void*, size_t,
     cudaStream_t stream) {
 
-  if (!inputs || !outputs) return aicf::Status::InvalidArgument;
   if (!sgd_step_check_f32(inputs, num_inputs, outputs, num_outputs)) {
     return aicf::Status::InvalidArgument;
   }
 
-  const TensorDesc& P = inputs[0];
   const TensorDesc& G = inputs[1];
   TensorDesc& O = outputs[0];
 
+  // optional safety: forbid alias grad==out
+  if (O.data == G.data) return aicf::Status::InvalidArgument;
+
   int64_t numel = 0;
-  (void)compute_numel(P, &numel);
+  (void)compute_numel(outputs[0], &numel);
 
   const float lr = attr_get_lr_f32(attr, 1e-3f);
 
-  const int block = 256;
-  const int grid  = (int)((numel + block - 1) / block);
+  constexpr int kThreads = 256;
+  int blocks = (int)((numel + kThreads - 1) / kThreads);
+  blocks = clamp_grid_1d(blocks);
 
-  // in-place update: write to O (can be same as P)
-  sgd_step_impl::sgd_step_f32_kernel<<<grid, block, 0, stream>>>(
-      (float*)O.data,
-      (const float*)G.data,
-      numel,
-      lr);
+  sgd_step_impl::sgd_step_f32_kernel<<<blocks, kThreads, 0, stream>>>(
+      (float*)O.data, (const float*)G.data, numel, lr);
 
   return aicf::cuda::shim::cuda_last_error_to_status();
 }
@@ -155,16 +195,12 @@ KernelVariant make_sgd_step_f32_variant() {
 
 // ============================================================================
 // Variant: SGDStep f16 scalar
-// Contract:
-//   inputs[0]=param f16 contig any-rank>=1
-//   inputs[1]=grad  f16 contig same shape
-//   outputs[0]=param_out f16 contig same shape (in-place OK)
-// Attr: lr f32 (optional)
 // ============================================================================
 static inline bool sgd_step_check_f16(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs) {
 
+  if (!inputs || !outputs) return false;
   if (num_inputs != 2 || num_outputs != 1) return false;
 
   const TensorDesc& P = inputs[0];
@@ -177,16 +213,13 @@ static inline bool sgd_step_check_f16(
 
   int64_t numel = 0;
   if (!compute_numel(P, &numel)) return false;
-  if (numel <= 0) return false;
-  return true;
+  return (numel > 0);
 }
 
 static bool sgd_step_supported_f16(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs,
     const void* /*attr*/) {
-
-  if (!inputs || !outputs) return false;
   return sgd_step_check_f16(inputs, num_inputs, outputs, num_outputs);
 }
 
@@ -197,28 +230,26 @@ static aicf::Status sgd_step_launch_f16(
     void*, size_t,
     cudaStream_t stream) {
 
-  if (!inputs || !outputs) return aicf::Status::InvalidArgument;
   if (!sgd_step_check_f16(inputs, num_inputs, outputs, num_outputs)) {
     return aicf::Status::InvalidArgument;
   }
 
-  const TensorDesc& P = inputs[0];
   const TensorDesc& G = inputs[1];
   TensorDesc& O = outputs[0];
 
+  if (O.data == G.data) return aicf::Status::InvalidArgument;
+
   int64_t numel = 0;
-  (void)compute_numel(P, &numel);
+  (void)compute_numel(outputs[0], &numel);
 
   const float lr = attr_get_lr_f32(attr, 1e-3f);
 
-  const int block = 256;
-  const int grid  = (int)((numel + block - 1) / block);
+  constexpr int kThreads = 256;
+  int blocks = (int)((numel + kThreads - 1) / kThreads);
+  blocks = clamp_grid_1d(blocks);
 
-  sgd_step_impl::sgd_step_f16_kernel<<<grid, block, 0, stream>>>(
-      (__half*)O.data,
-      (const __half*)G.data,
-      numel,
-      lr);
+  sgd_step_impl::sgd_step_f16_kernel<<<blocks, kThreads, 0, stream>>>(
+      (__half*)O.data, (const __half*)G.data, numel, lr);
 
   return aicf::cuda::shim::cuda_last_error_to_status();
 }
@@ -226,7 +257,7 @@ static aicf::Status sgd_step_launch_f16(
 KernelVariant make_sgd_step_f16_variant() {
   KernelVariant v{};
   v.name = "sgd_step_f16";
-  v.priority = 10; // prefer f16 over f32 when both could match (they won't, dtype differs)
+  v.priority = 10; // scalar f16
   v.flags = 0;
   v.launch = sgd_step_launch_f16;
   v.supported = sgd_step_supported_f16;
@@ -236,9 +267,6 @@ KernelVariant make_sgd_step_f16_variant() {
 
 // ============================================================================
 // Variant: SGDStep f16 half2
-// Extra constraints:
-//   - numel even
-//   - param/grad/out pointers 4B aligned
 // ============================================================================
 static inline bool sgd_step_check_f16_half2(
     const TensorDesc* inputs, int num_inputs,
@@ -265,8 +293,6 @@ static bool sgd_step_supported_f16_half2(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs,
     const void* /*attr*/) {
-
-  if (!inputs || !outputs) return false;
   return sgd_step_check_f16_half2(inputs, num_inputs, outputs, num_outputs);
 }
 
@@ -277,29 +303,27 @@ static aicf::Status sgd_step_launch_f16_half2(
     void*, size_t,
     cudaStream_t stream) {
 
-  if (!inputs || !outputs) return aicf::Status::InvalidArgument;
   if (!sgd_step_check_f16_half2(inputs, num_inputs, outputs, num_outputs)) {
     return aicf::Status::InvalidArgument;
   }
 
-  const TensorDesc& P = inputs[0];
   const TensorDesc& G = inputs[1];
   TensorDesc& O = outputs[0];
 
+  if (O.data == G.data) return aicf::Status::InvalidArgument;
+
   int64_t numel = 0;
-  (void)compute_numel(P, &numel);
+  (void)compute_numel(outputs[0], &numel);
   const int64_t numel2 = numel >> 1;
 
   const float lr = attr_get_lr_f32(attr, 1e-3f);
 
-  const int block = 256;
-  const int grid  = (int)((numel2 + block - 1) / block);
+  constexpr int kThreads = 256;
+  int blocks = (int)((numel2 + kThreads - 1) / kThreads);
+  blocks = clamp_grid_1d(blocks);
 
-  sgd_step_impl::sgd_step_f16_half2_kernel<<<grid, block, 0, stream>>>(
-      (__half2*)O.data,
-      (const __half2*)G.data,
-      numel2,
-      lr);
+  sgd_step_impl::sgd_step_f16_half2_kernel<<<blocks, kThreads, 0, stream>>>(
+      (__half2*)O.data, (const __half2*)G.data, numel2, lr);
 
   return aicf::cuda::shim::cuda_last_error_to_status();
 }

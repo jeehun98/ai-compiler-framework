@@ -1,25 +1,26 @@
 #pragma once
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
+#include <cstdint>
 
 namespace aicf::cuda::reduce_sum_impl {
 
-// Each thread computes one column (j) reduction over M rows.
-// dY is row-major [M,N], contiguous.
-__global__ void reduce_sum_lastdim_f32_kernel(const float* __restrict__ dY,
-                                             float* __restrict__ dB,
-                                             int M, int N) {
-  const int col = (int)(blockIdx.x * blockDim.x + threadIdx.x);
-  if (col >= N) return;
+__global__ void reduce_sum_lastdim_f32_kernel(
+    const float* __restrict__ dY,
+    float* __restrict__ dB,
+    int M, int N);
 
-  float acc = 0.0f;
+// F16 input -> F32 output
+__global__ void reduce_sum_lastdim_f16_kernel(
+    const __half* __restrict__ dY,
+    float* __restrict__ dB,
+    int M, int N);
 
-  // Sum over rows
-  // dY[row*N + col]
-  for (int row = 0; row < M; ++row) {
-    acc += dY[row * N + col];
-  }
+// half2 path: N even, dY 4B aligned
+// N2 = N/2, dB is still float[N]
+__global__ void reduce_sum_lastdim_f16x2_kernel(
+    const __half2* __restrict__ dY,
+    float* __restrict__ dB,
+    int M, int N2);
 
-  dB[col] = acc;
-}
-
-} // namespace aicf::cuda::reduce_sum_impl
+} // namespace

@@ -1,357 +1,317 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
-from typing import Iterable, Tuple, Any, Optional, Iterator
+from typing import Any, Iterable, Optional, Dict, List
 
 import torch
 
 from .backend import get_backend
-from .modules.base import Module
-from .optim.base import Optimizer
-from .losses.base import Loss
-
-# AICF autograd minimal engine
+from .tensor import Tensor
+from .modules.base import Parameter  # (남겨둬도 됨; 이제 의존하지 않음)
 from . import autograd as AG
 
 
-def _unwrap_t(x: Any) -> torch.Tensor:
+# -----------------------------
+# helpers
+# -----------------------------
+def _to_torch(x: Any) -> torch.Tensor:
     """
-    Safe unwrap:
-      - aicf_fw.tensor.Tensor -> torch.Tensor via .t
-      - torch.Tensor -> itself
-    Avoids the 'torch.Tensor.t' method confusion.
+    Accept:
+      - torch.Tensor
+      - aicf_fw.tensor.Tensor (wrapper) having attribute .t which is torch.Tensor
+      - any object with attribute .t that is torch.Tensor
     """
     if isinstance(x, torch.Tensor):
         return x
-    # our wrapper Tensor has attribute 't' which is torch.Tensor
-    if hasattr(x, "t"):
-        tt = getattr(x, "t")
-        if isinstance(tt, torch.Tensor):
-            return tt
-    raise TypeError(f"expected aicf_fw.Tensor or torch.Tensor, got {type(x)}")
+    if isinstance(x, Tensor):
+        return x.t
+    if hasattr(x, "t") and isinstance(getattr(x, "t"), torch.Tensor):
+        return getattr(x, "t")
+    raise TypeError(f"expected torch.Tensor or Tensor wrapper, got {type(x)}")
 
 
+def _contig(x: Any) -> torch.Tensor:
+    """
+    Always return contiguous torch.Tensor.
+    Handles both wrapper Tensor and torch.Tensor.
+    """
+    x_t = _to_torch(x)
+    return x_t if x_t.is_contiguous() else x_t.contiguous()
+
+
+def _require_cuda(x: Any, what: str) -> None:
+    x_t = _to_torch(x)
+    if not x_t.is_cuda:
+        raise RuntimeError(f"{what}: CUDA tensor required")
+
+
+def _same_shape(a: Any, b: Any, what: str) -> None:
+    a_t = _to_torch(a)
+    b_t = _to_torch(b)
+    if tuple(a_t.shape) != tuple(b_t.shape):
+        raise RuntimeError(f"{what}: shape mismatch {tuple(a_t.shape)} vs {tuple(b_t.shape)}")
+
+
+# -----------------------------
+# config
+# -----------------------------
 @dataclass
 class TrainerConfig:
-    mode: str = "eager"      # "eager" | "bench" | "capture"
+    lr: float = 1e-3
+    mode: str = "eager"     # "eager" | "bench" | "capture"
     log_every: int = 10
 
-    # orchestration
-    warmup_steps: int = 0            # kernel/alloc 안정화 + (실제 학습도 수행)
-    capture_at_step: int = -1        # -1 => warmup 직후 바로 캡처
-    validate_every: int = 0          # 0 => off. capture replay 중 가끔 eager fwd loss 비교
 
-    # profiling
-    profile_step: Optional[int] = None
-    sync_each_step: bool = False
-
-    # capture correctness constraints
-    strict_capture_requires_bind: bool = True
-
-
+# -----------------------------
+# trainer
+# -----------------------------
 class Trainer:
-    def __init__(
-        self,
-        model: Module,
-        loss_fn: Loss,
-        optimizer: Optimizer,
-        cfg: Optional[TrainerConfig] = None,
-    ) -> None:
+    def __init__(self, model: Any, optim: Any = None, cfg: Optional[TrainerConfig] = None) -> None:
         self.model = model
-        self.loss_fn = loss_fn
-        self.optimizer = optimizer
+        self.optim = optim
         self.cfg = cfg or TrainerConfig()
 
-        self._apply_env_overrides()
-        get_backend().set_mode(self.cfg.mode)
+        self.backend = get_backend()
+        self._cache: Dict[str, torch.Tensor] = {}
 
-        # capture mode: replay 후 loss를 읽기 위한 참조(캡처 때 반환된 loss 텐서)
-        self._captured_loss_ref: Optional[Any] = None
+    # -----------------------------
+    # parameter discovery (robust)
+    # -----------------------------
+    def _is_param_like(self, obj: Any) -> bool:
+        """
+        Parameter-like object:
+          - has attribute .data
+          - obj.data can be converted to torch.Tensor via _to_torch
+        This avoids relying on a single Parameter class, which can differ across modules/bindings.
+        """
+        if obj is None or not hasattr(obj, "data"):
+            return False
+        try:
+            _ = _to_torch(getattr(obj, "data"))
+            return True
+        except Exception:
+            return False
 
-        # store last forward (needed for manual backward)
-        self._last_y: Optional[Any] = None
-        self._last_t: Optional[Any] = None
-
-    # -----------------------
-    # Step decomposition
-    # -----------------------
-    def _zero_grad(self) -> None:
-        # prefer optimizer.zero_grad if exists
-        if hasattr(self.optimizer, "zero_grad"):
+    def _parameters(self) -> Iterable[Any]:
+        """
+        Robust parameter collection:
+          1) prefer model.parameters() if it exists and returns usable param-like objects
+          2) otherwise recursively walk object graph and collect param-like objects
+        """
+        # 1) prefer explicit parameters()
+        if hasattr(self.model, "parameters") and callable(self.model.parameters):
             try:
-                self.optimizer.zero_grad(self.model.parameters())
+                ps = list(self.model.parameters())
+                ps2 = [p for p in ps if self._is_param_like(p)]
+                if len(ps2) > 0:
+                    return ps2
+            except Exception:
+                pass
+
+        found: List[Any] = []
+        visited: set[int] = set()
+
+        def walk(obj: Any):
+            if obj is None:
                 return
-            except TypeError:
-                self.optimizer.zero_grad()
+            oid = id(obj)
+            if oid in visited:
+                return
+            visited.add(oid)
+
+            if self._is_param_like(obj):
+                found.append(obj)
                 return
 
-        # fallback: set .grad=None on torch tensors
-        with torch.no_grad():
-            for p in self.model.parameters():
-                if hasattr(p, "data") and hasattr(p.data, "t"):
-                    tt = p.data.t
-                    if isinstance(tt, torch.Tensor) and tt.grad is not None:
-                        tt.grad = None
+            # common containers
+            if isinstance(obj, dict):
+                for v in obj.values():
+                    walk(v)
+                return
+            if isinstance(obj, (list, tuple, set)):
+                for v in obj:
+                    walk(v)
+                return
 
-    def _forward_loss(self, batch) -> Any:
-        x, t = batch
-        AG.tape().clear()
-        y = self.model(x)
-        self._last_y = y
-        self._last_t = t
-        loss = self.loss_fn(y, t)
-        return loss
+            # generic objects
+            if hasattr(obj, "__dict__"):
+                for v in obj.__dict__.values():
+                    walk(v)
 
-    def _backward_opt(self, loss) -> None:
-        if os.environ.get("AICF_BACKEND", "torch").lower() != "aicf":
-            raise RuntimeError("Manual AICF backward requires AICF_BACKEND=aicf")
+        walk(self.model)
+        return found
 
-        if self._last_y is None or self._last_t is None:
-            raise RuntimeError("missing last forward y/t")
+    # -----------------------------
+    # backward starting from dy
+    # -----------------------------
+    def _backward_from_dy(self, dy: Any) -> None:
+        """
+        dy: gradient wrt model output
+        This function:
+          - reads recorded ops from AG.tape()
+          - propagates gradients backward
+          - writes p.grad for parameters
+          - applies SGD update (torch fallback)
+        """
+        g = _contig(dy)
+        _require_cuda(g, "dy")
 
-        # unwrap y,t safely
-        Y = _unwrap_t(self._last_y).contiguous()
-        T = _unwrap_t(self._last_t).contiguous()
+        ops = AG.tape().ops
 
-        # dY from mse grad (kernel default scale = 2/numel unless scale attr used)
-        dy = AG.aicf_mse_grad(Y, T)  # torch.Tensor
-
-        # reverse over recorded ops
-        for op in reversed(AG.tape().ops):
+        for op in reversed(ops):
             if op.kind == "relu":
-                # op.x should be torch.Tensor (recommended) or Tensor wrapper
-                X_relu = _unwrap_t(op.x).contiguous()
-                dy = AG.aicf_relu_bwd(dy.contiguous(), X_relu)
+                x = _contig(op.x)
+                _require_cuda(x, "relu.x")
+
+                # keep dtype consistent if relu_bwd expects same dtype
+                if g.dtype != x.dtype:
+                    x = x.to(dtype=g.dtype)
+
+                g = AG.aicf_relu_bwd(g, x)
+                g = _contig(g)
 
             elif op.kind == "linear":
-                # op.x: input activation, op.w_param/op.b_param: parameters
-                X = _unwrap_t(op.x).contiguous()          # [B,in]
-                dY = dy.contiguous()                      # [B,out]
+                x = _contig(op.x)
+                w = _contig(op.w_param.data)
+                _require_cuda(x, "linear.x")
+                _require_cuda(w, "linear.w")
 
-                W_raw = op.w_param.data.t
-                if not isinstance(W_raw, torch.Tensor):
-                    raise RuntimeError("linear weight storage must be torch.Tensor")
-                W_raw = W_raw.contiguous()
+                # ---- force fp32 backward GEMM (for stability + kernel availability) ----
+                g32 = g.float() if g.dtype != torch.float32 else g
+                x32 = x.float() if x.dtype != torch.float32 else x
+                w32 = w.float() if w.dtype != torch.float32 else w
 
-                if W_raw.ndim != 2:
-                    raise RuntimeError(f"linear weight must be 2D, got {W_raw.ndim}D")
+                B = g32.shape[0]
+                Dout = g32.shape[1]
+                Din = x32.shape[1]
 
-                B = dY.shape[0]
-                in_feat = X.shape[1]
-                out_feat = dY.shape[1]
+                # ---- dx = g @ w ----
+                dx = torch.empty((B, Din), device=g32.device, dtype=torch.float32).contiguous()
+                AG._C.op_call(
+                    AG._C.OpKind.Gemm,
+                    [g32.contiguous(), w32.contiguous()],
+                    [dx],
+                    {"transA": False, "transB": False},
+                )
 
-                # Determine original layout: [out,in] vs [in,out]
-                if tuple(W_raw.shape) == (out_feat, in_feat):
-                    W_used = W_raw
-                    w_layout = "out_in"
-                elif tuple(W_raw.shape) == (in_feat, out_feat):
-                    W_used = W_raw.t().contiguous()
-                    w_layout = "in_out"
-                else:
-                    raise RuntimeError(
-                        f"weight shape mismatch: got {tuple(W_raw.shape)}, "
-                        f"expected {(out_feat, in_feat)} or {(in_feat, out_feat)}"
-                    )
+                # ---- dW = g^T @ x ----
+                gT = g32.t().contiguous()
+                dW = torch.empty((Dout, Din), device=g32.device, dtype=torch.float32).contiguous()
+                AG._C.op_call(
+                    AG._C.OpKind.Gemm,
+                    [gT, x32.contiguous()],
+                    [dW],
+                    {"transA": False, "transB": False},
+                )
 
-                # dX = dY @ W_used -> [B,in]
-                dx = AG.aicf_gemm(dY, W_used, out_shape=(B, in_feat))
+                # ---- db = sum(g, axis=0) ----
+                if getattr(op, "b_param", None) is not None and op.b_param is not None:
+                    db = g32.sum(dim=0).contiguous()
+                    op.b_param.grad = db
 
-                # dW_used = dY^T @ X -> [out,in]
-                dW_used = AG.aicf_gemm(dY.t().contiguous(), X, out_shape=(out_feat, in_feat))
-
-                # store grad in ORIGINAL layout
-                if w_layout == "out_in":
-                    op.w_param.data.t.grad = dW_used
-                else:
-                    op.w_param.data.t.grad = dW_used.t().contiguous()
-
-                # db = sum over batch -> [out]
-                if op.b_param is not None:
-                    # ReduceSum kernel currently supports last-dim reduction:
-                    # so pass dY^T and axis=-1 -> [out]
-                    dY_T = dY.t().contiguous()  # [out,B]
-                    db = AG.aicf_reduce_sum(dY.contiguous(), axis=-1, out_shape=(out_feat,))
-                    op.b_param.data.t.grad = db
-
-                dy = dx
+                op.w_param.grad = dW
+                g = dx
 
             else:
-                raise RuntimeError(f"unknown op kind: {op}")
+                raise RuntimeError(f"Unknown op kind: {op.kind}")
 
-        # update (SGDStep or torch fallback depending on optimizer impl)
-        self.optimizer.step(self.model.parameters())
+        # apply update
+        self._sgd_step()
+
+    # -----------------------------
+    # optimizer (safe torch fallback)
+    # -----------------------------
+    def _sgd_step(self) -> None:
+        params = list(self._parameters())
+
+        # debug print (keep until stable)
+        print("num params:", len(params))
+        for i, p in enumerate(params[:8]):
+            w = _to_torch(getattr(p, "data"))
+            g_obj = getattr(p, "grad", None)
+            if g_obj is None:
+                print(f"p{i}: {type(p)} w {tuple(w.shape)} {w.dtype} grad None")
+            else:
+                g = _to_torch(g_obj)
+                print(f"p{i}: {type(p)} w {tuple(w.shape)} {w.dtype} grad {tuple(g.shape)} {g.dtype}")
+
+        # lr policy
+        lr = float(self.cfg.lr)
+        if self.optim is not None and hasattr(self.optim, "lr"):
+            try:
+                lr = float(self.optim.lr)
+            except Exception:
+                pass
+
+        # update
+        for p in params:
+            w = _to_torch(getattr(p, "data"))
+            g_obj = getattr(p, "grad", None)
+            if g_obj is None:
+                continue
+            g = _to_torch(g_obj)
+
+            # match weight dtype
+            if w.dtype != g.dtype:
+                g = g.to(dtype=w.dtype)
+
+            w.add_(g, alpha=-lr)
+
+            # clear grad
+            try:
+                p.grad = None
+            except Exception:
+                pass
+
+    # -----------------------------
+    # train step (eager)
+    # -----------------------------
+    def train_step_eager(self, batch) -> torch.Tensor:
+        """
+        End-to-end eager step:
+          1) clear tape
+          2) forward
+          3) loss (torch)
+          4) dy (aicf mse_grad)
+          5) backward from dy using tape
+        """
         AG.tape().clear()
 
-    def train_step_eager(self, batch) -> Any:
-        self._zero_grad()
-        loss = self._forward_loss(batch)
-        self._backward_opt(loss)
-        return loss
+        x, t = batch
+        x_t = _to_torch(x)
+        t_t = _to_torch(t)
+        _require_cuda(x_t, "batch.x")
+        _require_cuda(t_t, "batch.t")
 
-    @torch.no_grad()
-    def _forward_loss_nograd(self, batch) -> float:
-        loss = self._forward_loss(batch)
-        if hasattr(loss, "t"):
-            return float(loss.t.item())
-        return float(loss.item())
+        # forward (model expects Tensor wrapper; keep as-is)
+        y = self.model(Tensor(x_t) if not isinstance(x, Tensor) else x)
+        y_t = _to_torch(y)
 
-    def _loss_to_float(self, loss_like: Any) -> Optional[float]:
-        if loss_like is None:
-            return None
-        if hasattr(loss_like, "t"):
+        # loss (torch fallback ok)
+        loss_t = torch.mean((y_t - t_t.to(dtype=y_t.dtype)) ** 2)
+
+        # dy (aicf op)
+        dy = AG.aicf_mse_grad(y_t, t_t)
+        dy_t = _to_torch(dy)
+
+        # backward + update
+        self._backward_from_dy(dy_t)
+
+        return loss_t.detach()
+
+    # -----------------------------
+    # fit loop
+    # -----------------------------
+    def fit(self, dl: Iterable, steps: int = 100) -> None:
+        it = iter(dl)
+        for i in range(steps):
             try:
-                return float(loss_like.t.item())
-            except Exception:
-                return None
-        if hasattr(loss_like, "item"):
-            try:
-                return float(loss_like.item())
-            except Exception:
-                return None
-        try:
-            return float(loss_like)
-        except Exception:
-            return None
-
-    # -----------------------
-    # Backend bind shim
-    # -----------------------
-    def _backend_bind_batch(self, backend, batch) -> None:
-        if hasattr(backend, "bind_batch"):
-            backend.bind_batch(batch)
-            return
-        if hasattr(backend, "set_inputs"):
-            backend.set_inputs(batch)
-            return
-
-        if self.cfg.strict_capture_requires_bind:
-            raise RuntimeError(
-                "capture mode requires backend.bind_batch(batch) or backend.set_inputs(batch)."
-            )
-
-    def _maybe_sync(self) -> None:
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-
-    def _maybe_profile_sync(self, step: int) -> bool:
-        return self.cfg.profile_step is not None and step == self.cfg.profile_step
-
-    # -----------------------
-    # Main loop
-    # -----------------------
-    def fit(self, dataloader: Iterable[Tuple[Any, Any]], steps: int) -> None:
-        backend = get_backend()
-        it: Iterator[Tuple[Any, Any]] = iter(dataloader)
-
-        # -------- Phase 0: warmup (real training) --------
-        warmup_n = max(0, int(self.cfg.warmup_steps))
-        for step in range(min(warmup_n, steps)):
-            batch = next(it)
-
-            do_profile = self._maybe_profile_sync(step)
-            if do_profile:
-                self._maybe_sync()
+                batch = next(it)
+            except StopIteration:
+                it = iter(dl)
+                batch = next(it)
 
             loss = self.train_step_eager(batch)
 
-            if do_profile or self.cfg.sync_each_step:
-                self._maybe_sync()
-
-            if (step % self.cfg.log_every) == 0:
-                v = self._loss_to_float(loss)
-                print(f"[step {step}] loss={v:.4f}" if v is not None else f"[step {step}] loss=None")
-
-        if warmup_n >= steps:
-            return
-
-        # -------- Phase 1: capture orchestration --------
-        captured = False
-        capture_step = self.cfg.capture_at_step
-        if capture_step < 0:
-            capture_step = warmup_n  # warmup 직후
-
-        current_step = warmup_n
-
-        while current_step < steps:
-            batch = next(it)
-
-            do_profile = self._maybe_profile_sync(current_step)
-            if do_profile:
-                self._maybe_sync()
-
-            # ---- non-capture mode (eager/bench) ----
-            if self.cfg.mode != "capture":
-                loss = self.train_step_eager(batch)
-
-            # ---- capture mode ----
-            else:
-                if (not captured) and (current_step == capture_step):
-                    if hasattr(backend, "prepare_capture_batch"):
-                        cap_batch = backend.prepare_capture_batch(batch)
-                    else:
-                        raise RuntimeError(
-                            "capture mode requires backend.prepare_capture_batch(batch) "
-                            "to create fixed input buffers for CUDA Graph."
-                        )
-
-                    if hasattr(backend, "warmup"):
-                        backend.warmup(self.model, cap_batch)
-
-                    backend.capture_begin()
-                    loss = self.train_step_eager(cap_batch)
-                    backend.capture_end()
-
-                    self._captured_loss_ref = loss
-                    captured = True
-
-                else:
-                    self._backend_bind_batch(backend, batch)
-                    _ = backend.replay()
-                    loss = self._captured_loss_ref
-
-                if self.cfg.validate_every and (current_step % self.cfg.validate_every == 0):
-                    eager_loss = self._forward_loss_nograd(batch)
-                    replay_loss = self._loss_to_float(self._captured_loss_ref)
-                    if replay_loss is not None:
-                        diff = abs(replay_loss - eager_loss)
-                        if diff > 1e-3:
-                            print(
-                                f"[validate step {current_step}] "
-                                f"replay_loss={replay_loss:.6f} eager_fwd_loss={eager_loss:.6f} diff={diff:.6f}"
-                            )
-
-            if do_profile or self.cfg.sync_each_step:
-                self._maybe_sync()
-
-            # ---- logging ----
-            if (current_step % self.cfg.log_every) == 0:
-                v = self._loss_to_float(loss)
-                print(f"[step {current_step}] loss={v:.4f}" if v is not None else f"[step {current_step}] loss=None")
-
-                if hasattr(backend, "profiler") and backend.profiler is not None:
-                    backend.profiler.maybe_report()
-
-            current_step += 1
-
-    # -----------------------
-    # Env override compatibility
-    # -----------------------
-    def _apply_env_overrides(self) -> None:
-        self.cfg.warmup_steps = int(os.environ.get("AICF_WARMUP_STEPS", str(self.cfg.warmup_steps)))
-
-        profile_step_env = os.environ.get("AICF_PROFILE_STEP", None)
-        if profile_step_env is not None:
-            self.cfg.profile_step = int(profile_step_env)
-
-        self.cfg.sync_each_step = bool(
-            int(os.environ.get("AICF_SYNC_EACH_STEP", "1" if self.cfg.sync_each_step else "0"))
-        )
-
-        validate_every_env = os.environ.get("AICF_VALIDATE_EVERY", None)
-        if validate_every_env is not None:
-            self.cfg.validate_every = int(validate_every_env)
-
-        capture_at_env = os.environ.get("AICF_CAPTURE_AT_STEP", None)
-        if capture_at_env is not None:
-            self.cfg.capture_at_step = int(capture_at_env)
+            if self.cfg.log_every > 0 and (i % self.cfg.log_every) == 0:
+                print(f"step={i} loss={loss.item():.6f}")

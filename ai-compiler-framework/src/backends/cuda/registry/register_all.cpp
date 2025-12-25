@@ -1,3 +1,9 @@
+// ============================================================================
+// src/backends/cuda/registry/register_all.cpp
+// - Register kernels based on current launcher-implemented variants
+// - Preference order: vec2/half2 > f16 scalar > f32 (when same op + valid supported())
+// ============================================================================
+
 #include "aicf/backends/cuda/registry/register_all.hpp"
 
 #include "aicf/backends/cuda/registry/registry.hpp"
@@ -6,28 +12,54 @@
 
 namespace aicf::cuda {
 
-// Factories
+// -------------------------
+// Factories (must match actual launcher implementations)
+// -------------------------
+
+// EltwiseAdd
 KernelVariant make_add_f32_variant();
+KernelVariant make_add_f16_variant();
+KernelVariant make_add_f16_vec2_variant();   // half2
+
+// EltwiseRelu
 KernelVariant make_relu_f32_variant();
+KernelVariant make_relu_f16_variant();
+// NOTE: register if implemented in launcher
+KernelVariant make_relu_f16_vec2_variant();  // half2
 
+// Gemm
 KernelVariant make_gemm_f32_naive_variant();
-KernelVariant make_gemm_f16_tc_wmma_variant();
+KernelVariant make_gemm_f16_tc_wmma_nn_variant();
+KernelVariant make_gemm_f16_tc_wmma_tn_variant();
+KernelVariant make_gemm_f16_tc_wmma_nt_variant();
 
+// BiasAdd
 KernelVariant make_bias_add_f32_variant();
-KernelVariant make_reduce_sum_lastdim_f32_variant();
-KernelVariant make_mse_grad_f32_variant();
-KernelVariant make_relu_bwd_f32_variant();
+// NOTE: register if implemented in launcher
+KernelVariant make_bias_add_f16_variant();
+KernelVariant make_bias_add_f16_vec2_variant(); // half2
 
-// ✅ NEW: SGD step
+// ReduceSum
+KernelVariant make_reduce_sum_lastdim_f32_variant();
+// NOTE: this is f16 input -> f32 output (as your name implies)
+KernelVariant make_reduce_sum_lastdim_f16_to_f32_variant();
+
+// MseGrad
+KernelVariant make_mse_grad_f32_variant();
+KernelVariant make_mse_grad_f16_variant();
+// If you later implement half2: declare+register here
+// KernelVariant make_mse_grad_f16_half2_variant();
+
+// ReluBwd
+KernelVariant make_relu_bwd_f32_variant();
+// NOTE: register if implemented in launcher
+KernelVariant make_relu_bwd_f16_variant();
+KernelVariant make_relu_bwd_f16_vec2_variant(); // half2
+
+// SgdStep
 KernelVariant make_sgd_step_f32_variant();
 KernelVariant make_sgd_step_f16_variant();
 KernelVariant make_sgd_step_f16_half2_variant();
-
-
-// Future placeholders
-KernelVariant make_add_f16_variant();
-KernelVariant make_relu_f16_variant();
-KernelVariant make_add_f16_vec2_variant();
 
 }  // namespace aicf::cuda
 
@@ -36,50 +68,83 @@ extern "C" void aicf_cuda_register_all_kernels() {
 
   auto& R = KernelRegistry::instance();
 
+  // --------------------------------------------------------------------------
   // EltwiseAdd
+  // --------------------------------------------------------------------------
   {
-    R.register_kernel(OpKind::EltwiseAdd, make_add_f32_variant());
-    R.register_kernel(OpKind::EltwiseAdd, make_add_f16_variant());
     R.register_kernel(OpKind::EltwiseAdd, make_add_f16_vec2_variant());
+    R.register_kernel(OpKind::EltwiseAdd, make_add_f16_variant());
+    R.register_kernel(OpKind::EltwiseAdd, make_add_f32_variant());
   }
 
+  // --------------------------------------------------------------------------
   // EltwiseRelu
+  // --------------------------------------------------------------------------
   {
-    R.register_kernel(OpKind::EltwiseRelu, make_relu_f32_variant());
+    // If relu_f16_vec2 isn't implemented yet, remove this line.
+    R.register_kernel(OpKind::EltwiseRelu, make_relu_f16_vec2_variant());
     R.register_kernel(OpKind::EltwiseRelu, make_relu_f16_variant());
+    R.register_kernel(OpKind::EltwiseRelu, make_relu_f32_variant());
   }
 
+  // --------------------------------------------------------------------------
   // Gemm
+  // --------------------------------------------------------------------------
   {
-    R.register_kernel(OpKind::Gemm, make_gemm_f16_tc_wmma_variant());
+    // Prefer TC variants; mutually exclusive via supported() on (transA/transB).
+    R.register_kernel(OpKind::Gemm, make_gemm_f16_tc_wmma_nn_variant());
+    R.register_kernel(OpKind::Gemm, make_gemm_f16_tc_wmma_tn_variant());
+    R.register_kernel(OpKind::Gemm, make_gemm_f16_tc_wmma_nt_variant());
+
+    // Fallback
     R.register_kernel(OpKind::Gemm, make_gemm_f32_naive_variant());
   }
 
+  // --------------------------------------------------------------------------
   // BiasAdd
+  // --------------------------------------------------------------------------
   {
+    // If bias_add f16/vec2 aren't implemented yet, remove these lines.
+    R.register_kernel(OpKind::BiasAdd, make_bias_add_f16_vec2_variant());
+    R.register_kernel(OpKind::BiasAdd, make_bias_add_f16_variant());
     R.register_kernel(OpKind::BiasAdd, make_bias_add_f32_variant());
   }
 
+  // --------------------------------------------------------------------------
   // ReduceSum
+  // --------------------------------------------------------------------------
   {
+    // f16 input -> f32 output specialized path (if implemented)
+    R.register_kernel(OpKind::ReduceSum, make_reduce_sum_lastdim_f16_to_f32_variant());
+    // fallback / baseline
     R.register_kernel(OpKind::ReduceSum, make_reduce_sum_lastdim_f32_variant());
   }
 
+  // --------------------------------------------------------------------------
   // MseGrad
+  // --------------------------------------------------------------------------
   {
+    // If you later add half2, register it first.
+    R.register_kernel(OpKind::MseGrad, make_mse_grad_f16_variant());
     R.register_kernel(OpKind::MseGrad, make_mse_grad_f32_variant());
   }
 
+  // --------------------------------------------------------------------------
   // ReluBwd
+  // --------------------------------------------------------------------------
   {
+    // If relu_bwd f16/vec2 aren't implemented yet, remove these lines.
+    R.register_kernel(OpKind::ReluBwd, make_relu_bwd_f16_vec2_variant());
+    R.register_kernel(OpKind::ReluBwd, make_relu_bwd_f16_variant());
     R.register_kernel(OpKind::ReluBwd, make_relu_bwd_f32_variant());
   }
 
-  // ✅ SgdStep
+  // --------------------------------------------------------------------------
+  // SgdStep
+  // --------------------------------------------------------------------------
   {
     R.register_kernel(OpKind::SgdStep, make_sgd_step_f16_half2_variant());
     R.register_kernel(OpKind::SgdStep, make_sgd_step_f16_variant());
     R.register_kernel(OpKind::SgdStep, make_sgd_step_f32_variant());
   }
-
 }

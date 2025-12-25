@@ -1,4 +1,6 @@
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
+#include <cstdint>
 
 #include <aicf/core/status.hpp>
 #include <aicf/runtime/stream.hpp>
@@ -23,28 +25,58 @@
 namespace aicf::cuda {
 
 // -------------------------
-// public API implementation
+// kernels
 // -------------------------
-aicf::Status mse_grad_f32(const float* pred,
-                          const float* target,
-                          float* dPred,
-                          int64_t numel,
-                          float scale,
-                          aicf::Stream stream) {
-  if (!pred || !target || !dPred || numel <= 0) {
-    return aicf::Status::InvalidArgument;
-  }
+namespace mse_grad_impl {
 
-  cudaStream_t s = aicf::cuda::shim::to_cuda_stream(stream);
-
-  const int block = 256;
-  const int grid = (int)((numel + block - 1) / block);
-
-  mse_grad_impl::mse_grad_f32_kernel<<<grid, block, 0, s>>>(
-      pred, target, dPred, numel, scale);
-
-  return aicf::cuda::shim::cuda_last_error_to_status();
+__global__ void mse_grad_f32_kernel(const float* __restrict__ pred,
+                                   const float* __restrict__ target,
+                                   float* __restrict__ dPred,
+                                   int64_t numel,
+                                   float scale) {
+  int64_t i = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
+  if (i >= numel) return;
+  dPred[i] = (pred[i] - target[i]) * scale;
 }
+
+__global__ void mse_grad_f16_kernel(const __half* __restrict__ pred,
+                                   const __half* __restrict__ target,
+                                   __half* __restrict__ dPred,
+                                   int64_t numel,
+                                   float scale) {
+  int64_t i = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
+  if (i >= numel) return;
+
+  const float p = __half2float(pred[i]);
+  const float t = __half2float(target[i]);
+  const float g = (p - t) * scale;
+  dPred[i] = __float2half_rn(g);
+}
+
+// half2 vectorized (numel2 = numel/2)
+__global__ void mse_grad_f16x2_kernel(const __half2* __restrict__ pred,
+                                     const __half2* __restrict__ target,
+                                     __half2* __restrict__ dPred,
+                                     int64_t numel2,
+                                     float scale) {
+  int64_t i = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
+  if (i >= numel2) return;
+
+  const __half2 p2 = pred[i];
+  const __half2 t2 = target[i];
+
+  const float p0 = __half2float(__low2half(p2));
+  const float p1 = __half2float(__high2half(p2));
+  const float t0 = __half2float(__low2half(t2));
+  const float t1 = __half2float(__high2half(t2));
+
+  const __half g0 = __float2half_rn((p0 - t0) * scale);
+  const __half g1 = __float2half_rn((p1 - t1) * scale);
+
+  dPred[i] = __halves2half2(g0, g1);
+}
+
+} // namespace mse_grad_impl
 
 // -------------------------
 // Attr helpers (binding v0.2 compatible)
@@ -75,6 +107,9 @@ static inline bool attr_get_f32(const void* attr, const char* key, float* out_va
 static inline bool is_f32_contig(const TensorDesc& T) {
   return (T.dtype == DType::kF32) && T.contiguous;
 }
+static inline bool is_f16_contig(const TensorDesc& T) {
+  return (T.dtype == DType::kF16) && T.contiguous;
+}
 
 static inline bool same_shape(const TensorDesc& A, const TensorDesc& B) {
   if (A.rank() != B.rank()) return false;
@@ -100,62 +135,61 @@ static inline bool compute_numel(const TensorDesc& T, int64_t* out_numel) {
   return true;
 }
 
-// -------------------------
-// Contract:
-//
-// inputs[0] = pred   f32 contig, rank>=1
-// inputs[1] = target f32 contig, same shape
-// outputs[0]= dPred  f32 contig, same shape
-//
-// Attr:
-//   scale (optional, f32):
-//     if provided -> use it
-//     else -> default scale = 2.0f / numel  (MSE mean gradient)
-// -------------------------
-static inline bool mse_grad_check(
+// dtype-generic check
+static inline bool mse_grad_check_dt(
     const TensorDesc* inputs, int num_inputs,
-    const TensorDesc* outputs, int num_outputs) {
+    const TensorDesc* outputs, int num_outputs,
+    bool (*is_ok)(const TensorDesc&)) {
 
+  if (!inputs || !outputs) return false;
   if (num_inputs != 2 || num_outputs != 1) return false;
 
   const TensorDesc& P = inputs[0];
   const TensorDesc& T = inputs[1];
   const TensorDesc& G = outputs[0];
 
-  if (!is_f32_contig(P) || !is_f32_contig(T) || !is_f32_contig(G)) return false;
+  if (!is_ok(P) || !is_ok(T) || !is_ok(G)) return false;
   if (P.rank() < 1) return false;
   if (!same_shape(P, T)) return false;
   if (!same_shape(P, G)) return false;
 
   int64_t numel = 0;
   if (!compute_numel(P, &numel)) return false;
-
   return true;
 }
 
-static bool mse_grad_supported(
+static inline bool mse_grad_vec2_ok(const TensorDesc& P, const TensorDesc& T, const TensorDesc& G) {
+  int64_t numel = 0;
+  if (!compute_numel(P, &numel)) return false;
+  if ((numel & 1) != 0) return false;
+
+  constexpr size_t kAlign = 4;
+  if (!aicf::cuda::shim::is_aligned_data(P, kAlign)) return false;
+  if (!aicf::cuda::shim::is_aligned_data(T, kAlign)) return false;
+  if (!aicf::cuda::shim::is_aligned_data(G, kAlign)) return false;
+  return true;
+}
+
+static size_t mse_grad_workspace(const TensorDesc*, int, const void*) { return 0; }
+
+// -------------------------
+// Variant: F32
+// -------------------------
+static bool mse_grad_f32_supported(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs,
     const void* /*attr*/) {
-
-  if (!inputs || !outputs) return false;
-  return mse_grad_check(inputs, num_inputs, outputs, num_outputs);
+  return mse_grad_check_dt(inputs, num_inputs, outputs, num_outputs, &is_f32_contig);
 }
 
-static size_t mse_grad_workspace(const TensorDesc*, int, const void*) {
-  return 0;
-}
-
-static aicf::Status mse_grad_launch(
+static aicf::Status mse_grad_f32_launch(
     const TensorDesc* inputs, int num_inputs,
     TensorDesc* outputs, int num_outputs,
     const void* attr,
     void* /*workspace*/, size_t /*workspace_bytes*/,
     cudaStream_t stream) {
 
-  if (!inputs || !outputs) return aicf::Status::InvalidArgument;
-
-  if (!mse_grad_check(inputs, num_inputs, outputs, num_outputs)) {
+  if (!mse_grad_check_dt(inputs, num_inputs, outputs, num_outputs, &is_f32_contig)) {
     return aicf::Status::InvalidArgument;
   }
 
@@ -168,20 +202,14 @@ static aicf::Status mse_grad_launch(
 
   float scale = 0.0f;
   const bool has_scale = attr_get_f32(attr, "scale", &scale);
+  if (!has_scale) scale = 2.0f / (float)numel;
 
-  if (!has_scale) {
-    scale = 2.0f / (float)numel;
-  }
+  constexpr int kThreads = 256;
+  int blocks = (int)((numel + kThreads - 1) / kThreads);
+  if (blocks > 65535) blocks = 65535;
 
-  const int block = 256;
-  const int grid = (int)((numel + block - 1) / block);
-
-  mse_grad_impl::mse_grad_f32_kernel<<<grid, block, 0, stream>>>(
-      (const float*)P.data,
-      (const float*)T.data,
-      (float*)G.data,
-      numel,
-      scale);
+  mse_grad_impl::mse_grad_f32_kernel<<<blocks, kThreads, 0, stream>>>(
+      (const float*)P.data, (const float*)T.data, (float*)G.data, numel, scale);
 
   return aicf::cuda::shim::cuda_last_error_to_status();
 }
@@ -191,8 +219,72 @@ KernelVariant make_mse_grad_f32_variant() {
   v.name = "mse_grad_f32";
   v.priority = 0;
   v.flags = 0;
-  v.launch = mse_grad_launch;
-  v.supported = mse_grad_supported;
+  v.launch = mse_grad_f32_launch;
+  v.supported = mse_grad_f32_supported;
+  v.query_workspace = mse_grad_workspace;
+  return v;
+}
+
+// -------------------------
+// Variant: F16 (naive)
+// -------------------------
+static bool mse_grad_f16_supported(
+    const TensorDesc* inputs, int num_inputs,
+    const TensorDesc* outputs, int num_outputs,
+    const void* /*attr*/) {
+  return mse_grad_check_dt(inputs, num_inputs, outputs, num_outputs, &is_f16_contig);
+}
+
+static aicf::Status mse_grad_f16_launch(
+    const TensorDesc* inputs, int num_inputs,
+    TensorDesc* outputs, int num_outputs,
+    const void* attr,
+    void* /*workspace*/, size_t /*workspace_bytes*/,
+    cudaStream_t stream) {
+
+  if (!mse_grad_check_dt(inputs, num_inputs, outputs, num_outputs, &is_f16_contig)) {
+    return aicf::Status::InvalidArgument;
+  }
+
+  const TensorDesc& P = inputs[0];
+  const TensorDesc& T = inputs[1];
+  TensorDesc& G = outputs[0];
+
+  int64_t numel = 0;
+  if (!compute_numel(P, &numel)) return aicf::Status::InvalidArgument;
+
+  float scale = 0.0f;
+  const bool has_scale = attr_get_f32(attr, "scale", &scale);
+  if (!has_scale) scale = 2.0f / (float)numel;
+
+  constexpr int kThreads = 256;
+
+  // half2 fastpath
+  if (mse_grad_vec2_ok(P, T, G)) {
+    const int64_t numel2 = numel / 2;
+    int blocks = (int)((numel2 + kThreads - 1) / kThreads);
+    if (blocks > 65535) blocks = 65535;
+
+    mse_grad_impl::mse_grad_f16x2_kernel<<<blocks, kThreads, 0, stream>>>(
+        (const __half2*)P.data, (const __half2*)T.data, (__half2*)G.data, numel2, scale);
+  } else {
+    int blocks = (int)((numel + kThreads - 1) / kThreads);
+    if (blocks > 65535) blocks = 65535;
+
+    mse_grad_impl::mse_grad_f16_kernel<<<blocks, kThreads, 0, stream>>>(
+        (const __half*)P.data, (const __half*)T.data, (__half*)G.data, numel, scale);
+  }
+
+  return aicf::cuda::shim::cuda_last_error_to_status();
+}
+
+KernelVariant make_mse_grad_f16_variant() {
+  KernelVariant v{};
+  v.name = "mse_grad_f16";
+  v.priority = 0;
+  v.flags = 0;
+  v.launch = mse_grad_f16_launch;
+  v.supported = mse_grad_f16_supported;
   v.query_workspace = mse_grad_workspace;
   return v;
 }

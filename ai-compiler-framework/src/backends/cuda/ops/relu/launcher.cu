@@ -1,6 +1,8 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 
+#include <cstdint>
+
 #include <aicf/core/status.hpp>
 #include <aicf/runtime/stream.hpp>
 
@@ -41,7 +43,20 @@ __global__ void relu_f16_kernel(const __half* __restrict__ in,
   const int i = (int)(blockIdx.x * blockDim.x + threadIdx.x);
   if (i < N) {
     const __half x = in[i];
+    // out = max(x, 0)
     out[i] = __hgt(x, __float2half(0.0f)) ? x : __float2half(0.0f);
+  }
+}
+
+// half2 vectorized: out = max(in, 0) lane-wise
+__global__ void relu_f16x2_kernel(const __half2* __restrict__ in,
+                                  __half2* __restrict__ out,
+                                  int N2) {
+  const int i = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+  if (i < N2) {
+    const __half2 x = in[i];
+    const __half2 z = __float2half2_rn(0.0f);
+    out[i] = __hmax2(x, z);
   }
 }
 
@@ -65,6 +80,8 @@ aicf::Status relu_f32(const float* in,
   return aicf::cuda::shim::cuda_last_error_to_status();
 }
 
+// v0.2: keep header free from cuda_fp16 by using void* API
+// v0.2+: add half2 fastpath when (N even) && (ptr 4B aligned)
 aicf::Status relu_f16(const void* in,
                       void* out,
                       int N,
@@ -74,9 +91,21 @@ aicf::Status relu_f16(const void* in,
   cudaStream_t s = aicf::cuda::shim::to_cuda_stream(stream);
 
   constexpr int kThreads = 256;
-  const int blocks = (N + kThreads - 1) / kThreads;
-  relu_impl::relu_f16_kernel<<<blocks, kThreads, 0, s>>>(
-      (const __half*)in, (__half*)out, N);
+
+  const bool even = ((N & 1) == 0);
+  const bool i_aligned = (((uintptr_t)in & 0x3u) == 0);
+  const bool o_aligned = (((uintptr_t)out & 0x3u) == 0);
+
+  if (even && i_aligned && o_aligned) {
+    const int N2 = N / 2;
+    const int blocks = (N2 + kThreads - 1) / kThreads;
+    relu_impl::relu_f16x2_kernel<<<blocks, kThreads, 0, s>>>(
+        (const __half2*)in, (__half2*)out, N2);
+  } else {
+    const int blocks = (N + kThreads - 1) / kThreads;
+    relu_impl::relu_f16_kernel<<<blocks, kThreads, 0, s>>>(
+        (const __half*)in, (__half*)out, N);
+  }
 
   return aicf::cuda::shim::cuda_last_error_to_status();
 }
@@ -89,11 +118,16 @@ aicf::Status relu_f16(const void* in,
 //   contig + rank1; dtype differs per variant
 // -------------------------
 
+static size_t relu_variant_workspace(const TensorDesc*, int, const void*) {
+  return 0;
+}
+
 // ---- F32 variant ----
 static inline bool relu_f32_variant_check(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs) {
 
+  if (!inputs || !outputs) return false;
   if (num_inputs != 1 || num_outputs != 1) return false;
 
   const TensorDesc& I = inputs[0];
@@ -102,17 +136,13 @@ static inline bool relu_f32_variant_check(
   if (!aicf::cuda::shim::is_f32_contig_1d(I)) return false;
   if (!aicf::cuda::shim::is_f32_contig_1d(O)) return false;
   if (!aicf::cuda::shim::same_shape_1d(I, O)) return false;
-  if (O.shape[0] <= 0) return false;
-
-  return true;
+  return (O.shape[0] > 0);
 }
 
 static bool relu_f32_variant_supported(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs,
     const void* /*attr*/) {
-
-  if (!inputs || !outputs) return false;
   return relu_f32_variant_check(inputs, num_inputs, outputs, num_outputs);
 }
 
@@ -123,7 +153,6 @@ static aicf::Status relu_f32_variant_launch(
     void* /*workspace*/, size_t /*workspace_bytes*/,
     cudaStream_t stream) {
 
-  if (!inputs || !outputs) return aicf::Status::InvalidArgument;
   if (!relu_f32_variant_check(inputs, num_inputs, outputs, num_outputs)) {
     return aicf::Status::InvalidArgument;
   }
@@ -132,76 +161,15 @@ static aicf::Status relu_f32_variant_launch(
   TensorDesc& O = outputs[0];
 
   const int N = static_cast<int>(O.shape[0]);
-
   constexpr int kThreads = 256;
   const int blocks = (N + kThreads - 1) / kThreads;
+
   relu_impl::relu_f32_kernel<<<blocks, kThreads, 0, stream>>>(
-      (const float*)I.data,
-      (float*)O.data,
-      N);
+      (const float*)I.data, (float*)O.data, N);
 
   return aicf::cuda::shim::cuda_last_error_to_status();
 }
 
-// ---- F16 variant ----
-static inline bool relu_f16_variant_check(
-    const TensorDesc* inputs, int num_inputs,
-    const TensorDesc* outputs, int num_outputs) {
-
-  if (num_inputs != 1 || num_outputs != 1) return false;
-
-  const TensorDesc& I = inputs[0];
-  const TensorDesc& O = outputs[0];
-
-  if (!aicf::cuda::shim::is_f16_contig_1d(I)) return false;
-  if (!aicf::cuda::shim::is_f16_contig_1d(O)) return false;
-  if (!aicf::cuda::shim::same_shape_1d(I, O)) return false;
-  if (O.shape[0] <= 0) return false;
-
-  return true;
-}
-
-static bool relu_f16_variant_supported(
-    const TensorDesc* inputs, int num_inputs,
-    const TensorDesc* outputs, int num_outputs,
-    const void* /*attr*/) {
-
-  if (!inputs || !outputs) return false;
-  return relu_f16_variant_check(inputs, num_inputs, outputs, num_outputs);
-}
-
-static aicf::Status relu_f16_variant_launch(
-    const TensorDesc* inputs, int num_inputs,
-    TensorDesc* outputs, int num_outputs,
-    const void* /*attr*/,
-    void* /*workspace*/, size_t /*workspace_bytes*/,
-    cudaStream_t stream) {
-
-  if (!inputs || !outputs) return aicf::Status::InvalidArgument;
-  if (!relu_f16_variant_check(inputs, num_inputs, outputs, num_outputs)) {
-    return aicf::Status::InvalidArgument;
-  }
-
-  const TensorDesc& I = inputs[0];
-  TensorDesc& O = outputs[0];
-
-  const int N = static_cast<int>(O.shape[0]);
-
-  constexpr int kThreads = 256;
-  const int blocks = (N + kThreads - 1) / kThreads;
-  relu_impl::relu_f16_kernel<<<blocks, kThreads, 0, stream>>>(
-      (const __half*)I.data,
-      (__half*)O.data,
-      N);
-
-  return aicf::cuda::shim::cuda_last_error_to_status();
-}
-
-static size_t relu_variant_workspace(const TensorDesc*, int, const void*) {
-  return 0;
-}
-
-// factories
 KernelVariant make_relu_f32_variant() {
   KernelVariant v{};
   v.name = "relu_f32_naive";
@@ -213,6 +181,54 @@ KernelVariant make_relu_f32_variant() {
   return v;
 }
 
+// ---- F16 naive variant ----
+static inline bool relu_f16_variant_check(
+    const TensorDesc* inputs, int num_inputs,
+    const TensorDesc* outputs, int num_outputs) {
+
+  if (!inputs || !outputs) return false;
+  if (num_inputs != 1 || num_outputs != 1) return false;
+
+  const TensorDesc& I = inputs[0];
+  const TensorDesc& O = outputs[0];
+
+  if (!aicf::cuda::shim::is_f16_contig_1d(I)) return false;
+  if (!aicf::cuda::shim::is_f16_contig_1d(O)) return false;
+  if (!aicf::cuda::shim::same_shape_1d(I, O)) return false;
+  return (O.shape[0] > 0);
+}
+
+static bool relu_f16_variant_supported(
+    const TensorDesc* inputs, int num_inputs,
+    const TensorDesc* outputs, int num_outputs,
+    const void* /*attr*/) {
+  return relu_f16_variant_check(inputs, num_inputs, outputs, num_outputs);
+}
+
+static aicf::Status relu_f16_variant_launch(
+    const TensorDesc* inputs, int num_inputs,
+    TensorDesc* outputs, int num_outputs,
+    const void* /*attr*/,
+    void* /*workspace*/, size_t /*workspace_bytes*/,
+    cudaStream_t stream) {
+
+  if (!relu_f16_variant_check(inputs, num_inputs, outputs, num_outputs)) {
+    return aicf::Status::InvalidArgument;
+  }
+
+  const TensorDesc& I = inputs[0];
+  TensorDesc& O = outputs[0];
+
+  const int N = static_cast<int>(O.shape[0]);
+  constexpr int kThreads = 256;
+  const int blocks = (N + kThreads - 1) / kThreads;
+
+  relu_impl::relu_f16_kernel<<<blocks, kThreads, 0, stream>>>(
+      (const __half*)I.data, (__half*)O.data, N);
+
+  return aicf::cuda::shim::cuda_last_error_to_status();
+}
+
 KernelVariant make_relu_f16_variant() {
   KernelVariant v{};
   v.name = "relu_f16_naive";
@@ -220,6 +236,73 @@ KernelVariant make_relu_f16_variant() {
   v.flags = 0;
   v.launch = relu_f16_variant_launch;
   v.supported = relu_f16_variant_supported;
+  v.query_workspace = relu_variant_workspace;
+  return v;
+}
+
+// ---- F16 vec2 (half2) variant ----
+static inline bool relu_f16_vec2_check(
+    const TensorDesc* inputs, int num_inputs,
+    const TensorDesc* outputs, int num_outputs) {
+
+  if (!relu_f16_variant_check(inputs, num_inputs, outputs, num_outputs)) {
+    return false;
+  }
+
+  const TensorDesc& I = inputs[0];
+  const TensorDesc& O = outputs[0];
+
+  // even length
+  if (!aicf::cuda::shim::is_even_len_1d(O)) return false;
+
+  // half2 requires 4B alignment
+  constexpr size_t kAlign = 4;
+  if (!aicf::cuda::shim::is_aligned_data(I, kAlign)) return false;
+  if (!aicf::cuda::shim::is_aligned_data(O, kAlign)) return false;
+
+  return true;
+}
+
+static bool relu_f16_vec2_variant_supported(
+    const TensorDesc* inputs, int num_inputs,
+    const TensorDesc* outputs, int num_outputs,
+    const void* /*attr*/) {
+  return relu_f16_vec2_check(inputs, num_inputs, outputs, num_outputs);
+}
+
+static aicf::Status relu_f16_vec2_variant_launch(
+    const TensorDesc* inputs, int num_inputs,
+    TensorDesc* outputs, int num_outputs,
+    const void* /*attr*/,
+    void* /*workspace*/, size_t /*workspace_bytes*/,
+    cudaStream_t stream) {
+
+  if (!relu_f16_vec2_check(inputs, num_inputs, outputs, num_outputs)) {
+    return aicf::Status::InvalidArgument;
+  }
+
+  const TensorDesc& I = inputs[0];
+  TensorDesc& O = outputs[0];
+
+  const int N = static_cast<int>(O.shape[0]);
+  const int N2 = N / 2;
+
+  constexpr int kThreads = 256;
+  const int blocks = (N2 + kThreads - 1) / kThreads;
+
+  relu_impl::relu_f16x2_kernel<<<blocks, kThreads, 0, stream>>>(
+      (const __half2*)I.data, (__half2*)O.data, N2);
+
+  return aicf::cuda::shim::cuda_last_error_to_status();
+}
+
+KernelVariant make_relu_f16_vec2_variant() {
+  KernelVariant v{};
+  v.name = "relu_f16_vec2_half2";
+  v.priority = 10;  // vec2 wins over naive
+  v.flags = 0;
+  v.launch = relu_f16_vec2_variant_launch;
+  v.supported = relu_f16_vec2_variant_supported;
   v.query_workspace = relu_variant_workspace;
   return v;
 }

@@ -1,6 +1,10 @@
+// ============================================================================
+// src/backends/cuda/ops/gemm/launcher.cu   (IMPLEMENTATIONS + VARIANTS)
+// ============================================================================
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <mma.h>
+#include <cstdint>
 
 #include <aicf/core/status.hpp>
 #include <aicf/runtime/stream.hpp>
@@ -27,12 +31,12 @@ namespace aicf::cuda {
 using namespace nvcuda;
 
 // -------------------------
-// kernels (implementation lives here in your style)
+// kernels (definitions)
 // -------------------------
 namespace gemm_impl {
 
 // -------------------------
-// f32 naive kernels (existing)
+// f32 naive
 // -------------------------
 __global__ void gemm_f32_naive_kernel(const float* __restrict__ A,
                                       const float* __restrict__ B,
@@ -50,10 +54,9 @@ __global__ void gemm_f32_naive_kernel(const float* __restrict__ A,
   C[row * N + col] = acc;
 }
 
-// B is stored as [N,K] with arbitrary stride, and we interpret it as transposed:
-//   logical B^T has shape [K,N], where B^T[kk, col] = B[col, kk]
+// B stored [N,K] with arbitrary positive strides; interpret as B^T=[K,N]
 __global__ void gemm_f32_naive_transB_kernel(const float* __restrict__ A,
-                                            const float* __restrict__ B, // stored as [N,K]
+                                            const float* __restrict__ B,
                                             float* __restrict__ C,
                                             int M, int N, int K,
                                             int64_t B_stride0, int64_t B_stride1) {
@@ -71,95 +74,60 @@ __global__ void gemm_f32_naive_transB_kernel(const float* __restrict__ A,
 }
 
 // -------------------------
-// ✅ NEW: WMMA TensorCore GEMM
-// - A, B: half (row-major storage as per contract)
-// - C: float row-major
-// - transA/transB handled by interpreting A/B storage shapes:
-//     transA=false: A=[M,K], ldA=K
-//     transA=true : A=[K,M], ldA=M
-//     transB=false: B=[K,N], ldB=N
-//     transB=true : B=[N,K], ldB=K
-// - One warp computes one 16x16 tile.
-// - Uses SMEM to present:
-//     smemA as row_major 16x16
-//     smemB as col_major 16x16
+// WMMA helpers (NO lambdas, NO auto)
 // -------------------------
-__global__ void gemm_f16_tc_wmma_kernel(const __half* __restrict__ A,
-                                       const __half* __restrict__ B,
-                                       float* __restrict__ C,
-                                       int M, int N, int K,
-                                       bool transA, bool transB) {
-  // 1 warp per block
+__device__ __forceinline__ int ceil16_i(int x) { return (x + 15) & ~15; }
+
+// A loaders
+__device__ __forceinline__ __half loadA_nn(const __half* A, int M, int K, int r, int c) {
+  // A: [M,K], ldA=K
+  if ((unsigned)r < (unsigned)M && (unsigned)c < (unsigned)K) return A[r * K + c];
+  return __float2half(0.0f);
+}
+
+__device__ __forceinline__ __half loadA_tn(const __half* A, int M, int K, int r, int c) {
+  // A stored: [K,M], ldA=M. logical A_logical[r,c] = A_storage[c, r]
+  if ((unsigned)r < (unsigned)M && (unsigned)c < (unsigned)K) return A[c * M + r];
+  return __float2half(0.0f);
+}
+
+// B loaders
+__device__ __forceinline__ __half loadB_nn(const __half* B, int K, int N, int r, int c) {
+  // B: [K,N], ldB=N
+  if ((unsigned)r < (unsigned)K && (unsigned)c < (unsigned)N) return B[r * N + c];
+  return __float2half(0.0f);
+}
+
+__device__ __forceinline__ __half loadB_nt(const __half* B, int N, int K, int r, int c) {
+  // B stored: [N,K], ldB=K. logical B_logical[r,c] = B_storage[c, r]
+  if ((unsigned)r < (unsigned)K && (unsigned)c < (unsigned)N) return B[c * K + r];
+  return __float2half(0.0f);
+}
+
+// Pack + mma core specialized per case (avoid passing callables)
+__device__ __forceinline__
+void wmma_core_nn(const __half* A, const __half* B, float* C, int M, int N, int K) {
   const int lane = threadIdx.x & 31;
+  const int m0 = (int)blockIdx.y * 16;
+  const int n0 = (int)blockIdx.x * 16;
 
-  // tile coords
-  const int tile_m = (int)blockIdx.y;
-  const int tile_n = (int)blockIdx.x;
-  const int m0 = tile_m * 16;
-  const int n0 = tile_n * 16;
-
-  __shared__ __half smemA[16 * 16];
-  __shared__ __half smemB[16 * 16];
-  __shared__ float  smemC[16 * 16];
+  __shared__ __half smemA[256];
+  __shared__ __half smemB[256];
+  __shared__ float  smemC[256];
 
   wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc;
   wmma::fill_fragment(acc, 0.0f);
 
-  // leading dims for row-major storage
-  const int ldA = transA ? M : K;
-  const int ldB = transB ? K : N;
+  const int K16 = ceil16_i(K);
 
-  // bounds for storage shapes
-  // if transA: A is [K,M], else [M,K]
-  const int A_rows = transA ? K : M;
-  const int A_cols = transA ? M : K;
-  // if transB: B is [N,K], else [K,N]
-  const int B_rows = transB ? N : K;
-  const int B_cols = transB ? K : N;
-
-  for (int k0 = 0; k0 < K; k0 += 16) {
-    // ---- fill smemA in row_major (i,j) ----
+  for (int k0 = 0; k0 < K16; k0 += 16) {
     for (int t = lane; t < 256; t += 32) {
-      const int i = t / 16;  // 0..15
-      const int j = t % 16;  // 0..15
-
-      // logical A element needed: A_logical[m0+i, k0+j]
-      // storage:
-      //  - transA=false: A_storage[m0+i, k0+j]
-      //  - transA=true : A_storage[k0+j, m0+i]  (since stored as [K,M])
-      int a_r = 0, a_c = 0;
-      if (!transA) { a_r = m0 + i; a_c = k0 + j; }
-      else         { a_r = k0 + j; a_c = m0 + i; }
-
-      __half v = __float2half(0.0f);
-      if ((unsigned)a_r < (unsigned)A_rows && (unsigned)a_c < (unsigned)A_cols) {
-        v = A[a_r * ldA + a_c];
-      }
-      smemA[i * 16 + j] = v;
+      const int i = t / 16; // m
+      const int j = t % 16; // k
+      smemA[i * 16 + j] = loadA_nn(A, M, K, m0 + i, k0 + j);
+      // store B tile as col_major: (k,n)->[n,k] == [j,i]
+      smemB[j * 16 + i] = loadB_nn(B, K, N, k0 + i, n0 + j);
     }
-
-    // ---- fill smemB in col_major: store (i,j) -> [j,i] ----
-    // logical B element needed: B_logical[k0+i, n0+j]
-    // storage:
-    //  - transB=false: B_storage[k0+i, n0+j]  (stored [K,N])
-    //  - transB=true : B_storage[n0+j, k0+i]  (stored [N,K])
-    for (int t = lane; t < 256; t += 32) {
-      const int i = t / 16; // 0..15 (k)
-      const int j = t % 16; // 0..15 (n)
-
-      int b_r = 0, b_c = 0;
-      if (!transB) { b_r = k0 + i; b_c = n0 + j; }
-      else         { b_r = n0 + j; b_c = k0 + i; }
-
-      __half v = __float2half(0.0f);
-      if ((unsigned)b_r < (unsigned)B_rows && (unsigned)b_c < (unsigned)B_cols) {
-        v = B[b_r * ldB + b_c];
-      }
-
-      // col_major store: (i,j) goes to [j,i]
-      smemB[j * 16 + i] = v;
-    }
-
     __syncthreads();
 
     wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> a_frag;
@@ -172,25 +140,145 @@ __global__ void gemm_f16_tc_wmma_kernel(const __half* __restrict__ A,
     __syncthreads();
   }
 
-  // write accumulator to shared, then global
   wmma::store_matrix_sync(smemC, acc, 16, wmma::mem_row_major);
   __syncthreads();
 
   for (int t = lane; t < 256; t += 32) {
     const int i = t / 16;
     const int j = t % 16;
-    const int row = m0 + i;
-    const int col = n0 + j;
-    if ((unsigned)row < (unsigned)M && (unsigned)col < (unsigned)N) {
-      C[row * N + col] = smemC[i * 16 + j];
+    const int r = m0 + i;
+    const int c = n0 + j;
+    if ((unsigned)r < (unsigned)M && (unsigned)c < (unsigned)N) {
+      C[r * N + c] = smemC[i * 16 + j];
     }
   }
+}
+
+__device__ __forceinline__
+void wmma_core_tn(const __half* A, const __half* B, float* C, int M, int N, int K) {
+  const int lane = threadIdx.x & 31;
+  const int m0 = (int)blockIdx.y * 16;
+  const int n0 = (int)blockIdx.x * 16;
+
+  __shared__ __half smemA[256];
+  __shared__ __half smemB[256];
+  __shared__ float  smemC[256];
+
+  wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc;
+  wmma::fill_fragment(acc, 0.0f);
+
+  const int K16 = ceil16_i(K);
+
+  for (int k0 = 0; k0 < K16; k0 += 16) {
+    for (int t = lane; t < 256; t += 32) {
+      const int i = t / 16; // m
+      const int j = t % 16; // k
+      smemA[i * 16 + j] = loadA_tn(A, M, K, m0 + i, k0 + j);
+      smemB[j * 16 + i] = loadB_nn(B, K, N, k0 + i, n0 + j);
+    }
+    __syncthreads();
+
+    wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> a_frag;
+    wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::col_major> b_frag;
+
+    wmma::load_matrix_sync(a_frag, smemA, 16);
+    wmma::load_matrix_sync(b_frag, smemB, 16);
+    wmma::mma_sync(acc, a_frag, b_frag, acc);
+
+    __syncthreads();
+  }
+
+  wmma::store_matrix_sync(smemC, acc, 16, wmma::mem_row_major);
+  __syncthreads();
+
+  for (int t = lane; t < 256; t += 32) {
+    const int i = t / 16;
+    const int j = t % 16;
+    const int r = m0 + i;
+    const int c = n0 + j;
+    if ((unsigned)r < (unsigned)M && (unsigned)c < (unsigned)N) {
+      C[r * N + c] = smemC[i * 16 + j];
+    }
+  }
+}
+
+__device__ __forceinline__
+void wmma_core_nt(const __half* A, const __half* B, float* C, int M, int N, int K) {
+  const int lane = threadIdx.x & 31;
+  const int m0 = (int)blockIdx.y * 16;
+  const int n0 = (int)blockIdx.x * 16;
+
+  __shared__ __half smemA[256];
+  __shared__ __half smemB[256];
+  __shared__ float  smemC[256];
+
+  wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc;
+  wmma::fill_fragment(acc, 0.0f);
+
+  const int K16 = ceil16_i(K);
+
+  for (int k0 = 0; k0 < K16; k0 += 16) {
+    for (int t = lane; t < 256; t += 32) {
+      const int i = t / 16; // m
+      const int j = t % 16; // k
+      smemA[i * 16 + j] = loadA_nn(A, M, K, m0 + i, k0 + j);
+      // B logical is [K,N] = (B_storage)^T; load via loadB_nt
+      smemB[j * 16 + i] = loadB_nt(B, N, K, k0 + i, n0 + j);
+    }
+    __syncthreads();
+
+    wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> a_frag;
+    wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::col_major> b_frag;
+
+    wmma::load_matrix_sync(a_frag, smemA, 16);
+    wmma::load_matrix_sync(b_frag, smemB, 16);
+    wmma::mma_sync(acc, a_frag, b_frag, acc);
+
+    __syncthreads();
+  }
+
+  wmma::store_matrix_sync(smemC, acc, 16, wmma::mem_row_major);
+  __syncthreads();
+
+  for (int t = lane; t < 256; t += 32) {
+    const int i = t / 16;
+    const int j = t % 16;
+    const int r = m0 + i;
+    const int c = n0 + j;
+    if ((unsigned)r < (unsigned)M && (unsigned)c < (unsigned)N) {
+      C[r * N + c] = smemC[i * 16 + j];
+    }
+  }
+}
+
+// -------------------------
+// WMMA kernels (1 warp per block)
+// -------------------------
+__global__ void gemm_f16_tc_wmma_nn_kernel(const __half* __restrict__ A,
+                                          const __half* __restrict__ B,
+                                          float* __restrict__ C,
+                                          int M, int N, int K) {
+  wmma_core_nn(A, B, C, M, N, K);
+}
+
+__global__ void gemm_f16_tc_wmma_tn_kernel(const __half* __restrict__ A, // stored [K,M]
+                                          const __half* __restrict__ B, // [K,N]
+                                          float* __restrict__ C,
+                                          int M, int N, int K) {
+  wmma_core_tn(A, B, C, M, N, K);
+}
+
+__global__ void gemm_f16_tc_wmma_nt_kernel(const __half* __restrict__ A, // [M,K]
+                                          const __half* __restrict__ B, // stored [N,K]
+                                          float* __restrict__ C,
+                                          int M, int N, int K) {
+  wmma_core_nt(A, B, C, M, N, K);
 }
 
 } // namespace gemm_impl
 
 // -------------------------
-// public API implementation (keep as-is; not used by op_call path)
+// public API implementation (optional)
 // -------------------------
 aicf::Status gemm_f32(const float* A,
                       const float* B,
@@ -209,12 +297,11 @@ aicf::Status gemm_f32(const float* A,
             1);
 
   gemm_impl::gemm_f32_naive_kernel<<<grid, block, 0, s>>>(A, B, C, M, N, K);
-
   return aicf::cuda::shim::cuda_last_error_to_status();
 }
 
 // -------------------------
-// Attr helpers (local, minimal)
+// Attr helpers
 // -------------------------
 static inline bool attr_get_bool(const void* attr, const char* key, bool default_val) {
   if (!attr) return default_val;
@@ -233,39 +320,34 @@ static inline bool attr_get_bool(const void* attr, const char* key, bool default
   return default_val;
 }
 
-static inline bool is_f32_2d(const TensorDesc& T) {
-  return (T.dtype == DType::kF32) && (T.rank() == 2);
-}
-static inline bool is_f16_2d(const TensorDesc& T) {
-  return (T.dtype == DType::kF16) && (T.rank() == 2);
-}
+static inline bool is_f32_2d(const TensorDesc& T) { return (T.dtype == DType::kF32) && (T.rank() == 2); }
+static inline bool is_f16_2d(const TensorDesc& T) { return (T.dtype == DType::kF16) && (T.rank() == 2); }
 
-// strict contiguous row-major for 2D
+// strict contiguous row-major for 2D (stride-based)
 static inline bool is_contig_2d(const TensorDesc& T) {
   if (T.rank() != 2) return false;
-  // row-major contiguous: stride[1]=1, stride[0]=shape[1]
   return (T.stride[1] == 1) && (T.stride[0] == T.shape[1]);
 }
 
 // -------------------------
-// Variant #1: f32 naive (existing, keep behavior)
+// Variant #1: f32 naive
+// Attr: transB (optional)
 // -------------------------
 static inline bool gemm_f32_variant_check_2d_ex(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs,
     bool transB) {
 
+  if (!inputs || !outputs) return false;
   if (num_inputs != 2 || num_outputs != 1) return false;
 
   const TensorDesc& A = inputs[0];
   const TensorDesc& B = inputs[1];
   const TensorDesc& C = outputs[0];
 
-  // A, C: strict contig (baseline)
   if (!aicf::cuda::shim::is_f32_contig_2d(A)) return false;
   if (!aicf::cuda::shim::is_f32_contig_2d(C)) return false;
 
-  // B: f32 2D required
   if (!is_f32_2d(B)) return false;
 
   const int64_t M = A.shape[0];
@@ -289,14 +371,12 @@ static bool gemm_f32_variant_supported(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs,
     const void* attr) {
-  if (!inputs || !outputs) return false;
+
   const bool transB = attr_get_bool(attr, "transB", false);
   return gemm_f32_variant_check_2d_ex(inputs, num_inputs, outputs, num_outputs, transB);
 }
 
-static size_t gemm_f32_variant_workspace(const TensorDesc*, int, const void*) {
-  return 0;
-}
+static size_t gemm_f32_variant_workspace(const TensorDesc*, int, const void*) { return 0; }
 
 static aicf::Status gemm_f32_variant_launch(
     const TensorDesc* inputs, int num_inputs,
@@ -304,8 +384,6 @@ static aicf::Status gemm_f32_variant_launch(
     const void* attr,
     void*, size_t,
     cudaStream_t stream) {
-
-  if (!inputs || !outputs) return aicf::Status::InvalidArgument;
 
   const bool transB = attr_get_bool(attr, "transB", false);
 
@@ -317,9 +395,9 @@ static aicf::Status gemm_f32_variant_launch(
   const TensorDesc& B = inputs[1];
   TensorDesc& C = outputs[0];
 
-  const int M = static_cast<int>(A.shape[0]);
-  const int K = static_cast<int>(A.shape[1]);
-  const int N = static_cast<int>(C.shape[1]);
+  const int M = (int)A.shape[0];
+  const int K = (int)A.shape[1];
+  const int N = (int)C.shape[1];
 
   dim3 block(16, 16, 1);
   dim3 grid((N + block.x - 1) / block.x,
@@ -328,18 +406,11 @@ static aicf::Status gemm_f32_variant_launch(
 
   if (!transB) {
     gemm_impl::gemm_f32_naive_kernel<<<grid, block, 0, stream>>>(
-        (const float*)A.data,
-        (const float*)B.data,
-        (float*)C.data,
-        M, N, K);
+        (const float*)A.data, (const float*)B.data, (float*)C.data, M, N, K);
   } else {
-    const int64_t bs0 = B.stride[0];
-    const int64_t bs1 = B.stride[1];
     gemm_impl::gemm_f32_naive_transB_kernel<<<grid, block, 0, stream>>>(
-        (const float*)A.data,
-        (const float*)B.data,
-        (float*)C.data,
-        M, N, K, bs0, bs1);
+        (const float*)A.data, (const float*)B.data, (float*)C.data,
+        M, N, K, B.stride[0], B.stride[1]);
   }
 
   return aicf::cuda::shim::cuda_last_error_to_status();
@@ -357,93 +428,107 @@ KernelVariant make_gemm_f32_naive_variant() {
 }
 
 // -------------------------
-// ✅ Variant #2: f16 TensorCore WMMA (new)
-// Contract (baseline):
-//   - C: [M,N] f32 contiguous
-//   - A:
-//       transA=false: [M,K] f16 contiguous
-//       transA=true : [K,M] f16 contiguous  (storage-transposed)
-//   - B:
-//       transB=false: [K,N] f16 contiguous
-//       transB=true : [N,K] f16 contiguous  (storage-transposed)
-// Attr semantics:
-//   - transA : bool (default false)
-//   - transB : bool (default false)
-// Notes:
-//   - This avoids stride-view transpose in v0.
-//   - Works for NN/TN/NT needed for backward.
+// TC WMMA Variants (NN/TN/NT)
+// Attr: transA, transB (bool)
 // -------------------------
-static inline bool gemm_tc_check_2d_ex(
+static inline bool gemm_tc_check_nn(
     const TensorDesc* inputs, int num_inputs,
-    const TensorDesc* outputs, int num_outputs,
-    bool transA, bool transB) {
+    const TensorDesc* outputs, int num_outputs) {
 
+  if (!inputs || !outputs) return false;
   if (num_inputs != 2 || num_outputs != 1) return false;
 
-  const TensorDesc& A = inputs[0];
-  const TensorDesc& B = inputs[1];
-  const TensorDesc& C = outputs[0];
+  const TensorDesc& A = inputs[0];  // [M,K]
+  const TensorDesc& B = inputs[1];  // [K,N]
+  const TensorDesc& C = outputs[0]; // [M,N]
 
   if (!is_f16_2d(A) || !is_f16_2d(B) || !is_f32_2d(C)) return false;
   if (!is_contig_2d(A) || !is_contig_2d(B) || !is_contig_2d(C)) return false;
 
-  const int64_t M = C.shape[0];
-  const int64_t N = C.shape[1];
-  if (M <= 0 || N <= 0) return false;
+  const int64_t M = A.shape[0];
+  const int64_t K = A.shape[1];
+  const int64_t N = B.shape[1];
 
-  int64_t K = -1;
-
-  if (!transA) {
-    // A: [M,K]
-    if (A.shape[0] != M) return false;
-    K = A.shape[1];
-  } else {
-    // A: [K,M]
-    if (A.shape[1] != M) return false;
-    K = A.shape[0];
-  }
-
-  if (K <= 0) return false;
-
-  if (!transB) {
-    // B: [K,N]
-    if (B.shape[0] != K || B.shape[1] != N) return false;
-  } else {
-    // B: [N,K]
-    if (B.shape[0] != N || B.shape[1] != K) return false;
-  }
-
+  if (M <= 0 || N <= 0 || K <= 0) return false;
+  if (B.shape[0] != K) return false;
+  if (C.shape[0] != M || C.shape[1] != N) return false;
   return true;
 }
 
-static bool gemm_tc_supported(
+static inline bool gemm_tc_check_tn(
+    const TensorDesc* inputs, int num_inputs,
+    const TensorDesc* outputs, int num_outputs) {
+
+  if (!inputs || !outputs) return false;
+  if (num_inputs != 2 || num_outputs != 1) return false;
+
+  const TensorDesc& A = inputs[0];  // stored [K,M]
+  const TensorDesc& B = inputs[1];  // [K,N]
+  const TensorDesc& C = outputs[0]; // [M,N]
+
+  if (!is_f16_2d(A) || !is_f16_2d(B) || !is_f32_2d(C)) return false;
+  if (!is_contig_2d(A) || !is_contig_2d(B) || !is_contig_2d(C)) return false;
+
+  const int64_t K = A.shape[0];
+  const int64_t M = A.shape[1];
+  const int64_t N = B.shape[1];
+
+  if (M <= 0 || N <= 0 || K <= 0) return false;
+  if (B.shape[0] != K) return false;
+  if (C.shape[0] != M || C.shape[1] != N) return false;
+  return true;
+}
+
+static inline bool gemm_tc_check_nt(
+    const TensorDesc* inputs, int num_inputs,
+    const TensorDesc* outputs, int num_outputs) {
+
+  if (!inputs || !outputs) return false;
+  if (num_inputs != 2 || num_outputs != 1) return false;
+
+  const TensorDesc& A = inputs[0];  // [M,K]
+  const TensorDesc& B = inputs[1];  // stored [N,K]
+  const TensorDesc& C = outputs[0]; // [M,N]
+
+  if (!is_f16_2d(A) || !is_f16_2d(B) || !is_f32_2d(C)) return false;
+  if (!is_contig_2d(A) || !is_contig_2d(B) || !is_contig_2d(C)) return false;
+
+  const int64_t M = A.shape[0];
+  const int64_t K = A.shape[1];
+  const int64_t N = B.shape[0];
+
+  if (M <= 0 || N <= 0 || K <= 0) return false;
+  if (B.shape[1] != K) return false;
+  if (C.shape[0] != M || C.shape[1] != N) return false;
+  return true;
+}
+
+static size_t gemm_tc_workspace(const TensorDesc*, int, const void*) { return 0; }
+
+// --- NN variant ---
+static bool gemm_tc_nn_supported(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs,
     const void* attr) {
 
-  if (!inputs || !outputs) return false;
   const bool transA = attr_get_bool(attr, "transA", false);
   const bool transB = attr_get_bool(attr, "transB", false);
-  return gemm_tc_check_2d_ex(inputs, num_inputs, outputs, num_outputs, transA, transB);
+  if (transA || transB) return false;
+  return gemm_tc_check_nn(inputs, num_inputs, outputs, num_outputs);
 }
 
-static size_t gemm_tc_workspace(const TensorDesc*, int, const void*) {
-  return 0;
-}
-
-static aicf::Status gemm_tc_launch(
+static aicf::Status gemm_tc_nn_launch(
     const TensorDesc* inputs, int num_inputs,
     TensorDesc* outputs, int num_outputs,
     const void* attr,
     void*, size_t,
     cudaStream_t stream) {
 
-  if (!inputs || !outputs) return aicf::Status::InvalidArgument;
-
   const bool transA = attr_get_bool(attr, "transA", false);
   const bool transB = attr_get_bool(attr, "transB", false);
+  if (transA || transB) return aicf::Status::InvalidArgument;
 
-  if (!gemm_tc_check_2d_ex(inputs, num_inputs, outputs, num_outputs, transA, transB)) {
+  if (!gemm_tc_check_nn(inputs, num_inputs, outputs, num_outputs)) {
     return aicf::Status::InvalidArgument;
   }
 
@@ -453,27 +538,134 @@ static aicf::Status gemm_tc_launch(
 
   const int M = (int)C.shape[0];
   const int N = (int)C.shape[1];
-  const int K = (int)(!transA ? A.shape[1] : A.shape[0]);
+  const int K = (int)A.shape[1];
 
-  dim3 block(32, 1, 1); // 1 warp
+  dim3 block(32, 1, 1);
   dim3 grid((N + 15) / 16, (M + 15) / 16, 1);
 
-  gemm_impl::gemm_f16_tc_wmma_kernel<<<grid, block, 0, stream>>>(
-      (const __half*)A.data,
-      (const __half*)B.data,
-      (float*)C.data,
-      M, N, K, transA, transB);
+  gemm_impl::gemm_f16_tc_wmma_nn_kernel<<<grid, block, 0, stream>>>(
+      (const __half*)A.data, (const __half*)B.data, (float*)C.data, M, N, K);
 
   return aicf::cuda::shim::cuda_last_error_to_status();
 }
 
-KernelVariant make_gemm_f16_tc_wmma_variant() {
+KernelVariant make_gemm_f16_tc_wmma_nn_variant() {
   KernelVariant v{};
-  v.name = "gemm_f16_tc_wmma";
-  v.priority = 10; // tc > naive
+  v.name = "gemm_f16_tc_wmma_nn";
+  v.priority = 10;
   v.flags = 0;
-  v.launch = gemm_tc_launch;
-  v.supported = gemm_tc_supported;
+  v.launch = gemm_tc_nn_launch;
+  v.supported = gemm_tc_nn_supported;
+  v.query_workspace = gemm_tc_workspace;
+  return v;
+}
+
+// --- TN variant ---
+static bool gemm_tc_tn_supported(
+    const TensorDesc* inputs, int num_inputs,
+    const TensorDesc* outputs, int num_outputs,
+    const void* attr) {
+
+  const bool transA = attr_get_bool(attr, "transA", false);
+  const bool transB = attr_get_bool(attr, "transB", false);
+  if (!transA || transB) return false;
+  return gemm_tc_check_tn(inputs, num_inputs, outputs, num_outputs);
+}
+
+static aicf::Status gemm_tc_tn_launch(
+    const TensorDesc* inputs, int num_inputs,
+    TensorDesc* outputs, int num_outputs,
+    const void* attr,
+    void*, size_t,
+    cudaStream_t stream) {
+
+  const bool transA = attr_get_bool(attr, "transA", false);
+  const bool transB = attr_get_bool(attr, "transB", false);
+  if (!transA || transB) return aicf::Status::InvalidArgument;
+
+  if (!gemm_tc_check_tn(inputs, num_inputs, outputs, num_outputs)) {
+    return aicf::Status::InvalidArgument;
+  }
+
+  const TensorDesc& A = inputs[0]; // stored [K,M]
+  const TensorDesc& B = inputs[1]; // [K,N]
+  TensorDesc& C = outputs[0];      // [M,N]
+
+  const int M = (int)C.shape[0];
+  const int N = (int)C.shape[1];
+  const int K = (int)A.shape[0];
+
+  dim3 block(32, 1, 1);
+  dim3 grid((N + 15) / 16, (M + 15) / 16, 1);
+
+  gemm_impl::gemm_f16_tc_wmma_tn_kernel<<<grid, block, 0, stream>>>(
+      (const __half*)A.data, (const __half*)B.data, (float*)C.data, M, N, K);
+
+  return aicf::cuda::shim::cuda_last_error_to_status();
+}
+
+KernelVariant make_gemm_f16_tc_wmma_tn_variant() {
+  KernelVariant v{};
+  v.name = "gemm_f16_tc_wmma_tn";
+  v.priority = 10;
+  v.flags = 0;
+  v.launch = gemm_tc_tn_launch;
+  v.supported = gemm_tc_tn_supported;
+  v.query_workspace = gemm_tc_workspace;
+  return v;
+}
+
+// --- NT variant ---
+static bool gemm_tc_nt_supported(
+    const TensorDesc* inputs, int num_inputs,
+    const TensorDesc* outputs, int num_outputs,
+    const void* attr) {
+
+  const bool transA = attr_get_bool(attr, "transA", false);
+  const bool transB = attr_get_bool(attr, "transB", false);
+  if (transA || !transB) return false;
+  return gemm_tc_check_nt(inputs, num_inputs, outputs, num_outputs);
+}
+
+static aicf::Status gemm_tc_nt_launch(
+    const TensorDesc* inputs, int num_inputs,
+    TensorDesc* outputs, int num_outputs,
+    const void* attr,
+    void*, size_t,
+    cudaStream_t stream) {
+
+  const bool transA = attr_get_bool(attr, "transA", false);
+  const bool transB = attr_get_bool(attr, "transB", false);
+  if (transA || !transB) return aicf::Status::InvalidArgument;
+
+  if (!gemm_tc_check_nt(inputs, num_inputs, outputs, num_outputs)) {
+    return aicf::Status::InvalidArgument;
+  }
+
+  const TensorDesc& A = inputs[0]; // [M,K]
+  const TensorDesc& B = inputs[1]; // stored [N,K]
+  TensorDesc& C = outputs[0];      // [M,N]
+
+  const int M = (int)C.shape[0];
+  const int N = (int)C.shape[1];
+  const int K = (int)A.shape[1];
+
+  dim3 block(32, 1, 1);
+  dim3 grid((N + 15) / 16, (M + 15) / 16, 1);
+
+  gemm_impl::gemm_f16_tc_wmma_nt_kernel<<<grid, block, 0, stream>>>(
+      (const __half*)A.data, (const __half*)B.data, (float*)C.data, M, N, K);
+
+  return aicf::cuda::shim::cuda_last_error_to_status();
+}
+
+KernelVariant make_gemm_f16_tc_wmma_nt_variant() {
+  KernelVariant v{};
+  v.name = "gemm_f16_tc_wmma_nt";
+  v.priority = 10;
+  v.flags = 0;
+  v.launch = gemm_tc_nt_launch;
+  v.supported = gemm_tc_nt_supported;
   v.query_workspace = gemm_tc_workspace;
   return v;
 }
