@@ -151,3 +151,4 @@ if __name__ == "__main__":
 # ncu --target-processes all --kernel-name "add_f16x2_kernel" --launch-count 1 --section SpeedOfLight -o add_vec2 python .\test_aicf_variants_ncu.py
 
 
+# "C:\Program Files\NVIDIA Corporation\Nsight Compute 2025.4.0\ncu.exe"   --target-processes all   --kernel-name-base mangled   --launch-count 1   python ai-compiler-framework/examples/python/test_aicf_variants_ncu.py
