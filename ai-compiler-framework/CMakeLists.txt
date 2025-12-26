@@ -82,12 +82,6 @@ endif()
 add_executable(aicf_smoke examples/smoke.cpp)
 target_link_libraries(aicf_smoke PRIVATE aicf)
 
-add_executable(aicf_gemm_bench examples/cuda_gemm_bench.cu)
-target_link_libraries(aicf_gemm_bench PRIVATE aicf)
-
-add_executable(aicf_eltwise_bench examples/cuda_eltwise_bench.cu)
-target_link_libraries(aicf_eltwise_bench PRIVATE aicf)
-
 # -----------------------------
 # PyTorch / pybind11 extensions
 # -----------------------------

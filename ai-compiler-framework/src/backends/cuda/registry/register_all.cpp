@@ -29,9 +29,11 @@ KernelVariant make_relu_f16_vec2_variant();  // half2
 
 // Gemm
 KernelVariant make_gemm_f32_naive_variant();
-KernelVariant make_gemm_f16_tc_wmma_nn_variant();
-KernelVariant make_gemm_f16_tc_wmma_tn_variant();
-KernelVariant make_gemm_f16_tc_wmma_nt_variant();
+
+// [CHANGED] TC f16 in -> f16 out variants
+KernelVariant make_gemm_f16_tc_wmma_nn_out_f16_variant();
+KernelVariant make_gemm_f16_tc_wmma_tn_out_f16_variant();
+KernelVariant make_gemm_f16_tc_wmma_nt_out_f16_variant();
 
 // BiasAdd
 KernelVariant make_bias_add_f32_variant();
@@ -91,10 +93,10 @@ extern "C" void aicf_cuda_register_all_kernels() {
   // Gemm
   // --------------------------------------------------------------------------
   {
-    // Prefer TC variants; mutually exclusive via supported() on (transA/transB).
-    R.register_kernel(OpKind::Gemm, make_gemm_f16_tc_wmma_nn_variant());
-    R.register_kernel(OpKind::Gemm, make_gemm_f16_tc_wmma_tn_variant());
-    R.register_kernel(OpKind::Gemm, make_gemm_f16_tc_wmma_nt_variant());
+    // [CHANGED] Prefer TC out_f16 variants; mutually exclusive via supported() on (transA/transB).
+    R.register_kernel(OpKind::Gemm, make_gemm_f16_tc_wmma_nn_out_f16_variant());
+    R.register_kernel(OpKind::Gemm, make_gemm_f16_tc_wmma_tn_out_f16_variant());
+    R.register_kernel(OpKind::Gemm, make_gemm_f16_tc_wmma_nt_out_f16_variant());
 
     // Fallback
     R.register_kernel(OpKind::Gemm, make_gemm_f32_naive_variant());

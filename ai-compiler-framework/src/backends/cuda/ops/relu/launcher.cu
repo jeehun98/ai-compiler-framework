@@ -111,16 +111,53 @@ aicf::Status relu_f16(const void* in,
 }
 
 // -------------------------
-// Registry Variants - v0.2 Plan A (no workspace, no attr semantics yet)
+// Registry Variants
+//
+// CHANGED:
+//   - Previously: only contig + rank1 ([N]) using is_*_contig_1d()
+//   - Now: contig ANY-RANK, use numel as N
 //
 // Contract:
-//   inputs[0]=I [N], outputs[0]=O [N]
-//   contig + rank1; dtype differs per variant
+//   inputs[0]=I [*], outputs[0]=O [*]
+//   - same rank + same shape
+//   - contiguous row-major
+//   - dtype differs per variant
 // -------------------------
+
+namespace {
+
+// numel for any rank
+static inline int64_t numel_of(const TensorDesc& T) {
+  int64_t n = 1;
+  const int r = T.rank();
+  for (int i = 0; i < r; ++i) n *= T.shape[i];
+  return n;
+}
+
+// check row-major contiguous for any rank
+static inline bool is_contig_anyrank(const TensorDesc& T) {
+  const int r = T.rank();
+  if (r <= 0) return false;
+  if (T.stride[r - 1] != 1) return false;
+  for (int i = r - 2; i >= 0; --i) {
+    if (T.stride[i] != T.shape[i + 1] * T.stride[i + 1]) return false;
+  }
+  return true;
+}
+
+static inline bool same_shape_anyrank(const TensorDesc& A, const TensorDesc& B) {
+  if (A.rank() != B.rank()) return false;
+  for (int i = 0; i < A.rank(); ++i) {
+    if (A.shape[i] != B.shape[i]) return false;
+  }
+  return true;
+}
 
 static size_t relu_variant_workspace(const TensorDesc*, int, const void*) {
   return 0;
 }
+
+} // anonymous namespace
 
 // ---- F32 variant ----
 static inline bool relu_f32_variant_check(
@@ -133,10 +170,14 @@ static inline bool relu_f32_variant_check(
   const TensorDesc& I = inputs[0];
   const TensorDesc& O = outputs[0];
 
-  if (!aicf::cuda::shim::is_f32_contig_1d(I)) return false;
-  if (!aicf::cuda::shim::is_f32_contig_1d(O)) return false;
-  if (!aicf::cuda::shim::same_shape_1d(I, O)) return false;
-  return (O.shape[0] > 0);
+  if (I.dtype != DType::kF32) return false;
+  if (O.dtype != DType::kF32) return false;
+
+  if (!same_shape_anyrank(I, O)) return false;
+  if (!is_contig_anyrank(I) || !is_contig_anyrank(O)) return false;
+
+  const int64_t N = numel_of(O);
+  return (N > 0 && N <= INT_MAX);
 }
 
 static bool relu_f32_variant_supported(
@@ -160,7 +201,8 @@ static aicf::Status relu_f32_variant_launch(
   const TensorDesc& I = inputs[0];
   TensorDesc& O = outputs[0];
 
-  const int N = static_cast<int>(O.shape[0]);
+  const int N = (int)numel_of(O);
+
   constexpr int kThreads = 256;
   const int blocks = (N + kThreads - 1) / kThreads;
 
@@ -192,10 +234,14 @@ static inline bool relu_f16_variant_check(
   const TensorDesc& I = inputs[0];
   const TensorDesc& O = outputs[0];
 
-  if (!aicf::cuda::shim::is_f16_contig_1d(I)) return false;
-  if (!aicf::cuda::shim::is_f16_contig_1d(O)) return false;
-  if (!aicf::cuda::shim::same_shape_1d(I, O)) return false;
-  return (O.shape[0] > 0);
+  if (I.dtype != DType::kF16) return false;
+  if (O.dtype != DType::kF16) return false;
+
+  if (!same_shape_anyrank(I, O)) return false;
+  if (!is_contig_anyrank(I) || !is_contig_anyrank(O)) return false;
+
+  const int64_t N = numel_of(O);
+  return (N > 0 && N <= INT_MAX);
 }
 
 static bool relu_f16_variant_supported(
@@ -219,7 +265,8 @@ static aicf::Status relu_f16_variant_launch(
   const TensorDesc& I = inputs[0];
   TensorDesc& O = outputs[0];
 
-  const int N = static_cast<int>(O.shape[0]);
+  const int N = (int)numel_of(O);
+
   constexpr int kThreads = 256;
   const int blocks = (N + kThreads - 1) / kThreads;
 
@@ -252,8 +299,10 @@ static inline bool relu_f16_vec2_check(
   const TensorDesc& I = inputs[0];
   const TensorDesc& O = outputs[0];
 
+  const int64_t N = numel_of(O);
+
   // even length
-  if (!aicf::cuda::shim::is_even_len_1d(O)) return false;
+  if ((N & 1) != 0) return false;
 
   // half2 requires 4B alignment
   constexpr size_t kAlign = 4;
@@ -284,7 +333,7 @@ static aicf::Status relu_f16_vec2_variant_launch(
   const TensorDesc& I = inputs[0];
   TensorDesc& O = outputs[0];
 
-  const int N = static_cast<int>(O.shape[0]);
+  const int N = (int)numel_of(O);
   const int N2 = N / 2;
 
   constexpr int kThreads = 256;
