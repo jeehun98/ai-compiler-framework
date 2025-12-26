@@ -23,7 +23,7 @@ class AicfBackend:
         self.cfg.mode = mode
 
     # -----------------
-    # capture (same as your v0.2)
+    # capture
     # -----------------
     def prepare_capture_batch(self, batch) -> Tuple[Tensor, Tensor]:
         x, t = batch
@@ -33,6 +33,7 @@ class AicfBackend:
         if not isinstance(x_t, torch.Tensor) or not isinstance(t_t, torch.Tensor):
             raise TypeError("prepare_capture_batch expects Tensor wrapper or torch.Tensor")
 
+        # capture-safe: allocate once, keep contiguous buffers
         self._cap_x = x_t.clone().contiguous()
         self._cap_t = t_t.clone().contiguous()
         return Tensor(self._cap_x), Tensor(self._cap_t)
@@ -99,8 +100,6 @@ class AicfBackend:
             if not t.is_contiguous():
                 raise RuntimeError(f"{what}: requires contiguous tensors (got non-contiguous)")
 
-
-
     def _sig(self, op_name: str, *tensors, **kwargs) -> str:
         parts = [op_name] + [tt.signature() for tt in tensors]
         kv = {k: v for k, v in kwargs.items() if v is not None and k != "attrs"}
@@ -109,20 +108,27 @@ class AicfBackend:
         return "|".join(parts)
 
     # -----------------
+    # helpers (capture-safe rules)
+    # -----------------
+    def _is_capture_like(self) -> bool:
+        # treat capture & replay as "no allocation / no dtype transform / no contiguous()"
+        return self.cfg.mode in ("capture", "replay")
+
+    def _forbid_transform_in_capture(self, op: str, why: str) -> None:
+        if self._is_capture_like():
+            raise RuntimeError(f"{op}: forbidden in {self.cfg.mode} mode: {why}")
+
+    # -----------------
     # ops
     # -----------------
     def relu(self, x: Tensor) -> Tensor:
         sig = self._sig("relu", x)
         with self.profiler.scope("relu", sig, mode=self.cfg.mode):
-            X = x.t.contiguous()
-            # EltwiseRelu launcher가 1D 기준이면 flatten 후 복구
-            orig = X.shape
-            X1 = X.view(-1).contiguous()
-            Y1 = torch.empty_like(X1)
-            self._call(_C.OpKind.EltwiseRelu, [X1], [Y1], {})
-            Y = Y1.view(orig)
+            X = x.t
+            self._require_contig(X, what="relu")
+            Y = torch.empty_like(X)
+            self._call(_C.OpKind.EltwiseRelu, [X], [Y], {})
             return Tensor(Y)
-
 
     def gemm(
         self,
@@ -142,49 +148,81 @@ class AicfBackend:
             transA = bool(attrs.get("transA", False))
             transB = bool(attrs.get("transB", False))
 
-            # ---- TC path contract enforcement ----
-            # Your TC variants require:
-            #   A=f16, B=f16, C=f32
-            # So if either input is f16, force both to f16 and output to f32.
+            # --- dtype policy ---
+            # If any input is f16 -> use TC path (f16 inputs) and keep output dtype = f16
+            # (because you added TC out_f16 variants and want to keep f16 chain)
             want_tc = (A.dtype == torch.float16) or (B.dtype == torch.float16)
 
+            # capture-safe: do not .to() or .contiguous() inside
             if want_tc:
                 if A.dtype != torch.float16:
-                    A = A.to(torch.float16)
+                    self._forbid_transform_in_capture("gemm", "A.dtype cast to f16 required")
+                    A = A.to(torch.float16).contiguous()
                 if B.dtype != torch.float16:
-                    B = B.to(torch.float16)
+                    self._forbid_transform_in_capture("gemm", "B.dtype cast to f16 required")
+                    B = B.to(torch.float16).contiguous()
 
-                # output must be f32 for TC variants
-                # shape inference
+                # --- transB storage contract enforcement ---
+                # Your TC NT(out_f16) path expects:
+                #   transB=True -> B is stored as [N,K] contiguous
+                # But callers sometimes pass [K,N] contiguous.
+                # Fix it only in eager mode (capture-safe prohibits this).
                 if transB:
-                    out_N = B.shape[0]   # B storage [N,K]
-                else:
-                    out_N = B.shape[1]   # B [K,N]
-                C = torch.empty((A.shape[0], out_N), device=A.device, dtype=torch.float32).contiguous()
+                    # We need K from A shape (if not transA), otherwise from A storage shape.
+                    if transA:
+                        # A storage is [K,M], so K = A.shape[0]
+                        K = A.shape[0]
+                    else:
+                        # A is [M,K]
+                        K = A.shape[1]
 
+                    # If B looks like [K,N] (i.e., B.shape[0] == K), transpose storage.
+                    if B.dim() == 2 and B.shape[0] == K:
+                        self._forbid_transform_in_capture("gemm", "transB=True requires B_storage=[N,K]; need B.t().contiguous()")
+                        B = B.t().contiguous()  # now [N,K]
+
+                # infer output shape
+                M = (A.shape[1] if transA else A.shape[0])  # logical M
+                if transB:
+                    # B storage [N,K] => logical N = B.shape[0]
+                    N = B.shape[0]
+                else:
+                    # B [K,N]
+                    N = B.shape[1]
+
+                # TC out_f16 variants expect output f16
+                C = torch.empty((M, N), device=A.device, dtype=torch.float16).contiguous()
                 self._call(_C.OpKind.Gemm, [A, B], [C], attrs)
 
             else:
-                # f32 naive fallback (expects A,B,C all f32)
+                # f32 fallback path
                 if A.dtype != torch.float32:
-                    A = A.to(torch.float32)
+                    self._forbid_transform_in_capture("gemm", "A.dtype cast to f32 required")
+                    A = A.to(torch.float32).contiguous()
                 if B.dtype != torch.float32:
-                    B = B.to(torch.float32)
+                    self._forbid_transform_in_capture("gemm", "B.dtype cast to f32 required")
+                    B = B.to(torch.float32).contiguous()
 
                 if transB:
-                    out_N = B.shape[0]
+                    # fallback expects transB kernel handles stride OR storage; your naive transB uses strides.
+                    # but current gemm_f32_variant_check requires B shape [N,K] with strides set.
+                    # Here we assume B is already storage [N,K] if transB=True.
+                    N = B.shape[0]
+                    M = (A.shape[1] if transA else A.shape[0])
                 else:
-                    out_N = B.shape[1]
+                    N = B.shape[1]
+                    M = (A.shape[1] if transA else A.shape[0])
 
-                C = torch.empty((A.shape[0], out_N), device=A.device, dtype=torch.float32).contiguous()
+                C = torch.empty((M, N), device=A.device, dtype=torch.float32).contiguous()
                 self._call(_C.OpKind.Gemm, [A, B], [C], attrs)
 
             # ---- BiasAdd ----
             if bias is not None:
                 bias_t = bias.t
-                if bias_t.dtype != C.dtype:
-                    bias_t = bias_t.to(C.dtype)
                 self._require_contig(bias_t, what="bias_add")
+                if bias_t.dtype != C.dtype:
+                    self._forbid_transform_in_capture("bias_add", "bias dtype cast required")
+                    bias_t = bias_t.to(C.dtype).contiguous()
                 C2 = torch.empty_like(C)
                 self._call(_C.OpKind.BiasAdd, [C, bias_t], [C2], {"axis": -1})
                 C = C2
@@ -196,7 +234,6 @@ class AicfBackend:
                 C = C3
 
             return Tensor(C)
-
 
     def mse(self, y: Tensor, t: Tensor) -> Tensor:
         sig = self._sig("mse", y, t)

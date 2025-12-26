@@ -10,7 +10,7 @@ from .. import ops
 
 def _env_dtype() -> torch.dtype:
     s = os.environ.get("AICF_DTYPE", "f32").lower()
-    return torch.float16 if s == "f16" else torch.float32
+    return torch.float16 if s in ("f16", "fp16", "half") else torch.float32
 
 
 class Linear(Module):
@@ -19,6 +19,7 @@ class Linear(Module):
 
         dt = _env_dtype()
 
+        # weight storage: [out_features, in_features] == [N,K] in GEMM terms
         w = torch.empty((out_features, in_features), device="cuda", dtype=dt).contiguous()
         torch.nn.init.kaiming_uniform_(w, a=5**0.5)
         self.weight = Parameter(Tensor(w))
@@ -33,6 +34,5 @@ class Linear(Module):
         if self.bias is not None:
             self.add_parameter("bias", self.bias)
 
-    # ✅ 이게 반드시 "class Linear" 내부에 있어야 함 (들여쓰기 중요)
     def forward(self, x: Tensor) -> Tensor:
         return ops.linear(x, self.weight, self.bias if self.bias is not None else None)
