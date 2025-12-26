@@ -1,19 +1,23 @@
 #pragma once
+
 #include <cuda_runtime.h>
-#include <cstdint>
+#include <cuda_fp16.h>
 
 namespace aicf::cuda::bias_add_impl {
 
 __global__ void bias_add_f32_kernel(const float* __restrict__ Y,
                                    const float* __restrict__ bias,
                                    float* __restrict__ Out,
-                                   int M, int N) {
-  const int row = (int)(blockIdx.y * blockDim.y + threadIdx.y);
-  const int col = (int)(blockIdx.x * blockDim.x + threadIdx.x);
-  if (row >= M || col >= N) return;
+                                   int M, int N);
 
-  const int idx = row * N + col;
-  Out[idx] = Y[idx] + bias[col];
-}
+__global__ void bias_add_f16_kernel(const __half* __restrict__ Y,
+                                   const __half* __restrict__ bias,
+                                   __half* __restrict__ Out,
+                                   int M, int N);
+
+__global__ void bias_add_f16x2_kernel(const __half2* __restrict__ Y,
+                                      const __half2* __restrict__ bias,
+                                      __half2* __restrict__ Out,
+                                      int M, int N2); // N2 = N/2
 
 } // namespace aicf::cuda::bias_add_impl

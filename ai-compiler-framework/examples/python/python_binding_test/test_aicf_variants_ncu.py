@@ -2,7 +2,7 @@ import os
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 PYMOD_DIR  = REPO_ROOT / "build" / "python"
 PKG_DIR    = PYMOD_DIR / "aicf_cuda"
 

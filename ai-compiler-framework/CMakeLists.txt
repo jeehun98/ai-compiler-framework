@@ -32,6 +32,11 @@ add_library(aicf
     src/backends/cuda/ops/relu/launcher.cu
     src/backends/cuda/ops/gemm/launcher.cu
     src/backends/cuda/ops/bias_add/launcher.cu
+    src/backends/cuda/ops/reduce_sum/launcher.cu  
+    src/backends/cuda/ops/mse_grad/launcher.cu
+    src/backends/cuda/ops/relu_bwd/launcher.cu
+    src/backends/cuda/ops/sgd_step/launcher.cu
+
 
     src/backends/cuda/registry/registry.cpp
     src/backends/cuda/registry/register_all.cpp
@@ -76,12 +81,6 @@ endif()
 # -----------------------------
 add_executable(aicf_smoke examples/smoke.cpp)
 target_link_libraries(aicf_smoke PRIVATE aicf)
-
-add_executable(aicf_gemm_bench examples/cuda_gemm_bench.cu)
-target_link_libraries(aicf_gemm_bench PRIVATE aicf)
-
-add_executable(aicf_eltwise_bench examples/cuda_eltwise_bench.cu)
-target_link_libraries(aicf_eltwise_bench PRIVATE aicf)
 
 # -----------------------------
 # PyTorch / pybind11 extensions
@@ -155,4 +154,3 @@ endfunction()
 
 # Plan A: single unified module "aicf_cuda" exporting op_call()
 aicf_add_op_pybind(aicf_cuda_C src/python_bindings/bindings.cpp _C)
-

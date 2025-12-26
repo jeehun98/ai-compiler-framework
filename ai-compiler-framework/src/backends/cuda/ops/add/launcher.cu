@@ -1,4 +1,3 @@
-// src/backends/cuda/ops/add/launcher.cu
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 
@@ -48,7 +47,7 @@ __global__ void add_f16_kernel(const __half* __restrict__ a,
 __global__ void add_f16x2_kernel(const __half2* __restrict__ a,
                                  const __half2* __restrict__ b,
                                  __half2* __restrict__ out,
-                                 int N2) {  // N2 = N/2
+                                 int N2) {
   const int i = (int)(blockIdx.x * blockDim.x + threadIdx.x);
   if (i < N2) out[i] = __hadd2(a[i], b[i]);
 }
@@ -69,12 +68,13 @@ aicf::Status add_f32(const float* a,
 
   constexpr int kThreads = 256;
   const int blocks = (N + kThreads - 1) / kThreads;
-  add_impl::add_f32_kernel<<<blocks, kThreads, 0, s>>>(a, b, out, N);
 
+  add_impl::add_f32_kernel<<<blocks, kThreads, 0, s>>>(a, b, out, N);
   return aicf::cuda::shim::cuda_last_error_to_status();
 }
 
 // v0.2: keep header free from cuda_fp16 by using void* API
+// v0.2+: add half2 fastpath when (N even) && (ptr 4B aligned)
 aicf::Status add_f16(const void* a,
                      const void* b,
                      void* out,
@@ -85,9 +85,24 @@ aicf::Status add_f16(const void* a,
   cudaStream_t s = aicf::cuda::shim::to_cuda_stream(stream);
 
   constexpr int kThreads = 256;
-  const int blocks = (N + kThreads - 1) / kThreads;
-  add_impl::add_f16_kernel<<<blocks, kThreads, 0, s>>>(
-      (const __half*)a, (const __half*)b, (__half*)out, N);
+
+  const bool even = ((N & 1) == 0);
+  const bool a_aligned = (((uintptr_t)a & 0x3u) == 0);
+  const bool b_aligned = (((uintptr_t)b & 0x3u) == 0);
+  const bool o_aligned = (((uintptr_t)out & 0x3u) == 0);
+
+  if (even && a_aligned && b_aligned && o_aligned) {
+    const int N2 = N / 2;
+    const int blocks = (N2 + kThreads - 1) / kThreads;
+
+    add_impl::add_f16x2_kernel<<<blocks, kThreads, 0, s>>>(
+        (const __half2*)a, (const __half2*)b, (__half2*)out, N2);
+  } else {
+    const int blocks = (N + kThreads - 1) / kThreads;
+
+    add_impl::add_f16_kernel<<<blocks, kThreads, 0, s>>>(
+        (const __half*)a, (const __half*)b, (__half*)out, N);
+  }
 
   return aicf::cuda::shim::cuda_last_error_to_status();
 }
@@ -104,8 +119,6 @@ static size_t add_variant_workspace(const TensorDesc*, int, const void*) {
   return 0;
 }
 
-// Common shape check for 1D elementwise with 2 inputs / 1 output.
-// NOTE: dtype/contig check is passed as function pointer to avoid code duplication.
 static inline bool add_1d_common_check(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs,
@@ -235,7 +248,6 @@ static inline bool add_f16_vec2_check(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs) {
 
-  // Base contract: f16 contig 1d + same shape
   if (!add_1d_common_check(inputs, num_inputs, outputs, num_outputs,
                            &aicf::cuda::shim::is_f16_contig_1d)) {
     return false;
@@ -245,10 +257,8 @@ static inline bool add_f16_vec2_check(
   const TensorDesc& B = inputs[1];
   const TensorDesc& O = outputs[0];
 
-  // shape 동일이므로 O만 봐도 충분
   if (!aicf::cuda::shim::is_even_len_1d(O)) return false;
 
-  // half2 requires 4B alignment on data pointers
   constexpr size_t kHalf2Align = 4;
   if (!aicf::cuda::shim::is_aligned_data(A, kHalf2Align)) return false;
   if (!aicf::cuda::shim::is_aligned_data(B, kHalf2Align)) return false;
@@ -298,7 +308,7 @@ static aicf::Status add_f16_vec2_variant_launch(
 KernelVariant make_add_f16_vec2_variant() {
   KernelVariant v{};
   v.name = "add_f16_vec2_half2";
-  v.priority = 10;  // vectorized wins over naive
+  v.priority = 10;
   v.flags = 0;
   v.launch = add_f16_vec2_variant_launch;
   v.supported = add_f16_vec2_variant_supported;

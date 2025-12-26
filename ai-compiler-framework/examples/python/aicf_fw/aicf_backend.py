@@ -1,172 +1,134 @@
 from __future__ import annotations
-from typing import Optional, Any, Dict, Tuple
-import os
+from dataclasses import dataclass
+from typing import Any, Dict, Optional, Tuple
+
 import torch
+from aicf_cuda import _C
 
-from .torch_backend import TorchBackend, BackendConfig
 from .tensor import Tensor
-
-try:
-    from aicf_cuda import _C as C  # ✅ 너 바인딩: PYBIND11_MODULE(_C, ...)
-except Exception:
-    C = None
-
-
-def _unwrap(x: Any) -> torch.Tensor:
-    return x.t if hasattr(x, "t") else x
-
-
-def _wrap(t: torch.Tensor) -> Tensor:
-    return t if isinstance(t, Tensor) else Tensor(t)
-
-
-def _is_cuda_contig_f32(t: torch.Tensor) -> bool:
-    return t.is_cuda and t.dtype == torch.float32 and t.is_contiguous()
+from .torch_backend import BackendConfig
+from .utils.profiling import OpProfiler
 
 
 class AicfBackend:
-    """
-    - unified op_call backend
-    - fallback to TorchBackend when constraints not met
-    - capture/replay via _C.capture_* API
-    - input binding for replay uses fixed buffers + copy_
-    """
+    def __init__(self, cfg: Optional[BackendConfig] = None) -> None:
+        self.cfg = cfg or BackendConfig()
+        self.profiler = OpProfiler(enabled=self.cfg.enable_profiler)
 
-    def __init__(self, cfg: BackendConfig):
-        self.cfg = cfg
-        self.fallback = TorchBackend(cfg)
-
-        self.enabled = (os.environ.get("AICF_ENABLE_AICF_KERNELS", "1") == "1")
-        self.debug = (os.environ.get("AICF_BACKEND_DEBUG", "0") == "1")
-        self.mode: str = "eager"
-
-        # capture state
+        self._cap_x: Optional[torch.Tensor] = None
+        self._cap_t: Optional[torch.Tensor] = None
         self._captured: bool = False
-        self._capturing: bool = False
-        self._x_buf: Optional[torch.Tensor] = None
-        self._t_buf: Optional[torch.Tensor] = None
-
-        if C is None:
-            if self.debug:
-                print("[AICF] aicf_cuda._C not found -> fallback to torch")
-            self.enabled = False
-
-    def _log(self, msg: str):
-        if self.debug:
-            print(msg)
 
     def set_mode(self, mode: str) -> None:
-        self.mode = mode
-        if hasattr(self.fallback, "set_mode"):
-            self.fallback.set_mode(mode)
+        self.cfg.mode = mode
 
-    # -------------------------
-    # Capture helpers (forward-only bench / later full-step)
-    # -------------------------
-    def prepare_capture_batch(self, batch) -> Tuple[Any, Any]:
-        """
-        CUDA Graph에서 input pointer가 고정돼야 하므로,
-        캡처/리플레이는 이 버퍼를 입력으로 사용해야 함.
-        """
+    # -----------------
+    # capture
+    # -----------------
+    def prepare_capture_batch(self, batch) -> Tuple[Tensor, Tensor]:
         x, t = batch
-        xt = _unwrap(x)
-        tt = _unwrap(t)
+        x_t = x.t if hasattr(x, "t") else x
+        t_t = t.t if hasattr(t, "t") else t
 
-        if not (isinstance(xt, torch.Tensor) and isinstance(tt, torch.Tensor)):
-            raise RuntimeError("prepare_capture_batch expects torch.Tensor or Tensor wrapper with .t")
-        if not xt.is_cuda or not tt.is_cuda:
-            raise RuntimeError("capture requires CUDA tensors")
+        if not isinstance(x_t, torch.Tensor) or not isinstance(t_t, torch.Tensor):
+            raise TypeError("prepare_capture_batch expects Tensor wrapper or torch.Tensor")
 
-        need_new = (
-            self._x_buf is None or self._t_buf is None
-            or self._x_buf.shape != xt.shape or self._x_buf.dtype != xt.dtype or self._x_buf.device != xt.device
-            or self._t_buf.shape != tt.shape or self._t_buf.dtype != tt.dtype or self._t_buf.device != tt.device
-        )
-        if need_new:
-            self._x_buf = torch.empty_like(xt, memory_format=torch.contiguous_format)
-            self._t_buf = torch.empty_like(tt, memory_format=torch.contiguous_format)
-            self._log(f"[AICF] allocate capture buffers: x={tuple(xt.shape)} t={tuple(tt.shape)}")
-
-        self._x_buf.copy_(xt)
-        self._t_buf.copy_(tt)
-        return (_wrap(self._x_buf), _wrap(self._t_buf))
+        # capture-safe: allocate once, keep contiguous buffers
+        self._cap_x = x_t.clone().contiguous()
+        self._cap_t = t_t.clone().contiguous()
+        return Tensor(self._cap_x), Tensor(self._cap_t)
 
     def bind_batch(self, batch) -> None:
-        if self._x_buf is None or self._t_buf is None:
+        if self._cap_x is None or self._cap_t is None:
             raise RuntimeError("bind_batch called before prepare_capture_batch")
 
         x, t = batch
-        xt = _unwrap(x)
-        tt = _unwrap(t)
+        x_t = x.t if hasattr(x, "t") else x
+        t_t = t.t if hasattr(t, "t") else t
 
-        if xt.shape != self._x_buf.shape or tt.shape != self._t_buf.shape:
-            raise RuntimeError(
-                f"bind_batch shape mismatch: got x={tuple(xt.shape)} t={tuple(tt.shape)} "
-                f"expected x={tuple(self._x_buf.shape)} t={tuple(self._t_buf.shape)}"
-            )
-        self._x_buf.copy_(xt)
-        self._t_buf.copy_(tt)
+        if x_t.shape != self._cap_x.shape or x_t.dtype != self._cap_x.dtype or x_t.device != self._cap_x.device:
+            raise RuntimeError("bind_batch: x mismatch")
+        if t_t.shape != self._cap_t.shape or t_t.dtype != self._cap_t.dtype or t_t.device != self._cap_t.device:
+            raise RuntimeError("bind_batch: t mismatch")
+
+        self._cap_x.copy_(x_t)
+        self._cap_t.copy_(t_t)
+
+    def set_inputs(self, batch) -> None:
+        self.bind_batch(batch)
+
+    def warmup(self, model: Any, sample_batch: Any) -> None:
+        return
 
     def capture_begin(self) -> None:
-        if not self.enabled:
-            raise RuntimeError("capture_begin called but AICF backend is disabled")
-        if self._capturing:
-            raise RuntimeError("capture_begin called while already capturing")
-
-        C.capture_reset()
-        C.capture_begin()
-        self._capturing = True
+        self.set_mode("capture")
+        _C.capture_begin()
         self._captured = False
 
     def capture_end(self) -> None:
-        if not self._capturing:
-            raise RuntimeError("capture_end called but not capturing")
-        C.capture_end()
-        self._capturing = False
+        _C.capture_end()
         self._captured = True
 
-    def replay(self):
+    def replay(self) -> None:
         if not self._captured:
-            raise RuntimeError("replay called but no captured graph exists")
-        C.replay()
-        return None
+            raise RuntimeError("replay called but graph not captured yet")
+        _C.replay()
 
-    # -------------------------
-    # Unified op_call wrappers
-    # -------------------------
-    def _op_call(self, kind, inputs, outputs, attrs: Optional[Dict[str, Any]] = None) -> None:
-        if attrs is None:
-            attrs = {}
-        C.op_call(kind, inputs, outputs, attrs)
+    # -----------------
+    # low-level call
+    # -----------------
+    def _call(self, kind: _C.OpKind, inputs, outputs, attrs=None) -> None:
+        try:
+            _C.op_call(kind, inputs, outputs, attrs or {})
+        except Exception as e:
+            def _desc(t: torch.Tensor) -> str:
+                return f"shape={tuple(t.shape)} dtype={t.dtype} contig={t.is_contiguous()} stride={tuple(t.stride())}"
+            in_s = ", ".join([_desc(t) for t in inputs])
+            out_s = ", ".join([_desc(t) for t in outputs])
+            raise RuntimeError(
+                f"op_call FAILED kind={int(kind)} attrs={attrs or {}}\n"
+                f"  inputs:  {in_s}\n"
+                f"  outputs: {out_s}\n"
+                f"  orig: {e}"
+            )
 
-    # -------------------------
-    # Ops
-    # -------------------------
-    def add(self, a: Tensor, b: Tensor) -> Tensor:
-        if (not self.enabled):
-            return self.fallback.add(a, b)
+    def _require_contig(self, *ts: torch.Tensor, what: str) -> None:
+        # capture-safe contract: do not call contiguous() here.
+        for t in ts:
+            if not isinstance(t, torch.Tensor):
+                raise TypeError(f"{what}: expected torch.Tensor, got {type(t)}")
+            if not t.is_contiguous():
+                raise RuntimeError(f"{what}: requires contiguous tensors (got non-contiguous)")
 
-        ta, tb = _unwrap(a), _unwrap(b)
-        if not (_is_cuda_contig_f32(ta) and _is_cuda_contig_f32(tb)):
-            return self.fallback.add(a, b)
-        if ta.numel() != tb.numel():
-            return self.fallback.add(a, b)
+    def _sig(self, op_name: str, *tensors, **kwargs) -> str:
+        parts = [op_name] + [tt.signature() for tt in tensors]
+        kv = {k: v for k, v in kwargs.items() if v is not None and k != "attrs"}
+        if kv:
+            parts.append(str(kv))
+        return "|".join(parts)
 
-        out = torch.empty_like(ta)
-        self._op_call(C.OpKind.EltwiseAdd, [ta, tb], [out], {})
-        return _wrap(out)
+    # -----------------
+    # helpers (capture-safe rules)
+    # -----------------
+    def _is_capture_like(self) -> bool:
+        # treat capture & replay as "no allocation / no dtype transform / no contiguous()"
+        return self.cfg.mode in ("capture", "replay")
 
+    def _forbid_transform_in_capture(self, op: str, why: str) -> None:
+        if self._is_capture_like():
+            raise RuntimeError(f"{op}: forbidden in {self.cfg.mode} mode: {why}")
+
+    # -----------------
+    # ops
+    # -----------------
     def relu(self, x: Tensor) -> Tensor:
-        if (not self.enabled):
-            return self.fallback.relu(x)
-
-        tx = _unwrap(x)
-        if not _is_cuda_contig_f32(tx):
-            return self.fallback.relu(x)
-
-        out = torch.empty_like(tx)
-        self._op_call(C.OpKind.EltwiseRelu, [tx], [out], {})
-        return _wrap(out)
+        sig = self._sig("relu", x)
+        with self.profiler.scope("relu", sig, mode=self.cfg.mode):
+            X = x.t
+            self._require_contig(X, what="relu")
+            Y = torch.empty_like(X)
+            self._call(_C.OpKind.EltwiseRelu, [X], [Y], {})
+            return Tensor(Y)
 
     def gemm(
         self,
@@ -176,26 +138,104 @@ class AicfBackend:
         act: Optional[str] = None,
         attrs: Optional[Dict[str, Any]] = None,
     ) -> Tensor:
-        # v0: bias/act는 아직 torch fallback (너 registry 확장되면 여기서 attrs로 내리면 됨)
-        if (not self.enabled):
-            return self.fallback.gemm(a, b, bias=bias, act=act, attrs=attrs)
-        if bias is not None or act is not None:
-            return self.fallback.gemm(a, b, bias=bias, act=act, attrs=attrs)
+        sig = self._sig("gemm", a, b, bias=bias, act=act, attrs=attrs)
+        with self.profiler.scope("gemm", sig, mode=self.cfg.mode):
+            A = a.t
+            B = b.t
+            self._require_contig(A, B, what="gemm")
 
-        ta, tb = _unwrap(a), _unwrap(b)
-        if not (_is_cuda_contig_f32(ta) and _is_cuda_contig_f32(tb)):
-            return self.fallback.gemm(a, b, bias=bias, act=act, attrs=attrs)
-        if ta.ndim != 2 or tb.ndim != 2:
-            return self.fallback.gemm(a, b, bias=bias, act=act, attrs=attrs)
-        M, K = ta.shape
-        K2, N = tb.shape
-        if K2 != K:
-            return self.fallback.gemm(a, b, bias=bias, act=act, attrs=attrs)
+            attrs = dict(attrs or {})
+            transA = bool(attrs.get("transA", False))
+            transB = bool(attrs.get("transB", False))
 
-        out = torch.empty((M, N), device=ta.device, dtype=ta.dtype)
-        self._op_call(C.OpKind.Gemm, [ta, tb], [out], attrs or {})
-        return _wrap(out)
+            # --- dtype policy ---
+            # If any input is f16 -> use TC path (f16 inputs) and keep output dtype = f16
+            # (because you added TC out_f16 variants and want to keep f16 chain)
+            want_tc = (A.dtype == torch.float16) or (B.dtype == torch.float16)
+
+            # capture-safe: do not .to() or .contiguous() inside
+            if want_tc:
+                if A.dtype != torch.float16:
+                    self._forbid_transform_in_capture("gemm", "A.dtype cast to f16 required")
+                    A = A.to(torch.float16).contiguous()
+                if B.dtype != torch.float16:
+                    self._forbid_transform_in_capture("gemm", "B.dtype cast to f16 required")
+                    B = B.to(torch.float16).contiguous()
+
+                # --- transB storage contract enforcement ---
+                # Your TC NT(out_f16) path expects:
+                #   transB=True -> B is stored as [N,K] contiguous
+                # But callers sometimes pass [K,N] contiguous.
+                # Fix it only in eager mode (capture-safe prohibits this).
+                if transB:
+                    # We need K from A shape (if not transA), otherwise from A storage shape.
+                    if transA:
+                        # A storage is [K,M], so K = A.shape[0]
+                        K = A.shape[0]
+                    else:
+                        # A is [M,K]
+                        K = A.shape[1]
+
+                    # If B looks like [K,N] (i.e., B.shape[0] == K), transpose storage.
+                    if B.dim() == 2 and B.shape[0] == K:
+                        self._forbid_transform_in_capture("gemm", "transB=True requires B_storage=[N,K]; need B.t().contiguous()")
+                        B = B.t().contiguous()  # now [N,K]
+
+                # infer output shape
+                M = (A.shape[1] if transA else A.shape[0])  # logical M
+                if transB:
+                    # B storage [N,K] => logical N = B.shape[0]
+                    N = B.shape[0]
+                else:
+                    # B [K,N]
+                    N = B.shape[1]
+
+                # TC out_f16 variants expect output f16
+                C = torch.empty((M, N), device=A.device, dtype=torch.float16).contiguous()
+                self._call(_C.OpKind.Gemm, [A, B], [C], attrs)
+
+            else:
+                # f32 fallback path
+                if A.dtype != torch.float32:
+                    self._forbid_transform_in_capture("gemm", "A.dtype cast to f32 required")
+                    A = A.to(torch.float32).contiguous()
+                if B.dtype != torch.float32:
+                    self._forbid_transform_in_capture("gemm", "B.dtype cast to f32 required")
+                    B = B.to(torch.float32).contiguous()
+
+                if transB:
+                    # fallback expects transB kernel handles stride OR storage; your naive transB uses strides.
+                    # but current gemm_f32_variant_check requires B shape [N,K] with strides set.
+                    # Here we assume B is already storage [N,K] if transB=True.
+                    N = B.shape[0]
+                    M = (A.shape[1] if transA else A.shape[0])
+                else:
+                    N = B.shape[1]
+                    M = (A.shape[1] if transA else A.shape[0])
+
+                C = torch.empty((M, N), device=A.device, dtype=torch.float32).contiguous()
+                self._call(_C.OpKind.Gemm, [A, B], [C], attrs)
+
+            # ---- BiasAdd ----
+            if bias is not None:
+                bias_t = bias.t
+                self._require_contig(bias_t, what="bias_add")
+                if bias_t.dtype != C.dtype:
+                    self._forbid_transform_in_capture("bias_add", "bias dtype cast required")
+                    bias_t = bias_t.to(C.dtype).contiguous()
+                C2 = torch.empty_like(C)
+                self._call(_C.OpKind.BiasAdd, [C, bias_t], [C2], {"axis": -1})
+                C = C2
+
+            # ---- ReLU ----
+            if act == "relu":
+                C3 = torch.empty_like(C)
+                self._call(_C.OpKind.EltwiseRelu, [C], [C3], {})
+                C = C3
+
+            return Tensor(C)
 
     def mse(self, y: Tensor, t: Tensor) -> Tensor:
-        # mse는 아직 AICF op가 없으면 torch로
-        return self.fallback.mse(y, t)
+        sig = self._sig("mse", y, t)
+        with self.profiler.scope("mse", sig, mode=self.cfg.mode):
+            return Tensor(torch.mean((y.t - t.t) ** 2))

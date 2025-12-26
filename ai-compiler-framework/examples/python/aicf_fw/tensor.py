@@ -24,6 +24,18 @@ class Tensor:
     """
     t: torch.Tensor
 
+    def signature(self) -> str:
+        # Deterministic-ish signature for profiling / caching keys
+        # Format: shape/stride/dtype/device/contig
+        return (
+            f"shape={self.shape},"
+            f"stride={self.stride},"
+            f"dtype={self.dtype},"
+            f"device={self.device},"
+            f"contig={int(self.t.is_contiguous())}"
+        )
+
+
     @property
     def shape(self) -> Tuple[int, ...]:
         return tuple(self.t.shape)
@@ -43,6 +55,14 @@ class Tensor:
     @property
     def data_ptr(self) -> int:
         return int(self.t.data_ptr())
+
+    @property
+    def grad(self) -> Optional["Tensor"]:
+        g = self.t.grad
+        if g is None:
+            return None
+        return Tensor(g)
+
 
     def contiguous(self) -> "Tensor":
         return Tensor(self.t.contiguous())
@@ -69,3 +89,4 @@ class Tensor:
 @dataclass
 class Parameter:
     data: Tensor
+
