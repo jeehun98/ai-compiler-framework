@@ -15,9 +15,8 @@ from aicf_fw.optim.sgd import SGD
 
 def collect_params(model) -> list[Tensor]:
     """
-    parameters()가 없을 수 있어서 known module 구조를 기준으로 직접 수집.
-    - Sequential: layers 순회
-    - Linear: W, b 수집
+    aicf_fw에 parameters()가 없을 수 있어서,
+    known module types를 기준으로 직접 파라미터 수집.
     """
     params: list[Tensor] = []
 
@@ -50,9 +49,10 @@ def main():
 
     loss_fn = MSELoss()
 
-    # 파라미터 수집 + 옵티마이저 (✅ 반드시 inplace=True)
+    # 파라미터 수집 + 옵티마이저 (루프 밖에서 1회 생성)
     params = collect_params(model)
-    optim = SGD(params, lr=1e-4, inplace=True, grad_clip=5.0)
+    lr = 1e-4
+    optim = SGD(params, lr=lr, inplace=True, grad_clip=5.0)
 
     # dummy data
     x = Tensor(torch.randn(64, 8, device="cuda", dtype=torch.float32), requires_grad=False)
@@ -67,29 +67,29 @@ def main():
         optim.zero_grad()
         loss.backward()
 
-        # debug (backward 직후)
-        W0 = model.layers[0].W.data
-        gW0 = model.layers[0].W.grad.data if model.layers[0].W.grad is not None else None
+        # debug: weight/grad finite + update magnitude
+        W = model.layers[0].W.data
+        gW = model.layers[0].W.grad.data
 
-        if gW0 is None:
-            print("finite? W:", torch.isfinite(W0).all().item(), "gW: None",
-                  "Wmax", float(W0.abs().max().item()))
-        else:
-            print(
-                "finite?",
-                torch.isfinite(W0).all().item(),
-                torch.isfinite(gW0).all().item(),
-                "Wmax", float(W0.abs().max().item()),
-                "gmax", float(gW0.abs().max().item()),
-            )
+        finite_W = torch.isfinite(W).all().item()
+        finite_gW = torch.isfinite(gW).all().item()
 
-        # update
+        Wmax = float(W.abs().max().item())
+        gmax = float(gW.abs().max().item())
+
+        # measure update size
+        W_before = W.clone()
         optim.step()
+        upd_max = float((model.layers[0].W.data - W_before).abs().max().item())
 
-        # print
-        print(step, float(loss.data.detach().cpu().item()))
+        print(
+            "finite?", finite_W, finite_gW,
+            "Wmax", Wmax, "gmax", gmax,
+            "upd_max", upd_max,
+        )
+        print(step, f"{float(loss.data.detach().cpu().item()):.10f}")
 
-    # (선택) CUDA sync로 마지막 커널 완료 보장
+    # optional: final sync
     torch.cuda.synchronize()
 
 

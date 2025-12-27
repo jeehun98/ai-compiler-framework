@@ -1,8 +1,7 @@
 # aicf_fw/core/functional.py
 from __future__ import annotations
-from typing import Any, Dict
-import torch
 
+from typing import Any, Dict
 from .tensor import Tensor
 from .autograd import Node, grad_enabled
 from ..backend import get_backend
@@ -19,44 +18,48 @@ class LinearNode(Node):
 
     def backward(self, out_grad: Tensor):
         backend = get_backend()
-        x, W = self.x, self.W
-        dY = out_grad
 
-        # -----------------------------------------
-        # AICF GEMM contract:
-        #  - transA=True  => A is stored as [K,M] contiguous (A_storage = A_logical.t().contiguous())
-        #  - transB=True  => B is stored as [N,K] contiguous (B_storage = B_logical.t().contiguous())
-        # -----------------------------------------
+        x = self.x
+        W = self.W
+        dY = out_grad  # (B, O)
+
+        # IMPORTANT POLICY:
+        # - Handle transpose by materializing storage in Python (t().contiguous()).
+        # - Prefer GEMM NN only (trans flags False/False) for stability & shape inference simplicity.
 
         # dX = dY @ W^T
-        # Need B_storage = W^T stored as [N,K] = [out,in]??  (W logical [in,out] -> W^T logical [out,in])
-        # For transB=True, pass B_storage = (W^T).t() == W as [out,in]?  ❌ 헷갈리기 쉬움.
-        # 더 안전하게: transB=True이면 "B_storage shape is [N,K]" 이므로
-        # B_logical is (K,N). 여기서 W_logical is (K,N)=(in,out).
-        # Want B_logical^T in math => use transB=True with B_storage = B_logical.t() = W.t() : [out,in]
-        W_storage_for_transB = W.data.t().contiguous()  # [out, in]
+        # W^T materialize: (O, I) -> (I, O)
+        W_T = W.data.t().contiguous()
         dX_data = backend.op_call(
             "gemm",
-            [dY.data, W_storage_for_transB],
-            {"transA": False, "transB": True},
+            [dY.data, W_T],  # (B,O) @ (O,I) -> (B,I)
+            {"transA": False, "transB": False},
         )
         dX = Tensor(dX_data, requires_grad=False)
 
         # dW = X^T @ dY
-        xT = x.data.t().contiguous()        # (in, batch) = (8, 64)
+        # X^T materialize: (B, I) -> (I, B)
+        x_T = x.data.t().contiguous()
         dW_data = backend.op_call(
             "gemm",
-            [xT, dY.data],                  # (8,64) @ (64,8) -> (8,8)
+            [x_T, dY.data],  # (I,B) @ (B,O) -> (I,O)
             {"transA": False, "transB": False},
         )
         dW = Tensor(dW_data, requires_grad=False)
 
-
         if self.b is not None:
-            dB_data = backend.op_call("reduce_sum", [dY.data], {"axis": 0, "keepdim": False})
+            # dB = reduce_sum(dY, axis=0)  => (O,)
+            # If your ReduceSum supports axis=0 (or only last-dim), backend may fallback to torch.
+            dB_data = backend.op_call(
+                "reduce_sum",
+                [dY.data],
+                {"axis": 0, "keepdim": False},
+            )
             dB = Tensor(dB_data, requires_grad=False)
             return [dX, dW, dB]
+
         return [dX, dW]
+
 
 class ReLUNode(Node):
     def __init__(self, x: Tensor):
@@ -65,7 +68,8 @@ class ReLUNode(Node):
 
     def backward(self, out_grad: Tensor):
         backend = get_backend()
-        dX = Tensor(backend.op_call("relu_bwd", [out_grad.data, self.x.data], {}), requires_grad=False)
+        dX_data = backend.op_call("relu_bwd", [out_grad.data, self.x.data], {})
+        dX = Tensor(dX_data, requires_grad=False)
         return [dX]
 
 
@@ -78,24 +82,33 @@ class MSELossNode(Node):
     def backward(self, out_grad: Tensor):
         backend = get_backend()
 
-        # mean MSE 기준 gradient: (2/numel) * (y - t)
-        # out_grad는 스칼라(보통 1)라고 가정하고, 지금은 무시 (안정 우선)
-        dY = backend.op_call("mse_grad", [self.y.data, self.t.data], {"scale": 2.0 / self.y.data.numel()})
-        return [Tensor(dY, requires_grad=False), None]
+        # Your AICF has mse_grad kernel. It already uses scale = 2/numel by default unless attr "scale".
+        # out_grad is usually scalar(1). We apply it safely in torch to avoid needing a "scale" op.
+        dY_base = backend.op_call("mse_grad", [self.y.data, self.t.data], {})
+        # Multiply by out_grad (scalar) in torch to avoid extra custom op.
+        # out_grad.data may be a 0-d tensor on cuda/cpu. Normalize it to CUDA scalar.
+        og = out_grad.data
+        if hasattr(og, "numel") and og.numel() == 1:
+            # ensure CUDA
+            if og.is_cuda != self.y.data.is_cuda:
+                og = og.to(device=self.y.data.device)
+        dY_data = dY_base * og
+        dY = Tensor(dY_data, requires_grad=False)
+        return [dY, None]
 
 
 # --- ops ---
 def linear(x: Tensor, W: Tensor, b: Tensor | None = None) -> Tensor:
     backend = get_backend()
 
+    # y = x @ W
     y_data = backend.op_call("gemm", [x.data, W.data], {"transA": False, "transB": False})
+
     if b is not None:
         y_data = backend.op_call("bias_add", [y_data, b.data], {})
 
-    y = Tensor(
-        y_data,
-        requires_grad=(x.requires_grad or W.requires_grad or (b.requires_grad if b else False)),
-    )
+    req = (x.requires_grad or W.requires_grad or (b.requires_grad if b is not None else False))
+    y = Tensor(y_data, requires_grad=req)
 
     if grad_enabled() and y.requires_grad:
         y.creator = LinearNode(x, W, b)
@@ -112,8 +125,15 @@ def relu(x: Tensor) -> Tensor:
 
 
 def mse_loss(y: Tensor, t: Tensor) -> Tensor:
-    # torch로 mean loss (스칼라)
-    loss_data = ((y.data - t.data) ** 2).mean()
+    backend = get_backend()
+
+    # NOTE:
+    # AICF currently doesn't expose "mse" forward in OpKind.
+    # We'll compute loss forward in torch for now, but keep mse_grad for backward.
+    # loss = mean((y - t)^2)
+    diff = y.data - t.data
+    loss_data = (diff * diff).mean()
+
     loss = Tensor(loss_data, requires_grad=y.requires_grad)
     if grad_enabled() and loss.requires_grad:
         loss.creator = MSELossNode(y, t)
