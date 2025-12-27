@@ -220,7 +220,9 @@ static inline bool reduce_sum_check_f32(
   if (!is_f32_contig_rank_ge2(dY)) return false;
   if (!(dB.dtype == DType::kF32 && dB.contiguous && dB.rank() == 1)) return false;
 
-  if (!axis_is_last_dim_only(dY, axis_raw)) return false;
+  // This kernel reduces over rows (axis=0) producing shape [N]
+  if (!(axis_raw == 0)) return false;
+
 
   int64_t M = 0, N = 0;
   if (!compute_MN_last_dim(dY, &M, &N)) return false;
@@ -241,7 +243,9 @@ static inline bool reduce_sum_check_f16_to_f32(
   if (!is_f16_contig_rank_ge2(dY)) return false;
   if (!(dB.dtype == DType::kF32 && dB.contiguous && dB.rank() == 1)) return false;
 
-  if (!axis_is_last_dim_only(dY, axis_raw)) return false;
+  // This kernel reduces over rows (axis=0) producing shape [N]
+  if (!(axis_raw == 0)) return false;
+
 
   int64_t M = 0, N = 0;
   if (!compute_MN_last_dim(dY, &M, &N)) return false;

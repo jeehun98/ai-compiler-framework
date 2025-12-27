@@ -38,12 +38,23 @@ class TorchBackend(Backend):
         if op == "reduce_sum":
             X, = inputs
             axis = attrs["axis"]
-            return X.sum(dim=axis)
+            keepdim = attrs.get("keepdim", False)
+            return X.sum(dim=axis, keepdim=keepdim)
         if op == "sgd_step":
             # inputs: param, grad
             p, g = inputs
             lr = attrs["lr"]
             return p - lr * g
+        if op == "scale":
+            # inputs: X
+            X, = inputs
+            alpha = attrs["alpha"]
+            return X * alpha
+        if op == "contiguous":
+            X, = inputs
+            return X.contiguous()
+
+
         raise KeyError(f"Unknown op: {op}")
 
     def ones_like(self, x: Any) -> Any:

@@ -54,10 +54,10 @@ def _accum_grad(t: Tensor, g: Tensor):
     if t.grad is None:
         t.grad = g
     else:
-        # accumulate by backend add (keep simple: assume backend supports add)
         from ..backend import get_backend
         backend = get_backend()
-        t.grad = Tensor(backend.op_call("add", [t.grad, g], attrs={}), requires_grad=False)
+        summed = backend.op_call("add", [t.grad.data, g.data], attrs={})
+        t.grad = Tensor(summed, requires_grad=False)
 
 def backward(loss: Tensor, grad: Optional[Tensor] = None):
     """

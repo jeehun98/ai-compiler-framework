@@ -1,9 +1,12 @@
 # aicf_fw/core/functional.py
 from __future__ import annotations
 from typing import Any, Dict
+import torch
+
 from .tensor import Tensor
 from .autograd import Node, grad_enabled
 from ..backend import get_backend
+
 
 # --- Nodes ---
 class LinearNode(Node):
@@ -17,18 +20,41 @@ class LinearNode(Node):
     def backward(self, out_grad: Tensor):
         backend = get_backend()
         x, W = self.x, self.W
-
         dY = out_grad
 
+        # -----------------------------------------
+        # AICF GEMM contract:
+        #  - transA=True  => A is stored as [K,M] contiguous (A_storage = A_logical.t().contiguous())
+        #  - transB=True  => B is stored as [N,K] contiguous (B_storage = B_logical.t().contiguous())
+        # -----------------------------------------
+
         # dX = dY @ W^T
-        dX = Tensor(backend.op_call("gemm", [dY.data, W.data], {"transA": False, "transB": True}), requires_grad=False)
+        # Need B_storage = W^T stored as [N,K] = [out,in]??  (W logical [in,out] -> W^T logical [out,in])
+        # For transB=True, pass B_storage = (W^T).t() == W as [out,in]?  ❌ 헷갈리기 쉬움.
+        # 더 안전하게: transB=True이면 "B_storage shape is [N,K]" 이므로
+        # B_logical is (K,N). 여기서 W_logical is (K,N)=(in,out).
+        # Want B_logical^T in math => use transB=True with B_storage = B_logical.t() = W.t() : [out,in]
+        W_storage_for_transB = W.data.t().contiguous()  # [out, in]
+        dX_data = backend.op_call(
+            "gemm",
+            [dY.data, W_storage_for_transB],
+            {"transA": False, "transB": True},
+        )
+        dX = Tensor(dX_data, requires_grad=False)
 
         # dW = X^T @ dY
-        dW = Tensor(backend.op_call("gemm", [x.data, dY.data], {"transA": True, "transB": False}), requires_grad=False)
+        xT = x.data.t().contiguous()        # (in, batch) = (8, 64)
+        dW_data = backend.op_call(
+            "gemm",
+            [xT, dY.data],                  # (8,64) @ (64,8) -> (8,8)
+            {"transA": False, "transB": False},
+        )
+        dW = Tensor(dW_data, requires_grad=False)
+
 
         if self.b is not None:
-            # dB = reduce_sum(dY, axis=0)
-            dB = Tensor(backend.op_call("reduce_sum", [dY.data], {"axis": 0}), requires_grad=False)
+            dB_data = backend.op_call("reduce_sum", [dY.data], {"axis": 0, "keepdim": False})
+            dB = Tensor(dB_data, requires_grad=False)
             return [dX, dW, dB]
         return [dX, dW]
 
@@ -42,6 +68,7 @@ class ReLUNode(Node):
         dX = Tensor(backend.op_call("relu_bwd", [out_grad.data, self.x.data], {}), requires_grad=False)
         return [dX]
 
+
 class MSELossNode(Node):
     def __init__(self, y: Tensor, t: Tensor):
         super().__init__([y, t])
@@ -50,24 +77,30 @@ class MSELossNode(Node):
 
     def backward(self, out_grad: Tensor):
         backend = get_backend()
-        # out_grad is scalar multiplier (usually 1)
-        dY_base = backend.op_call("mse_grad", [self.y.data, self.t.data], {})
-        dY = Tensor(backend.op_call("mul_scalar", [dY_base], {"alpha": out_grad.data}), requires_grad=False) \
-             if False else Tensor(dY_base, requires_grad=False)
-        # target t usually requires_grad=False, so None is fine
-        return [dY, None]
+
+        # mean MSE 기준 gradient: (2/numel) * (y - t)
+        # out_grad는 스칼라(보통 1)라고 가정하고, 지금은 무시 (안정 우선)
+        dY = backend.op_call("mse_grad", [self.y.data, self.t.data], {"scale": 2.0 / self.y.data.numel()})
+        return [Tensor(dY, requires_grad=False), None]
+
 
 # --- ops ---
 def linear(x: Tensor, W: Tensor, b: Tensor | None = None) -> Tensor:
     backend = get_backend()
+
     y_data = backend.op_call("gemm", [x.data, W.data], {"transA": False, "transB": False})
     if b is not None:
         y_data = backend.op_call("bias_add", [y_data, b.data], {})
-    y = Tensor(y_data, requires_grad=(x.requires_grad or W.requires_grad or (b.requires_grad if b else False)))
+
+    y = Tensor(
+        y_data,
+        requires_grad=(x.requires_grad or W.requires_grad or (b.requires_grad if b else False)),
+    )
 
     if grad_enabled() and y.requires_grad:
         y.creator = LinearNode(x, W, b)
     return y
+
 
 def relu(x: Tensor) -> Tensor:
     backend = get_backend()
@@ -77,9 +110,10 @@ def relu(x: Tensor) -> Tensor:
         y.creator = ReLUNode(x)
     return y
 
+
 def mse_loss(y: Tensor, t: Tensor) -> Tensor:
-    backend = get_backend()
-    loss_data = backend.op_call("mse", [y.data, t.data], {})
+    # torch로 mean loss (스칼라)
+    loss_data = ((y.data - t.data) ** 2).mean()
     loss = Tensor(loss_data, requires_grad=y.requires_grad)
     if grad_enabled() and loss.requires_grad:
         loss.creator = MSELossNode(y, t)
