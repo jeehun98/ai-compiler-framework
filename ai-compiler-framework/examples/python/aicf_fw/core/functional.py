@@ -1,4 +1,3 @@
-# aicf_fw/core/functional.py
 from __future__ import annotations
 
 from typing import List, Optional, Tuple, Dict, Any
@@ -6,7 +5,7 @@ from typing import List, Optional, Tuple, Dict, Any
 import torch
 
 from aicf_fw.core.tensor import Tensor
-from aicf_fw.core.autograd import Node, grad_enabled
+from aicf_fw.core.autograd import Node, grad_enabled, in_capture
 from aicf_fw.backend import get_backend
 
 
@@ -22,16 +21,30 @@ class _BufferPool:
         # key: (tag, shape_tuple, dtype, device_index)
         self._bufs: Dict[Tuple[str, Tuple[int, ...], torch.dtype, int], torch.Tensor] = {}
 
-    def get(self, *, tag: str, ref: torch.Tensor, shape: Tuple[int, ...]) -> torch.Tensor:
+    def _key(self, *, tag: str, ref: torch.Tensor, shape: Tuple[int, ...]) -> Tuple[str, Tuple[int, ...], torch.dtype, int]:
         if not ref.is_cuda:
             raise RuntimeError("BufferPool expects CUDA tensors only.")
-
         dev = int(ref.device.index) if ref.device.index is not None else 0
-        key = (tag, tuple(shape), ref.dtype, dev)
+        return (tag, tuple(shape), ref.dtype, dev)
+
+    def has(self, *, tag: str, ref: torch.Tensor, shape: Tuple[int, ...]) -> bool:
+        key = self._key(tag=tag, ref=ref, shape=shape)
+        return key in self._bufs
+
+    def stats(self) -> Dict[str, int]:
+        return {"buffers": len(self._bufs)}
+
+    def get(self, *, tag: str, ref: torch.Tensor, shape: Tuple[int, ...]) -> torch.Tensor:
+        key = self._key(tag=tag, ref=ref, shape=shape)
 
         buf = self._bufs.get(key)
         if buf is None:
-            # NOTE: this allocation MUST happen outside capture.
+            # ENFORCEMENT: allocation is forbidden during capture
+            if in_capture():
+                raise RuntimeError(
+                    f"BufferPool: attempted to allocate buffer during capture. key={key}. "
+                    "Run warmup forward/backward BEFORE capture to materialize all buffers."
+                )
             buf = torch.empty(shape, device=ref.device, dtype=ref.dtype)
             self._bufs[key] = buf
         return buf
@@ -40,19 +53,28 @@ class _BufferPool:
         return self.get(tag=tag, ref=ref, shape=tuple(ref.shape))
 
     def reset(self) -> None:
+        if in_capture():
+            raise RuntimeError("BufferPool.reset() is forbidden during capture.")
         self._bufs.clear()
 
 
-# Global pool instance (simple and effective for single-process experiments)
+# Global pool instance
 _POOL = _BufferPool()
 
 
 def reset_functional_buffers() -> None:
     """
-    Useful when you want to drop cached buffers between experiments.
+    Drop cached buffers between experiments.
     Call ONLY outside capture.
     """
     _POOL.reset()
+
+
+def functional_buffer_stats() -> Dict[str, int]:
+    """
+    Debug: how many buffers currently cached.
+    """
+    return _POOL.stats()
 
 
 # ============================================================
@@ -65,7 +87,8 @@ class _LinearNode(Node):
       x: (B, IN)
       W: (IN, OUT)
       b: (OUT,) optional
-    Saved buffers (all fixed pointers via pool):
+
+    Saved buffers (stable pointers via pool):
       dx_buf: (B, IN)
       dW_buf: (IN, OUT)
       db_buf: (OUT,) optional
@@ -138,7 +161,7 @@ def linear(x: Tensor, W: Tensor, b: Optional[Tensor]) -> Tensor:
     if IN != IN2:
         raise RuntimeError(f"linear shape mismatch: x={tuple(x.data.shape)} W={tuple(W.data.shape)}")
 
-    # --- forward y buffer (stable) ---
+    # forward y buffer (stable)
     y_buf = _POOL.get(tag="linear_y", ref=x.data, shape=(B, OUT))
     bk.op_call_out("gemm", [x.data, W.data], [y_buf], {})
 
@@ -149,7 +172,7 @@ def linear(x: Tensor, W: Tensor, b: Optional[Tensor]) -> Tensor:
     if not y.requires_grad:
         return y
 
-    # --- backward buffers (stable) ---
+    # backward buffers (stable)
     dx_buf_t = _POOL.get(tag="linear_dx", ref=x.data, shape=(B, IN))
     dW_buf_t = _POOL.get(tag="linear_dW", ref=x.data, shape=(IN, OUT))
     db_buf_t = _POOL.get(tag="linear_db", ref=x.data, shape=(OUT,)) if b is not None else None
@@ -209,3 +232,29 @@ def relu(x: Tensor) -> Tensor:
 
     y.creator = _ReluNode(x, y, dx_buf)
     return y
+
+# ============================================================
+# MSE grad (for training) - out-buffer mode
+# ============================================================
+
+def mse_grad(pred: Tensor, target: Tensor, *, scale: Optional[float] = None) -> Tensor:
+    """
+    dPred = (pred - target) * scale
+    default scale = 2/numel  (same as your CUDA kernel)
+    Capture-safe:
+      - output buffer from pool
+      - op_call_out only
+    """
+    bk = get_backend()
+
+    if pred.data.shape != target.data.shape:
+        raise RuntimeError(f"mse_grad shape mismatch: pred={tuple(pred.data.shape)} target={tuple(target.data.shape)}")
+
+    out_buf = _POOL.get_like(tag="mse_grad_out", ref=pred.data)
+
+    attrs = {}
+    if scale is not None:
+        attrs["scale"] = float(scale)
+
+    bk.op_call_out("mse_grad", [pred.data, target.data], [out_buf], attrs)
+    return Tensor(out_buf, requires_grad=False)

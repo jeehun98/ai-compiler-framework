@@ -1,4 +1,3 @@
-# aicf_fw/backend/aicf_backend.py
 from __future__ import annotations
 
 import os
@@ -35,9 +34,13 @@ class AICFBackend(Backend):
     - attrs: dict[str, bool|int|float]
 
     Capture-safety policy (IMPORTANT):
-    - During CUDA graph capture, DO NOT create new tensors.
-      - no torch.empty / empty_like / contiguous that allocates
+    - During CUDA graph capture, DO NOT create new tensors:
+      - no .contiguous() that allocates a new tensor
       - no torch-side ops inside capture path
+
+    ENFORCEMENT:
+    - op_call() is FORBIDDEN inside capture because it allocates outputs.
+    - only op_call_out() is allowed during capture.
     """
 
     def __init__(self):
@@ -47,19 +50,13 @@ class AICFBackend(Backend):
     # Core execution path (single-output convenience)
     # ----------------------------
     def op_call(self, op: str, inputs: List[Any], attrs: Dict[str, Any]) -> Any:
-        """
-        Convenience API: allocates output and calls op.
+        # Enforce capture-safety: op_call allocates outputs -> forbidden in capture.
+        from aicf_fw.core.autograd import in_capture
 
-        IMPORTANT:
-        - This is NOT allowed during CUDA graph capture.
-        - Use op_call_out with preallocated buffers instead.
-        """
-        from aicf_fw.core.autograd import _IN_CAPTURE_GUARD
-
-        if _IN_CAPTURE_GUARD:
+        if in_capture():
             raise RuntimeError(
-                f"AICFBackend.op_call('{op}') attempted to allocate output during capture. "
-                "Use op_call_out with preallocated output buffers."
+                f"AICFBackend.op_call('{op}') is forbidden during capture. "
+                "Use op_call_out() with a preallocated output buffer."
             )
 
         op_l = self._normalize_op(op)
@@ -108,7 +105,7 @@ class AICFBackend(Backend):
           (2) you actually want to materialize.
 
         Practical rule for now:
-        - keep views/strides for ALL ops (safe, may be slower for some kernels)
+        - keep views/strides for ALL ops
         - rely on each kernel's supported() to reject unsupported stride patterns
         """
         return [self._as_torch(x) for x in inputs]
@@ -158,11 +155,13 @@ class AICFBackend(Backend):
     # ----------------------------
     def capture_begin(self):
         from aicf_fw.core.autograd import _set_capture_guard
+
         _set_capture_guard(True)
         aicf_cuda._C.capture_begin()
 
     def capture_end(self):
         from aicf_fw.core.autograd import _set_capture_guard
+
         aicf_cuda._C.capture_end()
         _set_capture_guard(False)
 
@@ -171,6 +170,7 @@ class AICFBackend(Backend):
 
     def capture_reset(self):
         from aicf_fw.core.autograd import _set_capture_guard
+
         aicf_cuda._C.capture_reset()
         _set_capture_guard(False)
 
@@ -215,7 +215,7 @@ class AICFBackend(Backend):
         raise KeyError(f"AICFBackend: unknown op '{op_l}'")
 
     # ----------------------------
-    # Output allocation
+    # Output allocation (debug-only path)
     # ----------------------------
     def _allocate_output(
         self,

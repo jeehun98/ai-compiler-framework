@@ -34,6 +34,10 @@ def _set_capture_guard(flag: bool) -> None:
     _IN_CAPTURE_GUARD = bool(flag)
 
 
+def in_capture() -> bool:
+    return _IN_CAPTURE_GUARD
+
+
 # ============================================================
 # Node base
 # ============================================================
@@ -135,9 +139,20 @@ def backward(loss: Tensor, grad: Optional[Tensor] = None, *, accumulate: bool = 
       - Persist grads ONLY on leaf tensors (parameters).
       - Non-leaf grads are stored in a local dict (gmap).
       - overwrite mode uses copy() to keep leaf grad pointer stable.
+
+    ENFORCEMENT:
+      - accumulate=True may create new tensors for non-leaf grads (gmap add path).
+      - therefore accumulate=True is FORBIDDEN during capture.
     """
     from ..backend import get_backend
     backend = get_backend()
+
+    if _IN_CAPTURE_GUARD and accumulate:
+        raise RuntimeError(
+            "autograd.backward(accumulate=True) is forbidden during capture. "
+            "Use accumulate=False for capture-safe training replay, or implement out-buffer "
+            "non-leaf grad accumulation with a buffer pool."
+        )
 
     if grad is None:
         if _IN_CAPTURE_GUARD:
@@ -176,15 +191,9 @@ def backward(loss: Tensor, grad: Optional[Tensor] = None, *, accumulate: bool = 
             if inp.creator is None:
                 leaf_write(inp, ig)
             else:
-                # NOTE:
-                # accumulate=True for non-leaf uses backend.op_call("add") which allocates output.
-                # That is NOT allowed during capture.
                 if accumulate and (id(inp) in gmap):
-                    if _IN_CAPTURE_GUARD:
-                        raise RuntimeError(
-                            "autograd: non-leaf accumulate during capture would allocate (op_call add). "
-                            "Use accumulate=False during capture or implement a pointer-stable gmap buffer pool + op_call_out."
-                        )
+                    # This path allocates a new tensor via backend.op_call (NOT capture-safe).
+                    # It is safe outside capture and still useful for debugging.
                     summed = backend.op_call("add", [gmap[id(inp)].data, ig.data], attrs={})
                     gmap[id(inp)] = Tensor(summed, requires_grad=False)
                 else:

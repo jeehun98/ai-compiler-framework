@@ -30,50 +30,48 @@ namespace aicf::cuda {
 namespace mse_grad_impl {
 
 __global__ void mse_grad_f32_kernel(const float* __restrict__ pred,
-                                   const float* __restrict__ target,
-                                   float* __restrict__ dPred,
-                                   int64_t numel,
-                                   float scale) {
-  int64_t i = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
-  if (i >= numel) return;
-  dPred[i] = (pred[i] - target[i]) * scale;
+                                    const float* __restrict__ target,
+                                    float* __restrict__ dPred,
+                                    int64_t numel,
+                                    float scale) {
+  // grid-stride loop
+  for (int64_t i = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
+       i < numel;
+       i += (int64_t)blockDim.x * (int64_t)gridDim.x) {
+    dPred[i] = (pred[i] - target[i]) * scale;
+  }
 }
 
 __global__ void mse_grad_f16_kernel(const __half* __restrict__ pred,
-                                   const __half* __restrict__ target,
-                                   __half* __restrict__ dPred,
-                                   int64_t numel,
-                                   float scale) {
-  int64_t i = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
-  if (i >= numel) return;
-
-  const float p = __half2float(pred[i]);
-  const float t = __half2float(target[i]);
-  const float g = (p - t) * scale;
-  dPred[i] = __float2half_rn(g);
+                                    const __half* __restrict__ target,
+                                    __half* __restrict__ dPred,
+                                    int64_t numel,
+                                    float scale) {
+  // grid-stride loop (scalar)
+  for (int64_t i = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
+       i < numel;
+       i += (int64_t)blockDim.x * (int64_t)gridDim.x) {
+    const float p = __half2float(pred[i]);
+    const float t = __half2float(target[i]);
+    dPred[i] = __float2half_rn((p - t) * scale);
+  }
 }
 
-// half2 vectorized (numel2 = numel/2)
 __global__ void mse_grad_f16x2_kernel(const __half2* __restrict__ pred,
-                                     const __half2* __restrict__ target,
-                                     __half2* __restrict__ dPred,
-                                     int64_t numel2,
-                                     float scale) {
-  int64_t i = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
-  if (i >= numel2) return;
-
-  const __half2 p2 = pred[i];
-  const __half2 t2 = target[i];
-
-  const float p0 = __half2float(__low2half(p2));
-  const float p1 = __half2float(__high2half(p2));
-  const float t0 = __half2float(__low2half(t2));
-  const float t1 = __half2float(__high2half(t2));
-
-  const __half g0 = __float2half_rn((p0 - t0) * scale);
-  const __half g1 = __float2half_rn((p1 - t1) * scale);
-
-  dPred[i] = __halves2half2(g0, g1);
+                                      const __half2* __restrict__ target,
+                                      __half2* __restrict__ dPred,
+                                      int64_t numel2,
+                                      float scale) {
+  // half2 arithmetic path + grid-stride loop
+  const __half2 s2 = __float2half2_rn(scale);
+  for (int64_t i = (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
+       i < numel2;
+       i += (int64_t)blockDim.x * (int64_t)gridDim.x) {
+    const __half2 p2 = pred[i];
+    const __half2 t2 = target[i];
+    // (p2 - t2) * s2
+    dPred[i] = __hmul2(__hsub2(p2, t2), s2);
+  }
 }
 
 } // namespace mse_grad_impl
@@ -135,7 +133,6 @@ static inline bool compute_numel(const TensorDesc& T, int64_t* out_numel) {
   return true;
 }
 
-// dtype-generic check
 static inline bool mse_grad_check_dt(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs,
@@ -173,6 +170,23 @@ static inline bool mse_grad_vec2_ok(const TensorDesc& P, const TensorDesc& T, co
 static size_t mse_grad_workspace(const TensorDesc*, int, const void*) { return 0; }
 
 // -------------------------
+// Launch config helper
+// -------------------------
+static inline int compute_blocks_1d(int64_t n, int threads) {
+  // choose blocks based on problem size, but do NOT clamp to 65535
+  // because kernel uses grid-stride loop and can safely run with fewer blocks.
+  int64_t blocks64 = (n + threads - 1) / threads;
+  if (blocks64 < 1) blocks64 = 1;
+
+  // avoid ridiculous blocks count; cap to something sane for occupancy
+  // (this is a performance cap, not correctness cap)
+  const int64_t kMaxBlocks = 4096;
+  if (blocks64 > kMaxBlocks) blocks64 = kMaxBlocks;
+
+  return (int)blocks64;
+}
+
+// -------------------------
 // Variant: F32
 // -------------------------
 static bool mse_grad_f32_supported(
@@ -205,8 +219,7 @@ static aicf::Status mse_grad_f32_launch(
   if (!has_scale) scale = 2.0f / (float)numel;
 
   constexpr int kThreads = 256;
-  int blocks = (int)((numel + kThreads - 1) / kThreads);
-  if (blocks > 65535) blocks = 65535;
+  const int blocks = compute_blocks_1d(numel, kThreads);
 
   mse_grad_impl::mse_grad_f32_kernel<<<blocks, kThreads, 0, stream>>>(
       (const float*)P.data, (const float*)T.data, (float*)G.data, numel, scale);
@@ -226,7 +239,7 @@ KernelVariant make_mse_grad_f32_variant() {
 }
 
 // -------------------------
-// Variant: F16 (naive)
+// Variant: F16
 // -------------------------
 static bool mse_grad_f16_supported(
     const TensorDesc* inputs, int num_inputs,
@@ -259,17 +272,15 @@ static aicf::Status mse_grad_f16_launch(
 
   constexpr int kThreads = 256;
 
-  // half2 fastpath
+  // half2 fastpath (correctness-safe due to vec2_ok checks)
   if (mse_grad_vec2_ok(P, T, G)) {
     const int64_t numel2 = numel / 2;
-    int blocks = (int)((numel2 + kThreads - 1) / kThreads);
-    if (blocks > 65535) blocks = 65535;
+    const int blocks = compute_blocks_1d(numel2, kThreads);
 
     mse_grad_impl::mse_grad_f16x2_kernel<<<blocks, kThreads, 0, stream>>>(
         (const __half2*)P.data, (const __half2*)T.data, (__half2*)G.data, numel2, scale);
   } else {
-    int blocks = (int)((numel + kThreads - 1) / kThreads);
-    if (blocks > 65535) blocks = 65535;
+    const int blocks = compute_blocks_1d(numel, kThreads);
 
     mse_grad_impl::mse_grad_f16_kernel<<<blocks, kThreads, 0, stream>>>(
         (const __half*)P.data, (const __half*)T.data, (__half*)G.data, numel, scale);
