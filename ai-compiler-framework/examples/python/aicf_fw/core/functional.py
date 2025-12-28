@@ -19,37 +19,30 @@ class LinearNode(Node):
     def backward(self, out_grad: Tensor):
         backend = get_backend()
 
-        x = self.x
-        W = self.W
-        dY = out_grad  # (B, O)
-
-        # IMPORTANT POLICY:
-        # - Handle transpose by materializing storage in Python (t().contiguous()).
-        # - Prefer GEMM NN only (trans flags False/False) for stability & shape inference simplicity.
+        x = self.x          # (B, I)
+        W = self.W          # (I, O)
+        dY = out_grad       # (B, O)
 
         # dX = dY @ W^T
-        # W^T materialize: (O, I) -> (I, O)
-        W_T = W.data.t().contiguous()
+        # (B,O) @ (O,I) -> (B,I) == gemm(dY, W, transB=True)
         dX_data = backend.op_call(
             "gemm",
-            [dY.data, W_T],  # (B,O) @ (O,I) -> (B,I)
-            {"transA": False, "transB": False},
+            [dY.data, W.data],
+            {"transA": False, "transB": True},
         )
         dX = Tensor(dX_data, requires_grad=False)
 
         # dW = X^T @ dY
-        # X^T materialize: (B, I) -> (I, B)
-        x_T = x.data.t().contiguous()
+        # (I,B) @ (B,O) -> (I,O) == gemm(x, dY, transA=True)
         dW_data = backend.op_call(
             "gemm",
-            [x_T, dY.data],  # (I,B) @ (B,O) -> (I,O)
-            {"transA": False, "transB": False},
+            [x.data, dY.data],
+            {"transA": True, "transB": False},
         )
         dW = Tensor(dW_data, requires_grad=False)
 
         if self.b is not None:
-            # dB = reduce_sum(dY, axis=0)  => (O,)
-            # If your ReduceSum supports axis=0 (or only last-dim), backend may fallback to torch.
+            # dB = reduce_sum(dY, axis=0)
             dB_data = backend.op_call(
                 "reduce_sum",
                 [dY.data],

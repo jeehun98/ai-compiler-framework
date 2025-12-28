@@ -43,11 +43,18 @@ class AICFBackend(Backend):
     # ----------------------------
     def op_call(self, op: str, inputs: List[Any], attrs: Dict[str, Any]) -> Any:
         op_l = self._normalize_op(op)
-        inputs_t = [self._as_torch(x).contiguous() for x in inputs]
+
+        # IMPORTANT POLICY:
+        # - GEMM must preserve strides/views to support transA/transB without materializing.
+        # - Most other ops currently assume contiguous tensors (kernel implementations).
+        if op_l == "gemm":
+            inputs_t = [self._as_torch(x) for x in inputs]  # keep views/strides
+        else:
+            inputs_t = [self._as_torch(x).contiguous() for x in inputs]
 
         kind, out_desc = self._resolve_op(op_l, inputs_t, attrs)
 
-        # sgd_step 은 out-of-place로 호출하면 의미가 틀어지므로 금지
+        # sgd_step is in-place only
         if op_l in ("sgd_step", "sgdstep"):
             raise RuntimeError("AICFBackend.op_call: 'sgd_step' must be called via op_call_out (in-place).")
 
@@ -65,8 +72,16 @@ class AICFBackend(Backend):
     # ----------------------------
     def op_call_out(self, op: str, inputs: List[Any], outputs: List[Any], attrs: Dict[str, Any]) -> None:
         op_l = self._normalize_op(op)
-        inputs_t = [self._as_torch(x).contiguous() for x in inputs]
-        outputs_t = [self._as_torch(x).contiguous() for x in outputs]
+
+        if op_l == "gemm":
+            inputs_t = [self._as_torch(x) for x in inputs]  # keep views/strides
+        else:
+            inputs_t = [self._as_torch(x).contiguous() for x in inputs]
+
+        # DO NOT force outputs to contiguous:
+        # - If user passes a view/output buffer intentionally, .contiguous() would silently
+        #   write into a temp and discard results.
+        outputs_t = [self._as_torch(x) for x in outputs]
 
         kind, _ = self._resolve_op(op_l, inputs_t, attrs)
 
@@ -90,10 +105,22 @@ class AICFBackend(Backend):
     def _normalize_op(self, op: str) -> str:
         return op.strip().lower().replace("-", "_")
 
-    def _format_fail(self, op: str, kind: Any, attrs: Dict[str, Any],
-                     inputs_t: List[torch.Tensor], outputs_t: List[torch.Tensor], e: Exception) -> str:
+    def _format_fail(
+        self,
+        op: str,
+        kind: Any,
+        attrs: Dict[str, Any],
+        inputs_t: List[torch.Tensor],
+        outputs_t: List[torch.Tensor],
+        e: Exception,
+    ) -> str:
         def _ti(t: torch.Tensor) -> str:
-            return f"shape={tuple(t.shape)} dtype={t.dtype} device={t.device} contig={t.is_contiguous()}"
+            # include stride for debugging view/transpose issues
+            return (
+                f"shape={tuple(t.shape)} stride={tuple(t.stride())} "
+                f"dtype={t.dtype} device={t.device} contig={t.is_contiguous()}"
+            )
+
         msg = (
             f"\n[AICFBackend.op_call FAILED]\n"
             f"op={op} kind={kind}\n"
@@ -152,7 +179,7 @@ class AICFBackend(Backend):
             return C.OpKind.MseGrad, {"like": 0}
 
         if op_l in ("sgd_step", "sgdstep"):
-            return C.OpKind.SgdStep, {"like": 0}  # in-place로 쓸 거라 like만 필요
+            return C.OpKind.SgdStep, {"like": 0}  # in-place, like-only
 
         raise KeyError(f"AICFBackend: unknown op '{op_l}'")
 
@@ -175,6 +202,12 @@ class AICFBackend(Backend):
             transA = bool(attrs.get("transA", False))
             transB = bool(attrs.get("transB", False))
 
+            # Logical shapes:
+            # A_op: (M,K)
+            # B_op: (K,N)
+            if A.dim() != 2 or B.dim() != 2:
+                raise RuntimeError(f"GEMM expects 2D tensors, got A.dim={A.dim()} B.dim={B.dim()}")
+
             M = A.shape[1] if transA else A.shape[0]
             K_a = A.shape[0] if transA else A.shape[1]
             K_b = B.shape[1] if transB else B.shape[0]
@@ -186,6 +219,8 @@ class AICFBackend(Backend):
                     f"A.shape={tuple(A.shape)} B.shape={tuple(B.shape)} attrs={attrs}"
                 )
 
+            # Output dtype follows A (typical). If later you want f16->f16 with f32-acc,
+            # keep output f16 (done in CUDA kernel).
             return torch.empty((M, N), device=A.device, dtype=A.dtype)
 
         if "reduce" in desc:
@@ -201,8 +236,9 @@ class AICFBackend(Backend):
             else:
                 out_shape.pop(axis)
 
-            # NOTE: reduce_sum 커널 설계에 맞춰 dtype 정책을 잡아야 함.
-            # 지금은 입력 dtype으로 뽑되, 필요하면 여기서 f16->f32로 강제 가능.
+            # NOTE:
+            # If your ReduceSum kernel is f16->f32 for some axes, you can enforce dtype here.
+            # For now, keep dtype same as input.
             return torch.empty(out_shape, device=X.device, dtype=X.dtype)
 
         raise RuntimeError(f"Cannot allocate output for desc={desc}")

@@ -10,36 +10,23 @@
 namespace aicf::cuda::gemm_impl {
 
 // -------------------------
-// f32 naive
+// f32 naive: unified STRIDED (covers NN/TN/NT/TT via MatView2D)
 // -------------------------
-__global__ void gemm_f32_naive_kernel(const float* __restrict__ A,
-                                     const float* __restrict__ B,
-                                     float* __restrict__ C,
-                                     int M, int N, int K);
-
-__global__ void gemm_f32_naive_transB_kernel(const float* __restrict__ A,
-                                            const float* __restrict__ B, // stored [N,K] (strided)
-                                            float* __restrict__ C,
-                                            int M, int N, int K,
-                                            int64_t B_stride0, int64_t B_stride1);
+__global__ void gemm_f32_naive_strided_kernel(
+    const float* __restrict__ A, int64_t Ars, int64_t Acs,
+    const float* __restrict__ B, int64_t Brs, int64_t Bcs,
+    float* __restrict__ C, int64_t Crs, int64_t Ccs,
+    int M, int N, int K);
 
 // -------------------------
-// WMMA TensorCore (A,B half -> C half)  [OUTPUT F16]
-// internal acc is float, but store is half
+// WMMA TensorCore: unified STRIDED (A,B half -> C half)
+// - Covers NN/TN/NT/TT via MatView2D (stride-swapped logical views)
+// - GLOBAL->SMEM packing handles WMMA layout (A row-major, B col-major)
+// - acc float, store half
 // -------------------------
-__global__ void gemm_f16_tc_wmma_nn_out_f16_kernel(const __half* __restrict__ A,
-                                                  const __half* __restrict__ B,
-                                                  __half* __restrict__ C,
-                                                  int M, int N, int K);
-
-__global__ void gemm_f16_tc_wmma_tn_out_f16_kernel(const __half* __restrict__ A, // stored [K,M]
-                                                  const __half* __restrict__ B, // [K,N]
-                                                  __half* __restrict__ C,
-                                                  int M, int N, int K);
-
-__global__ void gemm_f16_tc_wmma_nt_out_f16_kernel(const __half* __restrict__ A, // [M,K]
-                                                  const __half* __restrict__ B, // stored [N,K]
-                                                  __half* __restrict__ C,
-                                                  int M, int N, int K);
+__global__ void gemm_f16_tc_wmma_out_f16_strided_kernel(
+    const __half* __restrict__ A, int64_t Ars, int64_t Acs, int64_t Am, int64_t Ak,
+    const __half* __restrict__ B, int64_t Brs, int64_t Bcs, int64_t Bk, int64_t Bn,
+    __half* __restrict__ C, int64_t Crs, int64_t Ccs, int64_t Cm, int64_t Cn);
 
 } // namespace aicf::cuda::gemm_impl
