@@ -37,6 +37,7 @@ add_library(aicf
     src/backends/cuda/ops/relu_bwd/launcher.cu
     src/backends/cuda/ops/sgd_step/launcher.cu
     src/backends/cuda/ops/copy/launcher.cu
+    src/backends/cuda/ops/grad_zero/launcher.cu
 
 
 

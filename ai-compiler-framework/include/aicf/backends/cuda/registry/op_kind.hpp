@@ -12,7 +12,8 @@ enum class OpKind : int {
   ReluBwd     = 6,
   SgdStep     = 7,
   Copy        = 8,
-  _Count      = 9
+  GradZero   = 9,
+  _Count      = 10
 };
 
 }  // namespace aicf::cuda

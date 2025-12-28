@@ -59,7 +59,8 @@ KernelVariant make_copy_f32_variant();
 KernelVariant make_copy_f16_variant();
 KernelVariant make_copy_f16_vec2_variant(); // half2
 
-
+// GradZero
+KernelVariant make_grad_zero_variant();
 
 }  // namespace aicf::cuda
 
@@ -149,6 +150,13 @@ extern "C" void aicf_cuda_register_all_kernels() {
     R.register_kernel(OpKind::Copy, make_copy_f16_vec2_variant());
     R.register_kernel(OpKind::Copy, make_copy_f16_variant());
     R.register_kernel(OpKind::Copy, make_copy_f32_variant());
+  }
+
+  // --------------------------------------------------------------------------
+  // ZeroGrad
+  // --------------------------------------------------------------------------
+  {
+    R.register_kernel(OpKind::GradZero, make_grad_zero_variant());
   }
 
 }

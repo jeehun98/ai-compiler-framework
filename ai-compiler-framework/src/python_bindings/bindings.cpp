@@ -245,7 +245,9 @@ PYBIND11_MODULE(_C, m) {
       .value("MseGrad",     aicf::cuda::OpKind::MseGrad)
       .value("ReluBwd",     aicf::cuda::OpKind::ReluBwd)
       .value("SgdStep",     aicf::cuda::OpKind::SgdStep)
-      .value("Copy",        aicf::cuda::OpKind::Copy) // ✅ 추가
+      .value("Copy",        aicf::cuda::OpKind::Copy)
+      .value("GradZero",    aicf::cuda::OpKind::GradZero)
+
 
       .export_values();
 

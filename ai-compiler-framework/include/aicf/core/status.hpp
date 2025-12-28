@@ -8,6 +8,7 @@ enum class Status : int32_t {
   Error = 1,
   NotImplemented = 2,
   InvalidArgument = 3,
+  RuntimeError = 4,
 };
 
 constexpr bool ok(Status s) { return s == Status::Ok; }
