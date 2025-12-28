@@ -33,6 +33,11 @@ class AICFBackend(Backend):
 
     - inputs/outputs: torch.Tensor (CUDA)
     - attrs: dict[str, bool|int|float]
+
+    Capture-safety policy (IMPORTANT):
+    - During CUDA graph capture, DO NOT create new tensors.
+      - no torch.empty / empty_like / contiguous that allocates
+      - no torch-side ops inside capture path
     """
 
     def __init__(self):
@@ -42,19 +47,26 @@ class AICFBackend(Backend):
     # Core execution path (single-output convenience)
     # ----------------------------
     def op_call(self, op: str, inputs: List[Any], attrs: Dict[str, Any]) -> Any:
+        """
+        Convenience API: allocates output and calls op.
+
+        IMPORTANT:
+        - This is NOT allowed during CUDA graph capture.
+        - Use op_call_out with preallocated buffers instead.
+        """
+        from aicf_fw.core.autograd import _IN_CAPTURE_GUARD
+
+        if _IN_CAPTURE_GUARD:
+            raise RuntimeError(
+                f"AICFBackend.op_call('{op}') attempted to allocate output during capture. "
+                "Use op_call_out with preallocated output buffers."
+            )
+
         op_l = self._normalize_op(op)
-
-        # IMPORTANT POLICY:
-        # - GEMM must preserve strides/views to support transA/transB without materializing.
-        # - Most other ops currently assume contiguous tensors (kernel implementations).
-        if op_l == "gemm":
-            inputs_t = [self._as_torch(x) for x in inputs]  # keep views/strides
-        else:
-            inputs_t = [self._as_torch(x).contiguous() for x in inputs]
-
+        inputs_t = self._prepare_inputs(op_l, inputs)
         kind, out_desc = self._resolve_op(op_l, inputs_t, attrs)
 
-        # sgd_step is in-place only
+        # in-place only
         if op_l in ("sgd_step", "sgdstep"):
             raise RuntimeError("AICFBackend.op_call: 'sgd_step' must be called via op_call_out (in-place).")
 
@@ -73,14 +85,9 @@ class AICFBackend(Backend):
     def op_call_out(self, op: str, inputs: List[Any], outputs: List[Any], attrs: Dict[str, Any]) -> None:
         op_l = self._normalize_op(op)
 
-        if op_l == "gemm":
-            inputs_t = [self._as_torch(x) for x in inputs]  # keep views/strides
-        else:
-            inputs_t = [self._as_torch(x).contiguous() for x in inputs]
+        inputs_t = self._prepare_inputs(op_l, inputs)
 
-        # DO NOT force outputs to contiguous:
-        # - If user passes a view/output buffer intentionally, .contiguous() would silently
-        #   write into a temp and discard results.
+        # DO NOT force outputs to contiguous.
         outputs_t = [self._as_torch(x) for x in outputs]
 
         kind, _ = self._resolve_op(op_l, inputs_t, attrs)
@@ -89,6 +96,22 @@ class AICFBackend(Backend):
             aicf_cuda._C.op_call(kind, inputs_t, outputs_t, attrs)
         except Exception as e:
             raise RuntimeError(self._format_fail(op_l, kind, attrs, inputs_t, outputs_t, e)) from e
+
+    # ----------------------------
+    # Input preparation (capture-safe)
+    # ----------------------------
+    def _prepare_inputs(self, op_l: str, inputs: List[Any]) -> List[torch.Tensor]:
+        """
+        Capture-safe rule:
+        - NEVER call .contiguous() here unless you are 100% sure:
+          (1) it's outside capture, and
+          (2) you actually want to materialize.
+
+        Practical rule for now:
+        - keep views/strides for ALL ops (safe, may be slower for some kernels)
+        - rely on each kernel's supported() to reject unsupported stride patterns
+        """
+        return [self._as_torch(x) for x in inputs]
 
     # ----------------------------
     # Helpers
@@ -115,7 +138,6 @@ class AICFBackend(Backend):
         e: Exception,
     ) -> str:
         def _ti(t: torch.Tensor) -> str:
-            # include stride for debugging view/transpose issues
             return (
                 f"shape={tuple(t.shape)} stride={tuple(t.stride())} "
                 f"dtype={t.dtype} device={t.device} contig={t.is_contiguous()}"
@@ -132,19 +154,25 @@ class AICFBackend(Backend):
         return msg
 
     # ----------------------------
-    # CUDA Graph control
+    # CUDA Graph control + autograd capture guard
     # ----------------------------
     def capture_begin(self):
+        from aicf_fw.core.autograd import _set_capture_guard
+        _set_capture_guard(True)
         aicf_cuda._C.capture_begin()
 
     def capture_end(self):
+        from aicf_fw.core.autograd import _set_capture_guard
         aicf_cuda._C.capture_end()
+        _set_capture_guard(False)
 
     def replay(self):
         aicf_cuda._C.replay()
 
     def capture_reset(self):
+        from aicf_fw.core.autograd import _set_capture_guard
         aicf_cuda._C.capture_reset()
+        _set_capture_guard(False)
 
     # ----------------------------
     # Op resolution
@@ -181,6 +209,9 @@ class AICFBackend(Backend):
         if op_l in ("sgd_step", "sgdstep"):
             return C.OpKind.SgdStep, {"like": 0}  # in-place, like-only
 
+        if op_l in ("copy",):
+            return C.OpKind.Copy, {"like": 0}
+
         raise KeyError(f"AICFBackend: unknown op '{op_l}'")
 
     # ----------------------------
@@ -202,9 +233,6 @@ class AICFBackend(Backend):
             transA = bool(attrs.get("transA", False))
             transB = bool(attrs.get("transB", False))
 
-            # Logical shapes:
-            # A_op: (M,K)
-            # B_op: (K,N)
             if A.dim() != 2 or B.dim() != 2:
                 raise RuntimeError(f"GEMM expects 2D tensors, got A.dim={A.dim()} B.dim={B.dim()}")
 
@@ -219,8 +247,6 @@ class AICFBackend(Backend):
                     f"A.shape={tuple(A.shape)} B.shape={tuple(B.shape)} attrs={attrs}"
                 )
 
-            # Output dtype follows A (typical). If later you want f16->f16 with f32-acc,
-            # keep output f16 (done in CUDA kernel).
             return torch.empty((M, N), device=A.device, dtype=A.dtype)
 
         if "reduce" in desc:
@@ -236,9 +262,6 @@ class AICFBackend(Backend):
             else:
                 out_shape.pop(axis)
 
-            # NOTE:
-            # If your ReduceSum kernel is f16->f32 for some axes, you can enforce dtype here.
-            # For now, keep dtype same as input.
             return torch.empty(out_shape, device=X.device, dtype=X.dtype)
 
         raise RuntimeError(f"Cannot allocate output for desc={desc}")

@@ -1,8 +1,6 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <torch/extension.h>
-#include <ATen/cuda/CUDAContext.h>   // at::cuda::getDefaultCUDAStream 등
-
 
 #include "common.hpp"
 
@@ -18,20 +16,101 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <cstdio>
 
 namespace py = pybind11;
 
-// C ABI registry init (guarded)
+// ------------------- registry init -------------------
 static void ensure_kernels_registered_once() {
   static std::once_flag flag;
-  std::call_once(flag, []() {
-    aicf_cuda_register_all_kernels();
-  });
+  std::call_once(flag, []() { aicf_cuda_register_all_kernels(); });
 }
 
-// AttrPack builder (v0.2)
-// - supports bool / int / float only
-// - SORT BY KEY to ensure deterministic packing
+static inline void cuda_check(cudaError_t e, const char* what) {
+  if (e != cudaSuccess) {
+    throw std::runtime_error(std::string("[CUDA] ") + what + ": " + cudaGetErrorString(e));
+  }
+}
+
+// ============================================================
+// Graph state + stream policy
+// ============================================================
+
+struct CudaGraphState {
+  bool capturing = false;
+  bool captured  = false;
+  cudaGraph_t graph = nullptr;
+  cudaGraphExec_t exec = nullptr;
+
+  // AICF owns this stream (created once). We will capture/launch on it.
+  cudaStream_t aicf_stream = nullptr;
+
+  // stream used for capture (== aicf_stream when capturing)
+  cudaStream_t cap_stream = nullptr;
+
+  void ensure_stream() {
+    if (!aicf_stream) {
+      // Non-blocking stream recommended
+      cuda_check(cudaStreamCreateWithFlags(&aicf_stream, cudaStreamNonBlocking),
+                 "cudaStreamCreateWithFlags");
+    }
+  }
+
+  void destroy_graph_objects() {
+    if (exec)  { cudaGraphExecDestroy(exec); exec = nullptr; }
+    if (graph) { cudaGraphDestroy(graph); graph = nullptr; }
+    captured = false;
+  }
+
+  void reset_full() {
+    // If we were capturing, try to end capture cleanly on cap_stream to restore state.
+    if (cap_stream) {
+      cudaStreamCaptureStatus st = cudaStreamCaptureStatusNone;
+      cudaError_t e = cudaStreamIsCapturing(cap_stream, &st);
+      if (e == cudaSuccess && st != cudaStreamCaptureStatusNone) {
+        cudaGraph_t tmp = nullptr;
+        cudaError_t e2 = cudaStreamEndCapture(cap_stream, &tmp);
+        if (e2 == cudaSuccess && tmp) cudaGraphDestroy(tmp);
+        else cudaGetLastError();
+      } else {
+        cudaGetLastError();
+      }
+    }
+
+    destroy_graph_objects();
+
+    capturing = false;
+    cap_stream = nullptr;
+    // NOTE: keep aicf_stream alive across runs (cheap + stable).
+  }
+
+  ~CudaGraphState() {
+    // best-effort cleanup at unload
+    reset_full();
+    if (aicf_stream) {
+      cudaStreamDestroy(aicf_stream);
+      aicf_stream = nullptr;
+    }
+  }
+};
+
+static CudaGraphState g_graph;
+static std::mutex g_graph_mu;
+
+// Stream policy used by op_call + replay:
+// - if capturing/captured graph ops should run on aicf_stream (cap_stream)
+// - otherwise use PyTorch current stream
+static inline cudaStream_t aicf_dispatch_stream_locked() {
+  if (g_graph.capturing && g_graph.cap_stream) return g_graph.cap_stream;
+  // Replay can run on either stream, but running on aicf_stream is consistent.
+  if (g_graph.captured && g_graph.aicf_stream) return g_graph.aicf_stream;
+  return aicf_py::current_cuda_stream(); // PyTorch current stream
+}
+
+// ============================================================
+// AttrPack builder (same as yours)
+// ============================================================
+
 static void build_attr_pack_v0_2(
     const py::dict& attrs,
     std::vector<std::string>& key_storage,
@@ -133,8 +212,12 @@ static void op_call_impl(
     attr_ptr = &pack;
   }
 
-  // IMPORTANT: pass PyTorch current stream
-  const cudaStream_t stream = aicf_py::current_cuda_stream();
+  cudaStream_t stream;
+  {
+    std::lock_guard<std::mutex> lock(g_graph_mu);
+    // ★ capture 중에는 AICF 전용 stream으로 enqueue
+    stream = aicf_dispatch_stream_locked();
+  }
 
   const aicf::Status st = aicf::cuda::dispatch_v0(
       kind,
@@ -147,30 +230,6 @@ static void op_call_impl(
     throw std::runtime_error(op_fail_msg(kind, st));
   }
 }
-
-static inline void cuda_check(cudaError_t e, const char* what) {
-  if (e != cudaSuccess) {
-    throw std::runtime_error(std::string("[CUDA] ") + what + ": " + cudaGetErrorString(e));
-  }
-}
-
-struct CudaGraphState {
-  bool capturing = false;
-  bool captured  = false;
-  cudaGraph_t graph = nullptr;
-  cudaGraphExec_t exec = nullptr;
-
-  void reset() {
-    if (exec)  { cudaGraphExecDestroy(exec); exec = nullptr; }
-    if (graph) { cudaGraphDestroy(graph); graph = nullptr; }
-    capturing = false;
-    captured  = false;
-  }
-};
-
-static CudaGraphState g_graph;
-static std::mutex g_graph_mu;
-
 
 PYBIND11_MODULE(_C, m) {
   m.doc() = "AICF CUDA unified bindings (Plan A): op_call";
@@ -186,6 +245,8 @@ PYBIND11_MODULE(_C, m) {
       .value("MseGrad",     aicf::cuda::OpKind::MseGrad)
       .value("ReluBwd",     aicf::cuda::OpKind::ReluBwd)
       .value("SgdStep",     aicf::cuda::OpKind::SgdStep)
+      .value("Copy",        aicf::cuda::OpKind::Copy) // ✅ 추가
+
       .export_values();
 
   m.def(
@@ -216,41 +277,55 @@ PYBIND11_MODULE(_C, m) {
     py::arg("attrs") = py::dict()
   );
 
-    m.def("capture_begin", []() {
+  // ---------------- CUDA Graph control ----------------
+
+  m.def("capture_begin", []() {
     std::lock_guard<std::mutex> lock(g_graph_mu);
 
-    if (g_graph.capturing) {
-      throw std::runtime_error("capture_begin called while already capturing");
+    std::fprintf(stderr, "[aicf] capture_begin entered (dedicated stream)\n");
+
+    g_graph.reset_full();
+    g_graph.ensure_stream();
+
+    // Capture on AICF-owned stream (NOT PyTorch current stream)
+    const cudaStream_t s = g_graph.aicf_stream;
+
+    // sanity: if somehow capturing, end it
+    cudaStreamCaptureStatus st = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(s, &st) == cudaSuccess && st != cudaStreamCaptureStatusNone) {
+      cudaGraph_t tmp = nullptr;
+      cudaStreamEndCapture(s, &tmp);
+      if (tmp) cudaGraphDestroy(tmp);
+      cudaGetLastError();
+    } else {
+      cudaGetLastError();
     }
 
-    // 기존 그래프가 있으면 날림 (원하면 유지 정책으로 바꿔도 됨)
-    g_graph.reset();
-
-    const cudaStream_t stream = aicf_py::current_cuda_stream();
-    // Global 모드가 제일 단순. 필요하면 Relaxed/ThreadLocal로 바꿔도 됨.
-    cuda_check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal),
+    cuda_check(cudaStreamBeginCapture(s, cudaStreamCaptureModeGlobal),
                "cudaStreamBeginCapture");
+
+    g_graph.cap_stream = s;
     g_graph.capturing = true;
   });
 
   m.def("capture_end", []() {
     std::lock_guard<std::mutex> lock(g_graph_mu);
 
-    if (!g_graph.capturing) {
+    if (!g_graph.capturing || !g_graph.cap_stream) {
       throw std::runtime_error("capture_end called but not capturing");
     }
 
-    const cudaStream_t stream = aicf_py::current_cuda_stream();
     cudaGraph_t graph = nullptr;
-    cuda_check(cudaStreamEndCapture(stream, &graph), "cudaStreamEndCapture");
+    cuda_check(cudaStreamEndCapture(g_graph.cap_stream, &graph),
+               "cudaStreamEndCapture");
+
     g_graph.graph = graph;
 
     cudaGraphExec_t exec = nullptr;
-    // flags는 0으로 시작. 필요하면 cudaGraphInstantiateFlagAutoFreeOnLaunch 등 검토.
     cuda_check(cudaGraphInstantiate(&exec, g_graph.graph, nullptr, nullptr, 0),
                "cudaGraphInstantiate");
-    g_graph.exec = exec;
 
+    g_graph.exec = exec;
     g_graph.capturing = false;
     g_graph.captured  = true;
   });
@@ -262,13 +337,13 @@ PYBIND11_MODULE(_C, m) {
       throw std::runtime_error("replay called but no captured graph exists");
     }
 
-    const cudaStream_t stream = aicf_py::current_cuda_stream();
-    cuda_check(cudaGraphLaunch(g_graph.exec, stream), "cudaGraphLaunch");
+    // launch on same AICF stream for determinism
+    g_graph.ensure_stream();
+    cuda_check(cudaGraphLaunch(g_graph.exec, g_graph.aicf_stream), "cudaGraphLaunch");
   });
 
   m.def("capture_reset", []() {
     std::lock_guard<std::mutex> lock(g_graph_mu);
-    g_graph.reset();
+    g_graph.reset_full();
   });
-
 }

@@ -54,6 +54,13 @@ KernelVariant make_sgd_step_f32_variant();
 KernelVariant make_sgd_step_f16_variant();
 KernelVariant make_sgd_step_f16_half2_variant();
 
+// Copy
+KernelVariant make_copy_f32_variant();
+KernelVariant make_copy_f16_variant();
+KernelVariant make_copy_f16_vec2_variant(); // half2
+
+
+
 }  // namespace aicf::cuda
 
 extern "C" void aicf_cuda_register_all_kernels() {
@@ -134,4 +141,14 @@ extern "C" void aicf_cuda_register_all_kernels() {
     R.register_kernel(OpKind::SgdStep, make_sgd_step_f16_variant());
     R.register_kernel(OpKind::SgdStep, make_sgd_step_f32_variant());
   }
+  
+  // --------------------------------------------------------------------------
+  // Copy
+  // --------------------------------------------------------------------------
+  {
+    R.register_kernel(OpKind::Copy, make_copy_f16_vec2_variant());
+    R.register_kernel(OpKind::Copy, make_copy_f16_variant());
+    R.register_kernel(OpKind::Copy, make_copy_f32_variant());
+  }
+
 }

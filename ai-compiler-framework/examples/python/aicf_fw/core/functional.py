@@ -1,133 +1,211 @@
 # aicf_fw/core/functional.py
 from __future__ import annotations
 
-from typing import Any, Dict
-from .tensor import Tensor
-from .autograd import Node, grad_enabled
-from ..backend import get_backend
+from typing import List, Optional, Tuple, Dict, Any
+
+import torch
+
+from aicf_fw.core.tensor import Tensor
+from aicf_fw.core.autograd import Node, grad_enabled
+from aicf_fw.backend import get_backend
 
 
-# --- Nodes ---
-class LinearNode(Node):
-    def __init__(self, x: Tensor, W: Tensor, b: Tensor | None):
-        inputs = [x, W] + ([b] if b is not None else [])
-        super().__init__(inputs)
-        self.x = x
-        self.W = W
-        self.b = b
+# ============================================================
+# Buffer Pool (capture-safe)
+# - CUDA Graph replay requires pointer stability.
+# - Therefore: NEVER allocate new tensors in capture region.
+# - We cache buffers keyed by (shape, dtype, device, tag).
+# ============================================================
 
-    def backward(self, out_grad: Tensor):
-        backend = get_backend()
+class _BufferPool:
+    def __init__(self):
+        # key: (tag, shape_tuple, dtype, device_index)
+        self._bufs: Dict[Tuple[str, Tuple[int, ...], torch.dtype, int], torch.Tensor] = {}
 
-        x = self.x          # (B, I)
-        W = self.W          # (I, O)
-        dY = out_grad       # (B, O)
+    def get(self, *, tag: str, ref: torch.Tensor, shape: Tuple[int, ...]) -> torch.Tensor:
+        if not ref.is_cuda:
+            raise RuntimeError("BufferPool expects CUDA tensors only.")
 
-        # dX = dY @ W^T
-        # (B,O) @ (O,I) -> (B,I) == gemm(dY, W, transB=True)
-        dX_data = backend.op_call(
+        dev = int(ref.device.index) if ref.device.index is not None else 0
+        key = (tag, tuple(shape), ref.dtype, dev)
+
+        buf = self._bufs.get(key)
+        if buf is None:
+            # NOTE: this allocation MUST happen outside capture.
+            buf = torch.empty(shape, device=ref.device, dtype=ref.dtype)
+            self._bufs[key] = buf
+        return buf
+
+    def get_like(self, *, tag: str, ref: torch.Tensor) -> torch.Tensor:
+        return self.get(tag=tag, ref=ref, shape=tuple(ref.shape))
+
+    def reset(self) -> None:
+        self._bufs.clear()
+
+
+# Global pool instance (simple and effective for single-process experiments)
+_POOL = _BufferPool()
+
+
+def reset_functional_buffers() -> None:
+    """
+    Useful when you want to drop cached buffers between experiments.
+    Call ONLY outside capture.
+    """
+    _POOL.reset()
+
+
+# ============================================================
+# Linear
+# ============================================================
+
+class _LinearNode(Node):
+    """
+    Inputs:
+      x: (B, IN)
+      W: (IN, OUT)
+      b: (OUT,) optional
+    Saved buffers (all fixed pointers via pool):
+      dx_buf: (B, IN)
+      dW_buf: (IN, OUT)
+      db_buf: (OUT,) optional
+    """
+    def __init__(
+        self,
+        x: Tensor,
+        W: Tensor,
+        b: Optional[Tensor],
+        dx_buf: Tensor,
+        dW_buf: Tensor,
+        db_buf: Optional[Tensor],
+    ):
+        super().__init__([x, W] + ([b] if b is not None else []))
+        self.has_bias = b is not None
+        self.dx_buf = dx_buf
+        self.dW_buf = dW_buf
+        self.db_buf = db_buf
+
+    def backward(self, out_grad: Tensor) -> List[Optional[Tensor]]:
+        bk = get_backend()
+        x = self.inputs[0]
+        W = self.inputs[1]
+
+        # dx = dY @ W^T  : (B, OUT) @ (OUT, IN) -> (B, IN)
+        bk.op_call_out(
             "gemm",
-            [dY.data, W.data],
-            {"transA": False, "transB": True},
+            [out_grad.data, W.data],
+            [self.dx_buf.data],
+            {"transB": True},
         )
-        dX = Tensor(dX_data, requires_grad=False)
 
-        # dW = X^T @ dY
-        # (I,B) @ (B,O) -> (I,O) == gemm(x, dY, transA=True)
-        dW_data = backend.op_call(
+        # dW = X^T @ dY  : (IN, B) @ (B, OUT) -> (IN, OUT)
+        bk.op_call_out(
             "gemm",
-            [x.data, dY.data],
-            {"transA": True, "transB": False},
+            [x.data, out_grad.data],
+            [self.dW_buf.data],
+            {"transA": True},
         )
-        dW = Tensor(dW_data, requires_grad=False)
 
-        if self.b is not None:
-            # dB = reduce_sum(dY, axis=0)
-            dB_data = backend.op_call(
+        if self.has_bias:
+            # db = sum(dY, axis=0) -> (OUT,)
+            bk.op_call_out(
                 "reduce_sum",
-                [dY.data],
+                [out_grad.data],
+                [self.db_buf.data],
                 {"axis": 0, "keepdim": False},
             )
-            dB = Tensor(dB_data, requires_grad=False)
-            return [dX, dW, dB]
+            return [self.dx_buf, self.dW_buf, self.db_buf]
 
-        return [dX, dW]
-
-
-class ReLUNode(Node):
-    def __init__(self, x: Tensor):
-        super().__init__([x])
-        self.x = x
-
-    def backward(self, out_grad: Tensor):
-        backend = get_backend()
-        dX_data = backend.op_call("relu_bwd", [out_grad.data, self.x.data], {})
-        dX = Tensor(dX_data, requires_grad=False)
-        return [dX]
+        return [self.dx_buf, self.dW_buf]
 
 
-class MSELossNode(Node):
-    def __init__(self, y: Tensor, t: Tensor):
-        super().__init__([y, t])
-        self.y = y
-        self.t = t
+def linear(x: Tensor, W: Tensor, b: Optional[Tensor]) -> Tensor:
+    """
+    y = x @ W + b
 
-    def backward(self, out_grad: Tensor):
-        backend = get_backend()
+    Capture-safe rules:
+      - forward output buffer comes from pool (stable pointer)
+      - backward buffers come from pool (stable pointer)
+      - ONLY op_call_out in capture region
+    """
+    bk = get_backend()
 
-        # Your AICF has mse_grad kernel. It already uses scale = 2/numel by default unless attr "scale".
-        # out_grad is usually scalar(1). We apply it safely in torch to avoid needing a "scale" op.
-        dY_base = backend.op_call("mse_grad", [self.y.data, self.t.data], {})
-        # Multiply by out_grad (scalar) in torch to avoid extra custom op.
-        # out_grad.data may be a 0-d tensor on cuda/cpu. Normalize it to CUDA scalar.
-        og = out_grad.data
-        if hasattr(og, "numel") and og.numel() == 1:
-            # ensure CUDA
-            if og.is_cuda != self.y.data.is_cuda:
-                og = og.to(device=self.y.data.device)
-        dY_data = dY_base * og
-        dY = Tensor(dY_data, requires_grad=False)
-        return [dY, None]
+    if x.data.dim() != 2 or W.data.dim() != 2:
+        raise RuntimeError(f"linear expects 2D x and W, got x.dim={x.data.dim()} W.dim={W.data.dim()}")
 
+    B, IN = x.data.shape
+    IN2, OUT = W.data.shape
+    if IN != IN2:
+        raise RuntimeError(f"linear shape mismatch: x={tuple(x.data.shape)} W={tuple(W.data.shape)}")
 
-# --- ops ---
-def linear(x: Tensor, W: Tensor, b: Tensor | None = None) -> Tensor:
-    backend = get_backend()
-
-    # y = x @ W
-    y_data = backend.op_call("gemm", [x.data, W.data], {"transA": False, "transB": False})
+    # --- forward y buffer (stable) ---
+    y_buf = _POOL.get(tag="linear_y", ref=x.data, shape=(B, OUT))
+    bk.op_call_out("gemm", [x.data, W.data], [y_buf], {})
 
     if b is not None:
-        y_data = backend.op_call("bias_add", [y_data, b.data], {})
+        bk.op_call_out("bias_add", [y_buf, b.data], [y_buf], {})
 
-    req = (x.requires_grad or W.requires_grad or (b.requires_grad if b is not None else False))
-    y = Tensor(y_data, requires_grad=req)
+    y = Tensor(y_buf, requires_grad=grad_enabled())
+    if not y.requires_grad:
+        return y
 
-    if grad_enabled() and y.requires_grad:
-        y.creator = LinearNode(x, W, b)
+    # --- backward buffers (stable) ---
+    dx_buf_t = _POOL.get(tag="linear_dx", ref=x.data, shape=(B, IN))
+    dW_buf_t = _POOL.get(tag="linear_dW", ref=x.data, shape=(IN, OUT))
+    db_buf_t = _POOL.get(tag="linear_db", ref=x.data, shape=(OUT,)) if b is not None else None
+
+    dx_buf = Tensor(dx_buf_t, requires_grad=False)
+    dW_buf = Tensor(dW_buf_t, requires_grad=False)
+    db_buf = Tensor(db_buf_t, requires_grad=False) if db_buf_t is not None else None
+
+    y.creator = _LinearNode(x, W, b, dx_buf, dW_buf, db_buf)
     return y
+
+
+# ============================================================
+# ReLU
+# ============================================================
+
+class _ReluNode(Node):
+    """
+    Save y for relu_bwd input: relu_bwd(dout, y) -> dx
+    Buffers are stable via pool.
+    """
+    def __init__(self, x: Tensor, y: Tensor, dx_buf: Tensor):
+        super().__init__([x])
+        self.y = y
+        self.dx_buf = dx_buf
+
+    def backward(self, out_grad: Tensor) -> List[Optional[Tensor]]:
+        bk = get_backend()
+        bk.op_call_out(
+            "relu_bwd",
+            [out_grad.data, self.y.data],
+            [self.dx_buf.data],
+            {},
+        )
+        return [self.dx_buf]
 
 
 def relu(x: Tensor) -> Tensor:
-    backend = get_backend()
-    y_data = backend.op_call("relu", [x.data], {})
-    y = Tensor(y_data, requires_grad=x.requires_grad)
-    if grad_enabled() and y.requires_grad:
-        y.creator = ReLUNode(x)
+    """
+    y = relu(x)
+    Capture-safe:
+      - forward y buffer from pool
+      - backward dx buffer from pool
+      - op_call_out only
+    """
+    bk = get_backend()
+
+    y_buf = _POOL.get_like(tag="relu_y", ref=x.data)
+    bk.op_call_out("relu", [x.data], [y_buf], {})
+
+    y = Tensor(y_buf, requires_grad=grad_enabled())
+    if not y.requires_grad:
+        return y
+
+    dx_buf_t = _POOL.get_like(tag="relu_dx", ref=x.data)
+    dx_buf = Tensor(dx_buf_t, requires_grad=False)
+
+    y.creator = _ReluNode(x, y, dx_buf)
     return y
-
-
-def mse_loss(y: Tensor, t: Tensor) -> Tensor:
-    backend = get_backend()
-
-    # NOTE:
-    # AICF currently doesn't expose "mse" forward in OpKind.
-    # We'll compute loss forward in torch for now, but keep mse_grad for backward.
-    # loss = mean((y - t)^2)
-    diff = y.data - t.data
-    loss_data = (diff * diff).mean()
-
-    loss = Tensor(loss_data, requires_grad=y.requires_grad)
-    if grad_enabled() and loss.requires_grad:
-        loss.creator = MSELossNode(y, t)
-    return loss

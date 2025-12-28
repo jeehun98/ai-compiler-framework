@@ -1,22 +1,22 @@
 # aicf_fw/optim/sgd.py
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Union, Iterable
+from typing import Any, Dict, Optional
 
-import torch
-
-from aicf_fw.core.tensor import Tensor
-from aicf_fw.core.module import Module
 from aicf_fw.backend import get_backend
 from .base import Optimizer, ParamsLike
 
 
 class SGD(Optimizer):
     """
-    SGD optimizer.
-    - params: Module or iterable[Tensor]
-    - inplace=True uses backend.op_call_out("sgd_step", ...) for in-place update
+    SGD optimizer (capture-safe flavor).
+
+    Policy:
+    - inplace=True uses backend.op_call_out("sgd_step") to keep pointer stability.
+    - DO NOT use torch-side ops (like clamp) in the capture path.
+    - With autograd overwrite mode, you usually don't need zero_grad at all.
     """
+
     def __init__(
         self,
         params: ParamsLike,
@@ -27,6 +27,9 @@ class SGD(Optimizer):
         super().__init__(params)
         self.lr = float(lr)
         self.inplace = bool(inplace)
+
+        # For capture safety, grad_clip via torch is not allowed inside capture.
+        # If you need grad_clip, implement an AICF op (clip) and call it in the graph.
         self.grad_clip = float(grad_clip) if grad_clip is not None else None
 
     def step(self) -> None:
@@ -41,13 +44,16 @@ class SGD(Optimizer):
             w = p.data
             g = p.grad.data
 
-            # optional grad clip (torch-side, cheap and safe)
             if self.grad_clip is not None:
-                # clip by value (not norm) - simple
-                g = torch.clamp(g, min=-self.grad_clip, max=self.grad_clip)
+                # Capture-safe note:
+                # torch.clamp here would introduce torch ops.
+                # If you really want clipping, add an AICF op "clip" and use op_call_out.
+                raise RuntimeError(
+                    "SGD.grad_clip is set, but torch-side clamp is not capture-safe. "
+                    "Implement AICF clip op or set grad_clip=None."
+                )
 
             if self.inplace:
-                # in-place update: w <- w - lr*g
                 backend.op_call_out(
                     "sgd_step",
                     [w, g],
@@ -55,8 +61,8 @@ class SGD(Optimizer):
                     {"lr": self.lr},
                 )
             else:
-                # out-of-place fallback (torch)
-                p.data = w - self.lr * g
+                # out-of-place update is NOT capture-safe (rebinds tensor storage)
+                raise RuntimeError("SGD(inplace=False) is not capture-safe. Use inplace=True.")
 
     def state_dict(self) -> Dict[str, Any]:
         return {
@@ -68,7 +74,6 @@ class SGD(Optimizer):
         }
 
     def load_state_dict(self, state: Dict[str, Any]) -> None:
-        # minimal strict-ish load
         if state.get("type") != "SGD":
             raise ValueError(f"state_dict type mismatch: {state.get('type')}")
         self.lr = float(state.get("lr", self.lr))
