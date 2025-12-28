@@ -1,12 +1,14 @@
 # aicf_fw/nn/relu.py
 from __future__ import annotations
-from ..core.module import Module
-from ..core.tensor import Tensor
-from ..core import functional as F
+
+from aicf_fw.core.module import Module
+from aicf_fw.core.tensor import Tensor
+from aicf_fw.core.functional import relu
+
 
 class ReLU(Module):
     def __init__(self):
         super().__init__()
 
     def forward(self, x: Tensor) -> Tensor:
-        return F.relu(x)
+        return relu(x)
