@@ -247,6 +247,10 @@ PYBIND11_MODULE(_C, m) {
       .value("SgdStep",     aicf::cuda::OpKind::SgdStep)
       .value("Copy",        aicf::cuda::OpKind::Copy)
       .value("GradZero",    aicf::cuda::OpKind::GradZero)
+      .value("AdamStep",    aicf::cuda::OpKind::AdamStep)
+      .value("StepInc",     aicf::cuda::OpKind::StepInc)
+      .value("BiasCorr",    aicf::cuda::OpKind::BiasCorr)
+
 
 
       .export_values();

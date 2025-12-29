@@ -16,12 +16,14 @@ enum class DType : uint8_t {
   kF32  = 1,
   kF16  = 2,
   kBF16 = 3,
+  kI32  = 4,   // ✅ 추가
 
   // backward-compatible aliases (keep)
   Unknown = kUnknown,
   F32  = kF32,
   F16  = kF16,
   BF16 = kBF16,
+  I32  = kI32, // ✅ alias
 };
 
 // -------------------------

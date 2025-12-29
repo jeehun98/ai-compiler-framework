@@ -55,6 +55,25 @@ __global__ void add_f16x2_kernel(const __half2* __restrict__ a,
 }  // namespace add_impl
 
 // -------------------------
+// helpers (ND)
+// -------------------------
+static inline int64_t numel(const TensorDesc& d) {
+  int64_t n = 1;
+  for (int i = 0; i < d.r.rank; ++i) n *= (int64_t)d.shape[i];
+  return n;
+}
+
+static inline bool same_shape(const TensorDesc& a, const TensorDesc& b) {
+  if (a.r.rank != b.r.rank) return false;
+  for (int i = 0; i < a.r.rank; ++i) {
+    if (a.shape[i] != b.shape[i]) return false;
+  }
+  return true;
+}
+
+static inline bool is_contig(const TensorDesc& d) { return d.contiguous; }
+
+// -------------------------
 // public API implementation
 // -------------------------
 aicf::Status add_f32(const float* a,
@@ -110,19 +129,22 @@ aicf::Status add_f16(const void* a,
 // -------------------------
 // Registry Variants - v0.2 Plan A (no workspace, no attr semantics yet)
 //
-// Contract:
-//   inputs[0]=A [N], inputs[1]=B [N], outputs[0]=O [N]
-//   binding guarantees: CUDA + contiguous (stride in desc is contiguous-by-contract)
+// Contract (updated):
+//   inputs[0]=A [*], inputs[1]=B [*], outputs[0]=O [*]
+//   - contiguous required
+//   - shapes must match (same rank + dims)
+//   - supports ND by flattening to numel()
+//   - out may alias inputs (in-place) by design
 // -------------------------
 
 static size_t add_variant_workspace(const TensorDesc*, int, const void*) {
   return 0;
 }
 
-static inline bool add_1d_common_check(
+static inline bool add_nd_common_check(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs,
-    bool (*is_dt_contig_1d)(const TensorDesc&)) {
+    DType dt) {
 
   if (!inputs || !outputs) return false;
   if (num_inputs != 2 || num_outputs != 1) return false;
@@ -131,14 +153,13 @@ static inline bool add_1d_common_check(
   const TensorDesc& B = inputs[1];
   const TensorDesc& O = outputs[0];
 
-  if (!is_dt_contig_1d(A)) return false;
-  if (!is_dt_contig_1d(B)) return false;
-  if (!is_dt_contig_1d(O)) return false;
+  if (A.dtype != dt || B.dtype != dt || O.dtype != dt) return false;
+  if (!is_contig(A) || !is_contig(B) || !is_contig(O)) return false;
 
-  if (!aicf::cuda::shim::same_shape_1d(A, B)) return false;
-  if (!aicf::cuda::shim::same_shape_1d(A, O)) return false;
+  if (!same_shape(A, B)) return false;
+  if (!same_shape(A, O)) return false;
 
-  return (O.shape[0] > 0);
+  return (numel(O) > 0);
 }
 
 // ---- F32 variant ----
@@ -147,8 +168,7 @@ static bool add_f32_variant_supported(
     const TensorDesc* outputs, int num_outputs,
     const void* /*attr*/) {
 
-  return add_1d_common_check(inputs, num_inputs, outputs, num_outputs,
-                             &aicf::cuda::shim::is_f32_contig_1d);
+  return add_nd_common_check(inputs, num_inputs, outputs, num_outputs, DType::kF32);
 }
 
 static aicf::Status add_f32_variant_launch(
@@ -158,8 +178,7 @@ static aicf::Status add_f32_variant_launch(
     void* /*workspace*/, size_t /*workspace_bytes*/,
     cudaStream_t stream) {
 
-  if (!add_1d_common_check(inputs, num_inputs, outputs, num_outputs,
-                           &aicf::cuda::shim::is_f32_contig_1d)) {
+  if (!add_nd_common_check(inputs, num_inputs, outputs, num_outputs, DType::kF32)) {
     return aicf::Status::InvalidArgument;
   }
 
@@ -167,10 +186,11 @@ static aicf::Status add_f32_variant_launch(
   const TensorDesc& B = inputs[1];
   TensorDesc& O = outputs[0];
 
-  const int N = static_cast<int>(O.shape[0]);
+  const int64_t N64 = numel(O);
+  const int N = (int)N64;
 
   constexpr int kThreads = 256;
-  const int blocks = (N + kThreads - 1) / kThreads;
+  const int blocks = (int)((N64 + kThreads - 1) / kThreads);
 
   add_impl::add_f32_kernel<<<blocks, kThreads, 0, stream>>>(
       (const float*)A.data,
@@ -198,8 +218,7 @@ static bool add_f16_variant_supported(
     const TensorDesc* outputs, int num_outputs,
     const void* /*attr*/) {
 
-  return add_1d_common_check(inputs, num_inputs, outputs, num_outputs,
-                             &aicf::cuda::shim::is_f16_contig_1d);
+  return add_nd_common_check(inputs, num_inputs, outputs, num_outputs, DType::kF16);
 }
 
 static aicf::Status add_f16_variant_launch(
@@ -209,8 +228,7 @@ static aicf::Status add_f16_variant_launch(
     void* /*workspace*/, size_t /*workspace_bytes*/,
     cudaStream_t stream) {
 
-  if (!add_1d_common_check(inputs, num_inputs, outputs, num_outputs,
-                           &aicf::cuda::shim::is_f16_contig_1d)) {
+  if (!add_nd_common_check(inputs, num_inputs, outputs, num_outputs, DType::kF16)) {
     return aicf::Status::InvalidArgument;
   }
 
@@ -218,10 +236,11 @@ static aicf::Status add_f16_variant_launch(
   const TensorDesc& B = inputs[1];
   TensorDesc& O = outputs[0];
 
-  const int N = static_cast<int>(O.shape[0]);
+  const int64_t N64 = numel(O);
+  const int N = (int)N64;
 
   constexpr int kThreads = 256;
-  const int blocks = (N + kThreads - 1) / kThreads;
+  const int blocks = (int)((N64 + kThreads - 1) / kThreads);
 
   add_impl::add_f16_kernel<<<blocks, kThreads, 0, stream>>>(
       (const __half*)A.data,
@@ -248,8 +267,7 @@ static inline bool add_f16_vec2_check(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs) {
 
-  if (!add_1d_common_check(inputs, num_inputs, outputs, num_outputs,
-                           &aicf::cuda::shim::is_f16_contig_1d)) {
+  if (!add_nd_common_check(inputs, num_inputs, outputs, num_outputs, DType::kF16)) {
     return false;
   }
 
@@ -257,7 +275,8 @@ static inline bool add_f16_vec2_check(
   const TensorDesc& B = inputs[1];
   const TensorDesc& O = outputs[0];
 
-  if (!aicf::cuda::shim::is_even_len_1d(O)) return false;
+  const int64_t N = numel(O);
+  if ((N & 1) != 0) return false;
 
   constexpr size_t kHalf2Align = 4;
   if (!aicf::cuda::shim::is_aligned_data(A, kHalf2Align)) return false;
@@ -290,11 +309,11 @@ static aicf::Status add_f16_vec2_variant_launch(
   const TensorDesc& B = inputs[1];
   TensorDesc& O = outputs[0];
 
-  const int N = static_cast<int>(O.shape[0]);
-  const int N2 = N / 2;
+  const int64_t N = numel(O);
+  const int N2 = (int)(N / 2);
 
   constexpr int kThreads = 256;
-  const int blocks = (N2 + kThreads - 1) / kThreads;
+  const int blocks = (int)((N2 + kThreads - 1) / kThreads);
 
   add_impl::add_f16x2_kernel<<<blocks, kThreads, 0, stream>>>(
       (const __half2*)A.data,

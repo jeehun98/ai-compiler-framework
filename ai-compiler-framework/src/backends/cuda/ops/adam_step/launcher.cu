@@ -1,0 +1,134 @@
+#include <aicf/backends/cuda/ops/adam_step/api.hpp>
+
+#include <aicf/backends/cuda/registry/kernel_variant.hpp>
+#include <aicf/backends/cuda/registry/tensor_desc.hpp>
+#include <aicf/backends/cuda/registry/attr_pack.hpp>
+
+#include <cuda_runtime.h>
+
+#include "kernels.cuh"
+
+namespace aicf::cuda {
+
+static inline int64_t numel(const TensorDesc& d) {
+  int64_t n = 1;
+  for (int i = 0; i < d.r.rank; ++i) n *= (int64_t)d.shape[i];
+  return n;
+}
+
+static inline bool same_shape(const TensorDesc& a, const TensorDesc& b) {
+  if (a.r.rank != b.r.rank) return false;
+  for (int i = 0; i < a.r.rank; ++i)
+    if (a.shape[i] != b.shape[i]) return false;
+  return true;
+}
+
+static inline bool is_contig(const TensorDesc& d) { return d.contiguous; }
+
+// ---------------- adam_step_v0 ----------------
+aicf::Status adam_step_v0(
+    const TensorDesc* inputs, int num_inputs,
+    TensorDesc* outputs, int num_outputs,
+    const void* attr,
+    void* /*workspace*/, size_t /*workspace_bytes*/,
+    cudaStream_t stream) {
+
+  if (num_inputs != 4 || num_outputs != 3) return aicf::Status::InvalidArgument;
+
+  const TensorDesc& P = inputs[0];
+  const TensorDesc& G = inputs[1];
+  const TensorDesc& M = inputs[2];
+  const TensorDesc& V = inputs[3];
+
+  TensorDesc& Pout = outputs[0];
+  TensorDesc& Mout = outputs[1];
+  TensorDesc& Vout = outputs[2];
+
+  if (P.dtype != DType::kF32 || G.dtype != DType::kF32 ||
+      M.dtype != DType::kF32 || V.dtype != DType::kF32)
+    return aicf::Status::NotImplemented;
+
+  if (!same_shape(P, G) || !same_shape(P, M) || !same_shape(P, V)) 
+    return aicf::Status::InvalidArgument;
+
+  if (!same_shape(P, Pout) || !same_shape(M, Mout) || !same_shape(V, Vout))
+    return aicf::Status::InvalidArgument;
+
+  if (!is_contig(P) || !is_contig(G) || !is_contig(M) || !is_contig(V) ||
+      !is_contig(Pout) || !is_contig(Mout) || !is_contig(Vout))
+    return aicf::Status::NotImplemented;
+
+  const AttrPack* pack = (const AttrPack*)attr;
+  if (!pack) return aicf::Status::InvalidArgument;
+
+  float lr=0, beta1=0, beta2=0, eps=0, bc1_inv=1, bc2_inv=1;
+
+  for (int i = 0; i < pack->size; ++i) {
+    const auto& kv = pack->items[i];
+    if (!strcmp(kv.key, "lr"))        lr = kv.val.f32;
+    else if (!strcmp(kv.key, "beta1")) beta1 = kv.val.f32;
+    else if (!strcmp(kv.key, "beta2")) beta2 = kv.val.f32;
+    else if (!strcmp(kv.key, "eps"))   eps = kv.val.f32;
+    else if (!strcmp(kv.key, "bc1_inv")) bc1_inv = kv.val.f32;
+    else if (!strcmp(kv.key, "bc2_inv")) bc2_inv = kv.val.f32;
+  }
+
+  const int64_t n = numel(P);
+  if (n <= 0) return aicf::Status::Ok;
+
+  const int threads = 256;
+  const int blocks  = (int)((n + threads - 1) / threads);
+
+  adam_step_f32_kernel<<<blocks, threads, 0, stream>>>(
+      (float*)Pout.data,
+      (const float*)G.data,
+      (float*)Mout.data,
+      (float*)Vout.data,
+      n, lr, beta1, beta2, eps, bc1_inv, bc2_inv);
+
+  return aicf::Status::Ok;
+}
+
+// ---------------- KernelVariant ----------------
+static bool supported_adam_step_f32(
+    const TensorDesc* in, int ni,
+    const TensorDesc* out, int no,
+    const void* /*attr*/) {
+
+  if (ni != 4 || no != 3) return false;
+  for (int i = 0; i < 4; ++i)
+    if (in[i].dtype != DType::kF32 || !is_contig(in[i])) return false;
+
+  if (!same_shape(in[0], in[1]) || !same_shape(in[0], in[2]) || !same_shape(in[0], in[3]))
+    return false;
+
+  if (!same_shape(out[0], in[0]) || !same_shape(out[1], in[2]) || !same_shape(out[2], in[3]))
+    return false;
+
+  return true;
+}
+
+static size_t query_ws_adam_step(
+    const TensorDesc*, int, const void*) { return 0; }
+
+static aicf::Status launch_adam_step(
+    const TensorDesc* inputs, int ni,
+    TensorDesc* outputs, int no,
+    const void* attr,
+    void* ws, size_t ws_bytes,
+    cudaStream_t stream) {
+
+  return adam_step_v0(inputs, ni, outputs, no, attr, ws, ws_bytes, stream);
+}
+
+KernelVariant make_adam_step_f32_variant() {
+  KernelVariant kv{};
+  kv.name = "adam_step_f32_v0";
+  kv.priority = 0;
+  kv.query_workspace = query_ws_adam_step;
+  kv.supported = supported_adam_step_f32;
+  kv.launch = launch_adam_step;
+  return kv;
+}
+
+} // namespace aicf::cuda

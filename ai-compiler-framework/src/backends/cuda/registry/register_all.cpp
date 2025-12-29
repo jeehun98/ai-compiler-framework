@@ -62,6 +62,16 @@ KernelVariant make_copy_f16_vec2_variant(); // half2
 // GradZero
 KernelVariant make_grad_zero_variant();
 
+// AdamStep
+KernelVariant make_adam_step_f32_variant();
+
+// StepInc
+KernelVariant make_step_inc_variant();
+
+// BiasCorr
+KernelVariant make_biascorr_variant();
+
+
 }  // namespace aicf::cuda
 
 extern "C" void aicf_cuda_register_all_kernels() {
@@ -157,6 +167,28 @@ extern "C" void aicf_cuda_register_all_kernels() {
   // --------------------------------------------------------------------------
   {
     R.register_kernel(OpKind::GradZero, make_grad_zero_variant());
+  }
+
+
+  // --------------------------------------------------------------------------
+  // AdamStep
+  // --------------------------------------------------------------------------
+  {
+    R.register_kernel(OpKind::AdamStep, make_adam_step_f32_variant());
+  }
+
+    // --------------------------------------------------------------------------
+  // StepInc
+  // --------------------------------------------------------------------------
+  {
+    R.register_kernel(OpKind::StepInc, make_step_inc_variant());
+  }
+
+  // --------------------------------------------------------------------------
+  // BiasCorr
+  // --------------------------------------------------------------------------
+  {
+    R.register_kernel(OpKind::BiasCorr, make_biascorr_variant());
   }
 
 }
