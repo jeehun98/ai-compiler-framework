@@ -258,3 +258,88 @@ def mse_grad(pred: Tensor, target: Tensor, *, scale: Optional[float] = None) -> 
 
     bk.op_call_out("mse_grad", [pred.data, target.data], [out_buf], attrs)
     return Tensor(out_buf, requires_grad=False)
+
+
+# ------------------------------------------------------------------
+# Existing functions...
+# ------------------------------------------------------------------
+
+def grad_zero_(g: Tensor) -> Tensor:
+    """
+    In-place grad reset (capture-safe). g must be contiguous CUDA.
+    """
+    bk = get_backend()
+    # backend.op_call_out expects torch tensors
+    bk.op_call_out("grad_zero", [g.data], [g.data], attrs={})
+    return g
+
+def step_inc_(step_i32: torch.Tensor) -> torch.Tensor:
+    """
+    step_i32: torch.int32 scalar CUDA tensor (shape=()).
+    In-place increment (capture-safe).
+    """
+    bk = get_backend()
+    bk.op_call_out("step_inc", [step_i32], [step_i32], attrs={})
+    return step_i32
+
+def bias_corr_out(step_i32: torch.Tensor,
+                  bc1_inv: torch.Tensor,
+                  bc2_inv: torch.Tensor,
+                  beta1: float,
+                  beta2: float) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute bias-correction inverses into bc tensors (shape=()).
+      bc1_inv = 1 / (1 - beta1^t)
+      bc2_inv = 1 / (1 - beta2^t)
+    step_i32: int32 scalar CUDA tensor, bc*: float32 scalar CUDA tensors.
+    """
+    bk = get_backend()
+    bk.op_call_out(
+        "bias_corr",
+        [step_i32],
+        [bc1_inv, bc2_inv],
+        attrs={"beta1": float(beta1), "beta2": float(beta2)},
+    )
+    return bc1_inv, bc2_inv
+
+def adam_step_(p: Tensor,
+               g: Tensor,
+               m: Tensor,
+               v: Tensor,
+               bc1_inv: torch.Tensor,
+               bc2_inv: torch.Tensor,
+               lr: float,
+               beta1: float,
+               beta2: float,
+               eps: float) -> None:
+    """
+    Adam update in-place for p,m,v.
+    Inputs/Outputs contract (per your launcher):
+      inputs:  [P, G, M, V]  (all f32, same shape, contiguous)
+      outputs: [P, M, V]     (same buffers, in-place)
+    Bias correction scalars are provided via attrs OR via tensor bc version depending on your kernel.
+    You said you moved to "v1 bc-tensor", so we pass bc tensors as *inputs* if your binding supports it.
+    If your op is still attr-based, switch to attrs below.
+
+    Here: assume v1 bc-tensor AdamStep takes:
+      inputs  = [P, G, M, V, bc1_inv, bc2_inv]
+      outputs = [P, M, V]
+    """
+    bk = get_backend()
+
+    # --- v1: bc are tensors (recommended; no host math in capture) ---
+    bk.op_call_out(
+        "adam_step",
+        [p.data, g.data, m.data, v.data, bc1_inv, bc2_inv],
+        [p.data, m.data, v.data],
+        attrs={"lr": float(lr), "beta1": float(beta1), "beta2": float(beta2), "eps": float(eps)},
+    )
+
+    # --- v0: bc are attrs only (fallback) ---
+    # bk.op_call_out(
+    #     "adam_step",
+    #     [p.data, g.data, m.data, v.data],
+    #     [p.data, m.data, v.data],
+    #     attrs={"lr": float(lr), "beta1": float(beta1), "beta2": float(beta2),
+    #            "eps": float(eps), "bc1_inv": float(bc1_inv_host), "bc2_inv": float(bc2_inv_host)},
+    # )

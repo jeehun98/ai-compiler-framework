@@ -23,7 +23,7 @@ inline const char* dtype_name(const torch::Tensor& t) {
   switch (t.scalar_type()) {
     case at::kHalf:  return "float16";
     case at::kFloat: return "float32";
-    case at::kInt:   return "int32";   // ✅ added
+    case at::kInt:   return "int32";
     default:         return "other";
   }
 }
@@ -53,7 +53,7 @@ inline std::string tensor_brief(const torch::Tensor& t) {
 inline aicf::cuda::DType to_aicf_dtype_strict(const torch::Tensor& t) {
   if (t.scalar_type() == at::kHalf)  return aicf::cuda::DType::kF16;
   if (t.scalar_type() == at::kFloat) return aicf::cuda::DType::kF32;
-  if (t.scalar_type() == at::kInt)   return aicf::cuda::DType::kI32;  // ✅ fixed
+  if (t.scalar_type() == at::kInt)   return aicf::cuda::DType::kI32; // ✅ FIX
   TORCH_CHECK(false, "unsupported dtype. got: ", tensor_brief(t));
 }
 
@@ -69,7 +69,7 @@ inline void check_tensor_v0_2(const torch::Tensor& t, const char* what) {
               what, ": must be contiguous (binding v0.2). got: ", tensor_brief(t));
 
   const auto st = t.scalar_type();
-  TORCH_CHECK(st == at::kHalf || st == at::kFloat || st == at::kInt,
+  TORCH_CHECK(st == at::kHalf || st == at::kFloat || st == at::kInt, // ✅ allow int32
               what, ": dtype must be float16/float32/int32 (binding v0.2). got: ",
               tensor_brief(t));
 
@@ -120,7 +120,7 @@ inline void check_tensor_v0_3(const torch::Tensor& t, const char* what) {
               what, ": must be CUDA tensor. got: ", tensor_brief(t));
 
   const auto st = t.scalar_type();
-  TORCH_CHECK(st == at::kHalf || st == at::kFloat || st == at::kInt,
+  TORCH_CHECK(st == at::kHalf || st == at::kFloat || st == at::kInt, // ✅ allow int32
               what, ": dtype must be float16/float32/int32 (binding v0.3). got: ",
               tensor_brief(t));
 
@@ -146,7 +146,7 @@ inline aicf::cuda::TensorDesc to_desc_v0_3(const torch::Tensor& t) {
 
   for (int i = 0; i < r; ++i) {
     d.shape[i]  = t.size(i);
-    d.stride[i] = t.stride(i);  // real stride
+    d.stride[i] = t.stride(i);
   }
 
   d.contiguous = t.is_contiguous();

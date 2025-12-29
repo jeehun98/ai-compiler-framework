@@ -211,6 +211,23 @@ class AICFBackend(Backend):
 
         if op_l in ("copy",):
             return C.OpKind.Copy, {"like": 0}
+        
+        if op_l in ("grad_zero", "zero_grad"):
+            return C.OpKind.GradZero, {"like": 0}
+
+        if op_l in ("step_inc", "stepinc"):
+            return C.OpKind.StepInc, {}
+
+        if op_l in ("bias_corr", "biascorr"):
+            # step(i32 scalar) -> bc1_inv(f32 scalar), bc2_inv(f32 scalar)
+            # attrs로 beta1/beta2 넘기는 구조라면 그대로 전달
+            return C.OpKind.BiasCorr, {}
+
+        if op_l in ("adam_step", "adamstep"):
+            # P,G,M,V -> P,M,V (in-place 가능)
+            return C.OpKind.AdamStep, {"like": 0}
+
+
 
         raise KeyError(f"AICFBackend: unknown op '{op_l}'")
 

@@ -1,33 +1,44 @@
 #pragma once
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
-#include <math.h>
+#include <cstdint>
 
 namespace aicf::cuda {
 
-__global__ void adam_step_f32_kernel(
-    float* __restrict__ param,
-    const float* __restrict__ grad,
-    float* __restrict__ m,
-    float* __restrict__ v,
+// Adam update (f32)
+// bc1_inv_ptr / bc2_inv_ptr: device pointers to scalar floats (rank-0 tensors)
+__global__ void adam_step_f32_kernel_v1(
+    float* __restrict__ P,
+    const float* __restrict__ G,
+    float* __restrict__ M,
+    float* __restrict__ V,
     int64_t n,
-    float lr,
-    float beta1,
-    float beta2,
-    float eps,
-    float bc1_inv,
-    float bc2_inv) {
+    float lr, float beta1, float beta2, float eps,
+    const float* __restrict__ bc1_inv_ptr,
+    const float* __restrict__ bc2_inv_ptr) {
 
-  int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  const int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
 
-  float g  = grad[i];
-  float mi = m[i] = beta1 * m[i] + (1.0f - beta1) * g;
-  float vi = v[i] = beta2 * v[i] + (1.0f - beta2) * g * g;
+  const float g = G[i];
+  float m = M[i];
+  float v = V[i];
 
-  float mhat = mi * bc1_inv;
-  float vhat = vi * bc2_inv;
+  m = beta1 * m + (1.0f - beta1) * g;
+  v = beta2 * v + (1.0f - beta2) * (g * g);
 
-  param[i] -= lr * mhat / (sqrtf(vhat) + eps);
+  // load bias-correction inverses from device scalar tensors
+  const float bc1_inv = *bc1_inv_ptr;   // = 1/(1-beta1^t)
+  const float bc2_inv = *bc2_inv_ptr;   // = 1/(1-beta2^t)
+
+  const float m_hat = m * bc1_inv;
+  const float v_hat = v * bc2_inv;
+
+  const float denom = rsqrtf(v_hat + eps); // 1/sqrt(v_hat+eps)
+  P[i] = P[i] - lr * (m_hat * denom);
+
+  M[i] = m;
+  V[i] = v;
 }
 
 } // namespace aicf::cuda
