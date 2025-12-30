@@ -250,8 +250,10 @@ PYBIND11_MODULE(_C, m) {
       .value("AdamStep",    aicf::cuda::OpKind::AdamStep)
       .value("StepInc",     aicf::cuda::OpKind::StepInc)
       .value("BiasCorr",    aicf::cuda::OpKind::BiasCorr)
-      .value("LayerNorm",   aicf::cuda::OpKind::LayerNorm)
-
+      .value("LayerNormFwd", aicf::cuda::OpKind::LayerNormFwd)
+      .value("LayerNormBwd", aicf::cuda::OpKind::LayerNormBwd)
+      .value("BatchNormFwd", aicf::cuda::OpKind::BatchNormFwd)
+      .value("BatchNormBwd", aicf::cuda::OpKind::BatchNormBwd)
       .export_values();
 
   m.def(
