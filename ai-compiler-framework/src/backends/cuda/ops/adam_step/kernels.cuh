@@ -34,8 +34,9 @@ __global__ void adam_step_f32_kernel_v1(
   const float m_hat = m * bc1_inv;
   const float v_hat = v * bc2_inv;
 
-  const float denom = rsqrtf(v_hat + eps); // 1/sqrt(v_hat+eps)
-  P[i] = P[i] - lr * (m_hat * denom);
+  const float denom = sqrtf(v_hat) + eps;
+  P[i] = P[i] - lr * (m_hat / denom);
+
 
   M[i] = m;
   V[i] = v;

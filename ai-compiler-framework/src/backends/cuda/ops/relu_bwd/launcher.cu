@@ -1,3 +1,4 @@
+// relu_bwd/launcher.cu (or whatever your file name is)
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdint>
@@ -44,7 +45,6 @@ __global__ void relu_bwd_f16_kernel(const __half* __restrict__ Y,
   if (i >= numel) return;
 
   const __half y = Y[i];
-  // y > 0 ? dOut : 0
   dY[i] = __hgt(y, __float2half(0.0f)) ? dOut[i] : __float2half(0.0f);
 }
 
@@ -57,18 +57,7 @@ __global__ void relu_bwd_f16x2_kernel(const __half2* __restrict__ Y,
 
   const __half2 y = Y[i];
   const __half2 g = dOut[i];
-  const __half2 z = __float2half2_rn(0.0f);
 
-  // mask: (y > 0) ? 1 : 0 (lane-wise)
-  // CUDA half2 비교는 bool2 형태로 직접 다루기 애매하니,
-  // relu_bwd는 "y<=0이면 0"이므로 아래처럼 max(y,0) 기반으로 처리:
-  //   (y>0) => relu(y)=y, (y<=0)=>relu(y)=0
-  //   g * (y>0) 를 만들기 위해 (relu(y) == 0)면 0, 아니면 g를 선택
-  // 여기서는 branch-free로:
-  //   out = (y > 0) ? g : 0 를 각 lane에 대해 조건 선택
-  //
-  // 가장 단순하고 안정적인 방식: 두 lane을 스칼라로 분해 (성능 손해 작음, 그래도 load/store는 vec2)
-  // 성능을 더 밀고 싶으면 bitmask 선택을 별도 최적화하면 됨.
   const __half y0 = __low2half(y);
   const __half y1 = __high2half(y);
   const __half g0 = __low2half(g);
@@ -85,6 +74,8 @@ __global__ void relu_bwd_f16x2_kernel(const __half2* __restrict__ Y,
 // -------------------------
 // public API implementation
 // -------------------------
+// NOTE: Public API here is still (Y, dOut) for backward-compat if you already exported it.
+// The registry contract below is changed to (dOut, Y) to match Python framework call-site.
 aicf::Status relu_bwd_f32(const float* Y,
                           const float* dOut,
                           float* dY,
@@ -104,8 +95,6 @@ aicf::Status relu_bwd_f32(const float* Y,
   return aicf::cuda::shim::cuda_last_error_to_status();
 }
 
-// (옵션) public API를 f16도 열고 싶으면 api.hpp에 추가.
-// 지금은 패턴만 맞춰서 void* 버전으로 제안:
 aicf::Status relu_bwd_f16(const void* Y,
                           const void* dOut,
                           void* dY,
@@ -178,10 +167,10 @@ static inline bool compute_numel(const TensorDesc& T, int64_t* out_numel) {
 }
 
 // -------------------------
-// Contract:
-// inputs[0] = Y
-// inputs[1] = dOut
-// outputs[0]= dY
+// Contract (UPDATED to match framework call-site):
+// inputs[0] = dOut
+// inputs[1] = Y   (forward ReLU output or any tensor where y>0 indicates active)
+// outputs[0]= dY   (a.k.a. dX)
 // same shape, contig, dtype per variant
 // -------------------------
 static inline bool relu_bwd_check_dt(
@@ -192,12 +181,13 @@ static inline bool relu_bwd_check_dt(
   if (!inputs || !outputs) return false;
   if (num_inputs != 2 || num_outputs != 1) return false;
 
-  const TensorDesc& Y = inputs[0];
-  const TensorDesc& dOut = inputs[1];
-  const TensorDesc& dY = outputs[0];
+  const TensorDesc& dOut = inputs[0];
+  const TensorDesc& Y    = inputs[1];
+  const TensorDesc& dY   = outputs[0];
 
   if (!is_ok(Y) || !is_ok(dOut) || !is_ok(dY)) return false;
   if (Y.rank() < 1) return false;
+
   if (!same_shape(Y, dOut)) return false;
   if (!same_shape(Y, dY)) return false;
 
@@ -227,9 +217,9 @@ static aicf::Status relu_bwd_f32_launch(
     return aicf::Status::InvalidArgument;
   }
 
-  const TensorDesc& Y = inputs[0];
-  const TensorDesc& dOut = inputs[1];
-  TensorDesc& dY = outputs[0];
+  const TensorDesc& dOut = inputs[0];
+  const TensorDesc& Y    = inputs[1];
+  TensorDesc& dY         = outputs[0];
 
   int64_t numel = 0;
   if (!compute_numel(Y, &numel)) return aicf::Status::InvalidArgument;
@@ -274,9 +264,9 @@ static aicf::Status relu_bwd_f16_launch(
     return aicf::Status::InvalidArgument;
   }
 
-  const TensorDesc& Y = inputs[0];
-  const TensorDesc& dOut = inputs[1];
-  TensorDesc& dY = outputs[0];
+  const TensorDesc& dOut = inputs[0];
+  const TensorDesc& Y    = inputs[1];
+  TensorDesc& dY         = outputs[0];
 
   int64_t numel = 0;
   if (!compute_numel(Y, &numel)) return aicf::Status::InvalidArgument;
@@ -311,9 +301,9 @@ static inline bool relu_bwd_f16_vec2_check(
     return false;
   }
 
-  const TensorDesc& Y = inputs[0];
-  const TensorDesc& dOut = inputs[1];
-  const TensorDesc& dY = outputs[0];
+  const TensorDesc& dOut = inputs[0];
+  const TensorDesc& Y    = inputs[1];
+  const TensorDesc& dY   = outputs[0];
 
   int64_t numel = 0;
   if (!compute_numel(Y, &numel)) return false;
@@ -345,9 +335,9 @@ static aicf::Status relu_bwd_f16_vec2_launch(
     return aicf::Status::InvalidArgument;
   }
 
-  const TensorDesc& Y = inputs[0];
-  const TensorDesc& dOut = inputs[1];
-  TensorDesc& dY = outputs[0];
+  const TensorDesc& dOut = inputs[0];
+  const TensorDesc& Y    = inputs[1];
+  TensorDesc& dY         = outputs[0];
 
   int64_t numel = 0;
   if (!compute_numel(Y, &numel)) return aicf::Status::InvalidArgument;

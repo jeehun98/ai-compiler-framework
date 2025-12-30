@@ -1,4 +1,4 @@
-# aicf_fw/nn/linear.py
+# examples/python/aicf_fw/nn/linear.py
 from __future__ import annotations
 
 import torch
@@ -9,10 +9,17 @@ from aicf_fw.core.functional import linear
 
 
 class Linear(Module):
-    def __init__(self, in_features: int, out_features: int, bias: bool = True,
-                 device: str = "cuda", dtype: torch.dtype = torch.float32):
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool = True,
+        device: str = "cuda",
+        dtype: torch.dtype = torch.float32,
+    ):
         super().__init__()
-        W = torch.randn(in_features, out_features, device=device, dtype=dtype) * 0.02
+        # Torch-compatible weight layout: (OUT, IN)
+        W = torch.randn(out_features, in_features, device=device, dtype=dtype) * 0.02
         self.W = Tensor(W, requires_grad=True)
 
         if bias:
