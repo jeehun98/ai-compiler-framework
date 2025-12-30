@@ -71,6 +71,10 @@ KernelVariant make_step_inc_variant();
 // BiasCorr
 KernelVariant make_biascorr_variant();
 
+// LayerNorm
+KernelVariant make_layernorm_fwd_f32_variant();
+KernelVariant make_layernorm_fwd_f16_variant();
+
 
 }  // namespace aicf::cuda
 
@@ -190,5 +194,15 @@ extern "C" void aicf_cuda_register_all_kernels() {
   {
     R.register_kernel(OpKind::BiasCorr, make_biascorr_variant());
   }
+
+  // --------------------------------------------------------------------------
+  // LayerNorm
+  // --------------------------------------------------------------------------
+  {
+    // Prefer f16 when supported (typical training), then f32 fallback
+    R.register_kernel(OpKind::LayerNorm, make_layernorm_fwd_f16_variant());
+    R.register_kernel(OpKind::LayerNorm, make_layernorm_fwd_f32_variant());
+  }
+
 
 }

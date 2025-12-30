@@ -41,6 +41,7 @@ add_library(aicf
     src/backends/cuda/ops/adam_step/launcher.cu
     src/backends/cuda/ops/step_inc/launcher.cu
     src/backends/cuda/ops/biascorr/launcher.cu
+    src/backends/cuda/ops/layernorm/launcher.cu
 
     src/backends/cuda/registry/registry.cpp
     src/backends/cuda/registry/register_all.cpp

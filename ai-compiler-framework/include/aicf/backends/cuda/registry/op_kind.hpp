@@ -16,7 +16,10 @@ enum class OpKind : int {
   AdamStep    = 10,
   StepInc     = 11,
   BiasCorr    = 12,
-  _Count      = 13
+
+  LayerNorm   = 13,
+
+  _Count      = 14
 };
 
 }  // namespace aicf::cuda
