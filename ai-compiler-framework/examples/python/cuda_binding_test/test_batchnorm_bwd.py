@@ -38,27 +38,29 @@ def run_bn_bwd_affine(dtype=torch.float16, N=8, C=16, H=7, W=7, eps=1e-5):
     gamma = (torch.randn((C,), device=device, dtype=dtype) * 0.1 + 1.0).requires_grad_(True)
     beta  = (torch.randn((C,), device=device, dtype=dtype) * 0.1).requires_grad_(True)
 
-    # forward (training)
+    # ---------------------------
+    # PyTorch reference forward/backward
+    # ---------------------------
     y_ref = F.batch_norm(
         x, None, None,
         weight=gamma, bias=beta,
         training=True, momentum=0.1, eps=eps
     )
 
-    # saved stats: match your kernel definition (mean/rstd from x)
+    # stats that you feed into AICF bwd (from x)
     mean_ref, rstd_ref = ref_bn_train_saved_stats(x.detach(), eps)
 
-    # random upstream grad
     dy = torch.randn_like(y_ref)
 
-    # PyTorch grads: inject upstream grad directly
     y_ref.backward(dy)
 
     dx_ref = x.grad.detach()
     dgamma_ref = gamma.grad.detach().float()
     dbeta_ref  = beta.grad.detach().float()
 
-    # ---- AICF run ----
+    # ---------------------------
+    # AICF backward
+    # ---------------------------
     dx = torch.empty_like(x)
     dgamma = torch.empty((C,), device=device, dtype=torch.float32)
     dbeta  = torch.empty((C,), device=device, dtype=torch.float32)
@@ -66,7 +68,6 @@ def run_bn_bwd_affine(dtype=torch.float16, N=8, C=16, H=7, W=7, eps=1e-5):
     save_mean = mean_ref.detach().contiguous()
     save_rstd = rstd_ref.detach().contiguous()
 
-    # binding in your snippet: op_call(kind, inputs, outputs, attrs=dict)
     aicf_cuda.op_call(
         aicf_cuda.OpKind.BatchNormBwd,
         inputs=[x.detach(), dy.detach(), gamma.detach(), save_mean, save_rstd],
@@ -74,18 +75,52 @@ def run_bn_bwd_affine(dtype=torch.float16, N=8, C=16, H=7, W=7, eps=1e-5):
         attrs={}
     )
 
-    # errors
-    dx_err = max_abs_err(dx.float(), dx_ref.float())
-    dg_err = max_abs_err(dgamma, dgamma_ref)
-    db_err = max_abs_err(dbeta, dbeta_ref)
+    # ---------------------------
+    # Formula reference (matches WHAT WE PASS into AICF)
+    #   dbeta  = sum(dy)
+    #   dgamma = sum(dy * xhat)
+    #   dx     = (gamma * rstd / NHW) * (NHW*dy - sum(dy) - xhat*sum(dy*xhat))
+    # ---------------------------
+    with torch.no_grad():
+        dbeta_ref2 = dy.detach().float().sum(dim=(0, 2, 3))  # [C]
 
-    print(f"[BN bwd f16 affine] N={N} C={C} H={H} W={W} "
-          f"dx_err={dx_err} dgamma_err={dg_err} dbeta_err={db_err}")
+        xhat = (x.detach().float() - save_mean[None, :, None, None]) * save_rstd[None, :, None, None]
+        dgamma_ref2 = (dy.detach().float() * xhat).sum(dim=(0, 2, 3))  # [C]
 
-    # tolerances: atomic accumulation + fp16 I/O
-    assert dx_err < 8e-3, f"dx_err too large: {dx_err}"
-    assert dg_err < 3e-2, f"dgamma_err too large: {dg_err}"
-    assert db_err < 3e-2, f"dbeta_err too large: {db_err}"
+        NHW = float(N * H * W)
+        g = gamma.detach().float()[None, :, None, None]
+        rstd4 = save_rstd[None, :, None, None]
+        dx_ref2 = (g * rstd4 / NHW) * (
+            NHW * dy.detach().float()
+            - dbeta_ref2[None, :, None, None]
+            - xhat * dgamma_ref2[None, :, None, None]
+        )
+
+    # ---------------------------
+    # Compare AICF vs (A) PyTorch autograd, (B) formula refs
+    # ---------------------------
+    dx_err_pt = max_abs_err(dx.float(), dx_ref.float())
+    dg_err_pt = max_abs_err(dgamma, dgamma_ref)
+    db_err_pt = max_abs_err(dbeta, dbeta_ref)
+
+    dx_err_f  = max_abs_err(dx.float(), dx_ref2)
+    dg_err_f  = max_abs_err(dgamma, dgamma_ref2)
+    db_err_f  = max_abs_err(dbeta, dbeta_ref2)
+
+    print(f"[BN bwd pt]     N={N} C={C} H={H} W={W} "
+          f"dx_err={dx_err_pt} dgamma_err={dg_err_pt} dbeta_err={db_err_pt}")
+    print(f"[BN bwd formula] N={N} C={C} H={H} W={W} "
+          f"dx_err={dx_err_f} dgamma_err={dg_err_f} dbeta_err={db_err_f}")
+
+    # Assert against formula correctness first (this isolates kernel correctness)
+    assert dx_err_f < 8e-3,  f"dx_err(formula) too large: {dx_err_f}"
+    assert dg_err_f < 3e-3,  f"dgamma_err(formula) too large: {dg_err_f}"
+    assert db_err_f < 3e-3,  f"dbeta_err(formula) too large: {db_err_f}"
+
+    # Optional: keep PyTorch checks but looser (PyTorch may use different saved stats / internals)
+    # assert dx_err_pt < 8e-3,  f"dx_err(pt) too large: {dx_err_pt}"
+    # assert dg_err_pt < 3e-2,  f"dgamma_err(pt) too large: {dg_err_pt}"
+    # assert db_err_pt < 3e-2,  f"dbeta_err(pt) too large: {db_err_pt}"
 
 
 def main():

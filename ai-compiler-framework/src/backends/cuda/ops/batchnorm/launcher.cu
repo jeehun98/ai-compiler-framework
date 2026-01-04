@@ -12,6 +12,16 @@
 //    affine=False: NotImplemented (needs scratch floats, keep capture-safe policy)
 // - Correctness-first: atomic reductions
 // - Debug prints included (stderr).
+//
+// NOTE (FIX):
+//  - bwd now matches PyTorch definitions exactly:
+//      dbeta[c]  = sum(dy)
+//      dgamma[c] = sum(dy * xhat)
+//      dx        = (gamma * rstd / NHW) * (NHW*dy - sum(dy) - xhat*sum(dy*xhat))
+//    So we do:
+//      pass A: compute dbeta=sum_dy and dgamma=sum_dy_xhat (atomic, using dy only)
+//      pass B: compute dx using those sums (and gamma factor applied in dx kernel)
+//    (No "dy_hat = dy*gamma" sums, and no redundant overwrite pass.)
 // ============================================================================
 
 #include <cuda_runtime.h>
@@ -208,17 +218,19 @@ __global__ void bn_infer_apply_f16(
   }
 }
 
-// bwd: per-channel sums (atomic)
-// sum_dy = sum(dy_hat), sum_dy_xhat = sum(dy_hat * xhat)
-// dy_hat = dy * gamma (if gamma != nullptr)
+// --------------------------------------------------------------------------
+// BWD FIXED: compute per-channel sums for PyTorch-defined gradients
+//   dbeta[c]  = sum(dy)
+//   dgamma[c] = sum(dy * xhat)
+// where xhat = (x - mean) * rstd
+// --------------------------------------------------------------------------
 __global__ void bn_bwd_sums_f16_atomic(
     const __half* __restrict__ x,
     const __half* __restrict__ dy,
-    const __half* __restrict__ gamma, // nullable
     const float* __restrict__ mean,   // [C]
     const float* __restrict__ rstd,   // [C]
-    float* __restrict__ sum_dy,       // [C]
-    float* __restrict__ sum_dy_xhat,  // [C]
+    float* __restrict__ sum_dy,       // [C]  -> dbeta
+    float* __restrict__ sum_dy_xhat,  // [C]  -> dgamma
     int N, int C, int HW) {
 
   const int64_t total = (int64_t)N * (int64_t)C * (int64_t)HW;
@@ -233,23 +245,23 @@ __global__ void bn_bwd_sums_f16_atomic(
     const float xv = __half2float(x[i]);
     const float xhat = (xv - mu) * rs;
 
-    float dyv = __half2float(dy[i]);
-    if (gamma) dyv *= __half2float(gamma[c]); // dy_hat
+    const float dyv = __half2float(dy[i]);
 
     atomicAdd(&sum_dy[c], dyv);
     atomicAdd(&sum_dy_xhat[c], dyv * xhat);
   }
 }
 
-// bwd: dx
+// bwd: dx (PyTorch definition)
+//   dx = (gamma * rstd / NHW) * ( NHW*dy - sum(dy) - xhat*sum(dy*xhat) )
 __global__ void bn_bwd_dx_f16(
     const __half* __restrict__ x,
     const __half* __restrict__ dy,
-    const __half* __restrict__ gamma, // nullable
+    const __half* __restrict__ gamma, // non-null for affine path
     const float* __restrict__ mean,
     const float* __restrict__ rstd,
-    const float* __restrict__ sum_dy,
-    const float* __restrict__ sum_dy_xhat,
+    const float* __restrict__ sum_dy,       // [C]
+    const float* __restrict__ sum_dy_xhat,  // [C]
     __half* __restrict__ dx,
     int N, int C, int HW) {
 
@@ -268,43 +280,16 @@ __global__ void bn_bwd_dx_f16(
     const float xv = __half2float(x[i]);
     const float xhat = (xv - mu) * rs;
 
-    float dyv = __half2float(dy[i]);
-    if (gamma) dyv *= __half2float(gamma[c]); // dy_hat
+    const float dyv = __half2float(dy[i]);
 
     const float s1 = sum_dy[c];
     const float s2 = sum_dy_xhat[c];
 
-    // dx = (1/NHW)*rstd*( NHW*dy_hat - sum(dy_hat) - xhat*sum(dy_hat*xhat) )
-    const float v = (NHWf * dyv - s1 - xhat * s2) * (rs * invNHW);
+    const float g  = __half2float(gamma[c]); // affine only
+
+    // dx = (gamma * rstd / NHW) * (NHW*dy - sum(dy) - xhat*sum(dy*xhat))
+    const float v = (NHWf * dyv - s1 - xhat * s2) * (g * rs * invNHW);
     dx[i] = __float2half_rn(v);
-  }
-}
-
-// bwd: dgamma/dbeta (atomic) [NOTE: uses dy (not dy_hat)]
-__global__ void bn_bwd_dg_db_f16_atomic(
-    const __half* __restrict__ x,
-    const __half* __restrict__ dy,
-    const float* __restrict__ mean,
-    const float* __restrict__ rstd,
-    float* __restrict__ dgamma,
-    float* __restrict__ dbeta,
-    int N, int C, int HW) {
-
-  const int64_t total = (int64_t)N * (int64_t)C * (int64_t)HW;
-  for (int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-       i < total;
-       i += (int64_t)gridDim.x * blockDim.x) {
-
-    const int c = (int)((i / HW) % C);
-    const float mu = mean[c];
-    const float rs = rstd[c];
-
-    const float xv = __half2float(x[i]);
-    const float xhat = (xv - mu) * rs;
-
-    const float dyv = __half2float(dy[i]);
-    atomicAdd(&dbeta[c], dyv);
-    atomicAdd(&dgamma[c], dyv * xhat);
   }
 }
 
@@ -473,7 +458,6 @@ static aicf::Status bn_fwd_f16_launch(
     blocks = (int)(((int64_t)N * C * HW + threads - 1) / threads);
     if (blocks > 4096) blocks = 4096;
 
-    // Note: pass eps though unused in bn_fwd_apply_f16 signature (kept to match kernels.cuh)
     bn_impl::bn_fwd_apply_f16<<<blocks, threads, 0, stream>>>(
         x, gamma, beta, sum, sumsq, y,
         /*save_mean=*/nullptr, /*save_rstd=*/nullptr,
@@ -579,8 +563,8 @@ static aicf::Status bn_bwd_f16_launch(
   const float* rstd = (const float*)inputs[4].data;
 
   __half* dx = (__half*)outputs[0].data;
-  float* dgamma = (float*)outputs[1].data;
-  float* dbeta  = (float*)outputs[2].data;
+  float* dgamma = (float*)outputs[1].data; // will store sum(dy*xhat)
+  float* dbeta  = (float*)outputs[2].data; // will store sum(dy)
 
   const int N  = (int)X.shape[0];
   const int C  = (int)X.shape[1];
@@ -599,30 +583,20 @@ static aicf::Status bn_bwd_f16_launch(
   int blocks = (int)(((int64_t)N * C * HW + threads - 1) / threads);
   if (blocks > 4096) blocks = 4096;
 
-  // pass A: compute sum buffers into dbeta(sum_dy) and dgamma(sum_dy_xhat)
+  // Pass A: compute dbeta=sum(dy) and dgamma=sum(dy*xhat)
   cudaError_t e0 = cudaMemsetAsync(dgamma, 0, (size_t)C * sizeof(float), stream);
   if (e0 != cudaSuccess) return aicf::cuda::shim::cuda_last_error_to_status();
   cudaError_t e1 = cudaMemsetAsync(dbeta,  0, (size_t)C * sizeof(float), stream);
   if (e1 != cudaSuccess) return aicf::cuda::shim::cuda_last_error_to_status();
 
   bn_impl::bn_bwd_sums_f16_atomic<<<blocks, threads, 0, stream>>>(
-      x, dy, gamma, mean, rstd, dbeta, dgamma, N, C, HW);
+      x, dy, mean, rstd, /*sum_dy=*/dbeta, /*sum_dy_xhat=*/dgamma, N, C, HW);
   auto st0 = aicf::cuda::shim::cuda_last_error_to_status();
   if (!aicf::ok(st0)) return st0;
 
+  // Pass B: dx uses dbeta/dgamma as sum buffers + applies gamma factor inside
   bn_impl::bn_bwd_dx_f16<<<blocks, threads, 0, stream>>>(
-      x, dy, gamma, mean, rstd, dbeta, dgamma, dx, N, C, HW);
-  auto st1 = aicf::cuda::shim::cuda_last_error_to_status();
-  if (!aicf::ok(st1)) return st1;
-
-  // pass B: recompute true dgamma/dbeta (overwrite)
-  e0 = cudaMemsetAsync(dgamma, 0, (size_t)C * sizeof(float), stream);
-  if (e0 != cudaSuccess) return aicf::cuda::shim::cuda_last_error_to_status();
-  e1 = cudaMemsetAsync(dbeta,  0, (size_t)C * sizeof(float), stream);
-  if (e1 != cudaSuccess) return aicf::cuda::shim::cuda_last_error_to_status();
-
-  bn_impl::bn_bwd_dg_db_f16_atomic<<<blocks, threads, 0, stream>>>(
-      x, dy, mean, rstd, dgamma, dbeta, N, C, HW);
+      x, dy, gamma, mean, rstd, /*sum_dy=*/dbeta, /*sum_dy_xhat=*/dgamma, dx, N, C, HW);
 
   return aicf::cuda::shim::cuda_last_error_to_status();
 }
