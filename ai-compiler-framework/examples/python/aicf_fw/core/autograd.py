@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from typing import List, Optional, Dict
-from .tensor import Tensor
 import torch
+
+from .tensor import Tensor
 
 _grad_enabled = True
 
@@ -36,6 +37,14 @@ def _set_capture_guard(flag: bool) -> None:
 
 def in_capture() -> bool:
     return _IN_CAPTURE_GUARD
+
+
+# ============================================================
+# Tracing guard (IR compile)
+# ============================================================
+
+# NOTE: capture guard != tracing guard
+from aicf_fw.core.trace import is_tracing, get_ir
 
 
 # ============================================================
@@ -98,6 +107,8 @@ def _leaf_overwrite(t: Tensor, g: Tensor):
                 "autograd(overwrite): leaf.grad is None during capture. "
                 "Warmup must materialize ALL parameter.grad buffers and you must not set them to None."
             )
+        if g.data is None:
+            raise RuntimeError("autograd(overwrite): g.data is None (symbolic). This should not happen outside tracing.")
         buf = _ensure_leaf_grad_buffer_like(g.data)
         t.grad = Tensor(buf, requires_grad=False)
 
@@ -119,6 +130,8 @@ def _leaf_add(t: Tensor, g: Tensor):
     if t.grad is None:
         if _IN_CAPTURE_GUARD:
             raise RuntimeError("autograd(add): leaf grad materialization attempted during capture.")
+        if g.data is None:
+            raise RuntimeError("autograd(add): g.data is None (symbolic). This should not happen outside tracing.")
         buf = _ensure_leaf_grad_buffer_like(g.data)
         buf.copy_(g.data)  # outside capture only
         t.grad = Tensor(buf, requires_grad=False)
@@ -140,10 +153,38 @@ def backward(loss: Tensor, grad: Optional[Tensor] = None, *, accumulate: bool = 
       - Non-leaf grads are stored in a local dict (gmap).
       - overwrite mode uses copy() to keep leaf grad pointer stable.
 
-    ENFORCEMENT:
-      - accumulate=True may create new tensors for non-leaf grads (gmap add path).
-      - therefore accumulate=True is FORBIDDEN during capture.
+    TRACING policy:
+      - During IR compile/tracing, we do NOT run actual autodiff.
+      - We only emit an opaque IR node "Backward" and return.
     """
+    # --------------------------------------------------------
+    # TRACING PATH (compile/IR)
+    # --------------------------------------------------------
+    if is_tracing():
+        ir = get_ir()
+
+        lv = ir.new_value(
+            name=loss.name or "loss",
+            shape=loss.shape,
+            dtype=str(loss.dtype),
+            device=str(loss.device),
+        )
+        ins = [lv]
+        if grad is not None:
+            gv = ir.new_value(
+                name=grad.name or "dLoss",
+                shape=grad.shape,
+                dtype=str(grad.dtype),
+                device=str(grad.device),
+            )
+            ins.append(gv)
+
+        ir.emit(op="Backward", inputs=ins, outputs=[], attrs={"accumulate": bool(accumulate)})
+        return
+
+    # --------------------------------------------------------
+    # EXECUTION PATH (existing)
+    # --------------------------------------------------------
     from ..backend import get_backend
     backend = get_backend()
 

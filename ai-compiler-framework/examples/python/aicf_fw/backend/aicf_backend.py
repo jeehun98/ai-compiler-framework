@@ -1,3 +1,4 @@
+# examples/python/aicf_fw/backend/aicf_backend.py
 from __future__ import annotations
 
 import os
@@ -29,28 +30,27 @@ import aicf_cuda  # noqa: E402
 class AICFBackend(Backend):
     """
     Backend adapter for aicf_cuda._C.op_call
-
-    - inputs/outputs: torch.Tensor (CUDA)
-    - attrs: dict[str, bool|int|float]
-
-    Capture-safety policy (IMPORTANT):
-    - During CUDA graph capture, DO NOT create new tensors:
-      - no .contiguous() that allocates a new tensor
-      - no torch-side ops inside capture path
-
-    ENFORCEMENT:
-    - op_call() is FORBIDDEN inside capture because it allocates outputs.
-    - only op_call_out() is allowed during capture.
     """
 
     def __init__(self):
-        pass
+        # ---- NEW: op trace buffer ----
+        self._trace_ops: List[str] = []
+        self._trace_enabled: bool = True
+
+    # ---- NEW: trace helpers ----
+    def trace_reset(self) -> None:
+        self._trace_ops.clear()
+
+    def trace_get(self) -> List[str]:
+        return list(self._trace_ops)
+
+    def trace_enable(self, flag: bool = True) -> None:
+        self._trace_enabled = bool(flag)
 
     # ----------------------------
     # Core execution path (single-output convenience)
     # ----------------------------
     def op_call(self, op: str, inputs: List[Any], attrs: Dict[str, Any]) -> Any:
-        # Enforce capture-safety: op_call allocates outputs -> forbidden in capture.
         from aicf_fw.core.autograd import in_capture
 
         if in_capture():
@@ -63,7 +63,6 @@ class AICFBackend(Backend):
         inputs_t = self._prepare_inputs(op_l, inputs)
         kind, out_desc = self._resolve_op(op_l, inputs_t, attrs)
 
-        # in-place only
         if op_l in ("sgd_step", "sgdstep"):
             raise RuntimeError("AICFBackend.op_call: 'sgd_step' must be called via op_call_out (in-place).")
 
@@ -82,11 +81,12 @@ class AICFBackend(Backend):
     def op_call_out(self, op: str, inputs: List[Any], outputs: List[Any], attrs: Dict[str, Any]) -> None:
         op_l = self._normalize_op(op)
 
+        # ---- NEW: record op trace (always record runtime calls) ----
+        if self._trace_enabled:
+            self._trace_ops.append(op_l)
+
         inputs_t = self._prepare_inputs(op_l, inputs)
-
-        # DO NOT force outputs to contiguous.
         outputs_t = [self._as_torch(x) for x in outputs]
-
         kind, _ = self._resolve_op(op_l, inputs_t, attrs)
 
         try:
@@ -98,16 +98,6 @@ class AICFBackend(Backend):
     # Input preparation (capture-safe)
     # ----------------------------
     def _prepare_inputs(self, op_l: str, inputs: List[Any]) -> List[torch.Tensor]:
-        """
-        Capture-safe rule:
-        - NEVER call .contiguous() here unless you are 100% sure:
-          (1) it's outside capture, and
-          (2) you actually want to materialize.
-
-        Practical rule for now:
-        - keep views/strides for ALL ops
-        - rely on each kernel's supported() to reject unsupported stride patterns
-        """
         return [self._as_torch(x) for x in inputs]
 
     # ----------------------------
@@ -157,6 +147,9 @@ class AICFBackend(Backend):
         from aicf_fw.core.autograd import _set_capture_guard
 
         _set_capture_guard(True)
+        # ---- NEW: clear trace at start of capture ----
+        self.trace_reset()
+
         aicf_cuda._C.capture_begin()
 
     def capture_end(self):
@@ -166,6 +159,7 @@ class AICFBackend(Backend):
         _set_capture_guard(False)
 
     def replay(self):
+        # replay도 trace를 재수집하고 싶으면 여기서 reset하고 싶을 수 있음.
         aicf_cuda._C.replay()
 
     def capture_reset(self):
@@ -173,9 +167,11 @@ class AICFBackend(Backend):
 
         aicf_cuda._C.capture_reset()
         _set_capture_guard(False)
+        # 안전하게 trace도 리셋
+        self.trace_reset()
 
     # ----------------------------
-    # Op resolution
+    # Op resolution (unchanged)
     # ----------------------------
     def _resolve_op(
         self,
@@ -187,60 +183,39 @@ class AICFBackend(Backend):
 
         if op_l in ("add", "eltwiseadd", "eltwise_add"):
             return C.OpKind.EltwiseAdd, {"like": 0}
-
         if op_l in ("relu", "eltwiserelu", "eltwise_relu"):
             return C.OpKind.EltwiseRelu, {"like": 0}
-
         if op_l in ("relu_bwd", "relubwd", "relu_backward"):
             return C.OpKind.ReluBwd, {"like": 0}
-
         if op_l in ("gemm",):
             return C.OpKind.Gemm, {"gemm": True}
-
         if op_l in ("bias_add", "biasadd"):
             return C.OpKind.BiasAdd, {"like": 0}
-
         if op_l in ("reduce_sum", "reducesum"):
             return C.OpKind.ReduceSum, {"reduce": True}
-
         if op_l in ("mse_grad", "msegrad"):
             return C.OpKind.MseGrad, {"like": 0}
-
         if op_l in ("sgd_step", "sgdstep"):
-            return C.OpKind.SgdStep, {"like": 0}  # in-place, like-only
-
+            return C.OpKind.SgdStep, {"like": 0}
         if op_l in ("copy",):
             return C.OpKind.Copy, {"like": 0}
-        
         if op_l in ("grad_zero", "zero_grad"):
             return C.OpKind.GradZero, {"like": 0}
-
         if op_l in ("step_inc", "stepinc"):
             return C.OpKind.StepInc, {}
-
         if op_l in ("bias_corr", "biascorr"):
-            # step(i32 scalar) -> bc1_inv(f32 scalar), bc2_inv(f32 scalar)
-            # attrs로 beta1/beta2 넘기는 구조라면 그대로 전달
             return C.OpKind.BiasCorr, {}
-
         if op_l in ("adam_step", "adamstep"):
-            # P,G,M,V -> P,M,V (in-place 가능)
             return C.OpKind.AdamStep, {"like": 0}
-
-
 
         raise KeyError(f"AICFBackend: unknown op '{op_l}'")
 
-    # ----------------------------
-    # Output allocation (debug-only path)
-    # ----------------------------
     def _allocate_output(
         self,
         desc: Dict[str, Any],
         inputs: List[torch.Tensor],
         attrs: Dict[str, Any],
     ) -> torch.Tensor:
-
         if "like" in desc:
             ref = inputs[desc["like"]]
             return torch.empty_like(ref)
