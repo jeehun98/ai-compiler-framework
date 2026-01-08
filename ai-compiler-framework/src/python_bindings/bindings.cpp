@@ -42,15 +42,11 @@ struct CudaGraphState {
   cudaGraph_t graph = nullptr;
   cudaGraphExec_t exec = nullptr;
 
-  // AICF owns this stream (created once). We will capture/launch on it.
   cudaStream_t aicf_stream = nullptr;
-
-  // stream used for capture (== aicf_stream when capturing)
   cudaStream_t cap_stream = nullptr;
 
   void ensure_stream() {
     if (!aicf_stream) {
-      // Non-blocking stream recommended
       cuda_check(cudaStreamCreateWithFlags(&aicf_stream, cudaStreamNonBlocking),
                  "cudaStreamCreateWithFlags");
     }
@@ -63,7 +59,6 @@ struct CudaGraphState {
   }
 
   void reset_full() {
-    // If we were capturing, try to end capture cleanly on cap_stream to restore state.
     if (cap_stream) {
       cudaStreamCaptureStatus st = cudaStreamCaptureStatusNone;
       cudaError_t e = cudaStreamIsCapturing(cap_stream, &st);
@@ -81,11 +76,9 @@ struct CudaGraphState {
 
     capturing = false;
     cap_stream = nullptr;
-    // NOTE: keep aicf_stream alive across runs (cheap + stable).
   }
 
   ~CudaGraphState() {
-    // best-effort cleanup at unload
     reset_full();
     if (aicf_stream) {
       cudaStreamDestroy(aicf_stream);
@@ -97,14 +90,48 @@ struct CudaGraphState {
 static CudaGraphState g_graph;
 static std::mutex g_graph_mu;
 
+// ============================================================
+// NEW: C++ op trace (authoritative)
+// ============================================================
+
+static std::vector<std::string> g_trace_ops;
+static bool g_trace_enabled = true;
+
+static inline const char* opkind_to_name(aicf::cuda::OpKind k) {
+  switch (k) {
+    case aicf::cuda::OpKind::EltwiseAdd:   return "add";
+    case aicf::cuda::OpKind::EltwiseRelu:  return "relu";
+    case aicf::cuda::OpKind::Gemm:         return "gemm";
+    case aicf::cuda::OpKind::BiasAdd:      return "bias_add";
+    case aicf::cuda::OpKind::ReduceSum:    return "reduce_sum";
+    case aicf::cuda::OpKind::MseGrad:      return "mse_grad";
+    case aicf::cuda::OpKind::ReluBwd:      return "relu_bwd";
+    case aicf::cuda::OpKind::SgdStep:      return "sgd_step";
+    case aicf::cuda::OpKind::Copy:         return "copy";
+    case aicf::cuda::OpKind::GradZero:     return "grad_zero";
+    case aicf::cuda::OpKind::AdamStep:     return "adam_step";
+    case aicf::cuda::OpKind::StepInc:      return "step_inc";
+    case aicf::cuda::OpKind::BiasCorr:     return "bias_corr";
+    case aicf::cuda::OpKind::LayerNormFwd: return "layernorm_fwd";
+    case aicf::cuda::OpKind::LayerNormBwd: return "layernorm_bwd";
+    case aicf::cuda::OpKind::BatchNormFwd: return "batchnorm_fwd";
+    case aicf::cuda::OpKind::BatchNormBwd: return "batchnorm_bwd";
+    default: return "unknown";
+  }
+}
+
+static inline void trace_record_locked(aicf::cuda::OpKind kind) {
+  if (!g_trace_enabled) return;
+  g_trace_ops.emplace_back(opkind_to_name(kind));
+}
+
+static inline void trace_reset_locked() { g_trace_ops.clear(); }
+
 // Stream policy used by op_call + replay:
-// - if capturing/captured graph ops should run on aicf_stream (cap_stream)
-// - otherwise use PyTorch current stream
 static inline cudaStream_t aicf_dispatch_stream_locked() {
   if (g_graph.capturing && g_graph.cap_stream) return g_graph.cap_stream;
-  // Replay can run on either stream, but running on aicf_stream is consistent.
   if (g_graph.captured && g_graph.aicf_stream) return g_graph.aicf_stream;
-  return aicf_py::current_cuda_stream(); // PyTorch current stream
+  return aicf_py::current_cuda_stream();
 }
 
 // ============================================================
@@ -215,7 +242,10 @@ static void op_call_impl(
   cudaStream_t stream;
   {
     std::lock_guard<std::mutex> lock(g_graph_mu);
-    // ★ capture 중에는 AICF 전용 stream으로 enqueue
+
+    // ★ NEW: record trace here (authoritative)
+    trace_record_locked(kind);
+
     stream = aicf_dispatch_stream_locked();
   }
 
@@ -256,6 +286,7 @@ PYBIND11_MODULE(_C, m) {
       .value("BatchNormBwd", aicf::cuda::OpKind::BatchNormBwd)
       .export_values();
 
+  // ---------------- op_call ----------------
   m.def(
     "op_call",
     [](aicf::cuda::OpKind kind,
@@ -284,20 +315,36 @@ PYBIND11_MODULE(_C, m) {
     py::arg("attrs") = py::dict()
   );
 
-  // ---------------- CUDA Graph control ----------------
+  // ---------------- NEW: trace API ----------------
+  m.def("trace_enable", [](bool flag) {
+    std::lock_guard<std::mutex> lock(g_graph_mu);
+    g_trace_enabled = flag;
+  }, py::arg("flag") = true);
 
+  m.def("trace_reset", []() {
+    std::lock_guard<std::mutex> lock(g_graph_mu);
+    trace_reset_locked();
+  });
+
+  m.def("trace_get", []() {
+    std::lock_guard<std::mutex> lock(g_graph_mu);
+    return g_trace_ops; // copy
+  });
+
+  // ---------------- CUDA Graph control ----------------
   m.def("capture_begin", []() {
     std::lock_guard<std::mutex> lock(g_graph_mu);
 
     std::fprintf(stderr, "[aicf] capture_begin entered (dedicated stream)\n");
 
+    // ★ NEW: clear trace at capture begin
+    trace_reset_locked();
+
     g_graph.reset_full();
     g_graph.ensure_stream();
 
-    // Capture on AICF-owned stream (NOT PyTorch current stream)
     const cudaStream_t s = g_graph.aicf_stream;
 
-    // sanity: if somehow capturing, end it
     cudaStreamCaptureStatus st = cudaStreamCaptureStatusNone;
     if (cudaStreamIsCapturing(s, &st) == cudaSuccess && st != cudaStreamCaptureStatusNone) {
       cudaGraph_t tmp = nullptr;
@@ -344,7 +391,6 @@ PYBIND11_MODULE(_C, m) {
       throw std::runtime_error("replay called but no captured graph exists");
     }
 
-    // launch on same AICF stream for determinism
     g_graph.ensure_stream();
     cuda_check(cudaGraphLaunch(g_graph.exec, g_graph.aicf_stream), "cudaGraphLaunch");
   });
@@ -352,5 +398,7 @@ PYBIND11_MODULE(_C, m) {
   m.def("capture_reset", []() {
     std::lock_guard<std::mutex> lock(g_graph_mu);
     g_graph.reset_full();
+    // 안전하게 trace도 리셋
+    trace_reset_locked();
   });
 }

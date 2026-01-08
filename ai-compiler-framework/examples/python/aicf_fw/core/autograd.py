@@ -42,9 +42,7 @@ def in_capture() -> bool:
 # ============================================================
 # Tracing guard (IR compile)
 # ============================================================
-
-# NOTE: capture guard != tracing guard
-from aicf_fw.core.trace import is_tracing, get_ir
+from aicf_fw.core.trace import is_tracing, get_ir, as_ir_value_obj
 
 
 # ============================================================
@@ -155,7 +153,7 @@ def backward(loss: Tensor, grad: Optional[Tensor] = None, *, accumulate: bool = 
 
     TRACING policy:
       - During IR compile/tracing, we do NOT run actual autodiff.
-      - We only emit an opaque IR node "Backward" and return.
+      - We emit an IR node "Backward" that correctly references *existing* traced values.
     """
     # --------------------------------------------------------
     # TRACING PATH (compile/IR)
@@ -163,19 +161,26 @@ def backward(loss: Tensor, grad: Optional[Tensor] = None, *, accumulate: bool = 
     if is_tracing():
         ir = get_ir()
 
-        lv = ir.new_value(
+        # IMPORTANT:
+        # Do NOT create fresh IRValues here.
+        # Use object->IRValue cache so Backward connects to the same value IDs
+        # produced by forward ops (Linear/ReLU/MseGrad).
+        lv = as_ir_value_obj(
+            loss,
             name=loss.name or "loss",
             shape=loss.shape,
-            dtype=str(loss.dtype),
-            device=str(loss.device),
+            dtype=loss.dtype,
+            device=loss.device,
         )
         ins = [lv]
+
         if grad is not None:
-            gv = ir.new_value(
+            gv = as_ir_value_obj(
+                grad,
                 name=grad.name or "dLoss",
                 shape=grad.shape,
-                dtype=str(grad.dtype),
-                device=str(grad.device),
+                dtype=grad.dtype,
+                device=grad.device,
             )
             ins.append(gv)
 

@@ -1,4 +1,3 @@
-# aicf_fw/core/functional.py
 from __future__ import annotations
 
 from typing import List, Optional, Tuple, Dict, Any
@@ -98,9 +97,7 @@ def _sym_tensor(
     return Tensor(None, requires_grad=requires_grad, name=name, meta=meta)
 
 
-# NOTE: tracing에서 Tensor -> IRValue를 매번 new_value로 만들면 values가 폭증함.
-# v0에서는 "Tensor 인스턴스 1개당 IRValue 1개" 정도면 충분.
-# cache key는 id(Tensor)로 잡는다.
+# Tensor(id) -> IRValue cache (good for INPUT linkage)
 _TRACE_VAL_CACHE: Dict[int, Any] = {}  # Any = IRValue
 
 
@@ -111,6 +108,7 @@ def _trace_reset_cache():
 def _as_ir_value(t: Tensor, fallback_name: str):
     """
     Return cached IRValue for a Tensor while tracing.
+    NOTE: inputs are ok to be cached; outputs should be fresh (SSA).
     """
     if not is_tracing():
         raise RuntimeError("_as_ir_value() called outside tracing")
@@ -127,24 +125,44 @@ def _as_ir_value(t: Tensor, fallback_name: str):
     return v
 
 
+# torch.Tensor scalar cache (for step/bc1_inv/bc2_inv) — SSA update support
+_TRACE_SCALAR_CACHE: Dict[Tuple[int, Tuple[int, ...], str, str], Any] = {}  # key -> IRValue
+
+
+def _scalar_key(x: torch.Tensor) -> Tuple[int, Tuple[int, ...], str, str]:
+    # stable identity for the scalar tensor storage
+    return (int(x.data_ptr()), tuple(x.shape), str(x.dtype), str(x.device))
+
+
+def _as_ir_scalar(x: torch.Tensor, name: str):
+    """
+    Return cached IRValue for a torch scalar/tensor handle while tracing.
+    This is how we keep StepInc/BiasCorr/AdamStep linked without in-place IR values.
+    """
+    if not is_tracing():
+        raise RuntimeError("_as_ir_scalar() called outside tracing")
+    ir = get_ir()
+    k = _scalar_key(x)
+    v = _TRACE_SCALAR_CACHE.get(k)
+    if v is None:
+        v = ir.new_value(name=name, shape=tuple(x.shape), dtype=str(x.dtype), device=str(x.device))
+        _TRACE_SCALAR_CACHE[k] = v
+    return v
+
+
+def _update_ir_scalar(x: torch.Tensor, v):
+    """
+    After emitting an op that *logically updates* x (StepInc/BiasCorr),
+    update cache so future reads of the same torch tensor map to the NEW IR value.
+    """
+    _TRACE_SCALAR_CACHE[_scalar_key(x)] = v
+
+
 # ============================================================
 # Linear (Torch-compatible)
 # ============================================================
 
 class _LinearNode(Node):
-    """
-    Torch-compatible Linear backward.
-
-    Inputs:
-      x: (B, IN)
-      W: (OUT, IN)
-      b: (OUT,) optional
-
-    Buffers:
-      dx: (B, IN)
-      dW: (OUT, IN)
-      db: (OUT,) optional
-    """
     def __init__(
         self,
         x: Tensor,
@@ -165,7 +183,6 @@ class _LinearNode(Node):
         x = self.inputs[0]
         W = self.inputs[1]
 
-        # dx = dY @ W : (B, OUT) @ (OUT, IN) -> (B, IN)
         bk.op_call_out(
             "gemm",
             [out_grad.data, W.data],
@@ -173,7 +190,6 @@ class _LinearNode(Node):
             {"transA": False, "transB": False},
         )
 
-        # dW = dY^T @ X : (OUT, B) @ (B, IN) -> (OUT, IN)
         bk.op_call_out(
             "gemm",
             [out_grad.data, x.data],
@@ -195,13 +211,10 @@ class _LinearNode(Node):
 
 def linear(x: Tensor, W: Tensor, b: Optional[Tensor]) -> Tensor:
     """
-    Torch-compatible:
-      y = x @ W^T + b
+    y = x @ W^T + b
 
-    Tracing mode:
-      emit high-level IR op "Linear" and return symbolic tensor.
+    TRACING: output IRValue MUST be fresh (SSA).
     """
-    # ---- TRACING PATH ----
     if is_tracing():
         if len(x.shape) != 2 or len(W.shape) != 2:
             raise RuntimeError(f"linear(trace) expects 2D, got x.shape={x.shape} W.shape={W.shape}")
@@ -227,13 +240,18 @@ def linear(x: Tensor, W: Tensor, b: Optional[Tensor]) -> Tensor:
             device=x.device,
             requires_grad=grad_enabled(),
         )
-        yv = _as_ir_value(y, "linear_out")
+
+        yv = ir.new_value(
+            name=y.name or "linear_out",
+            shape=y.shape,
+            dtype=str(y.dtype),
+            device=str(y.device),
+        )
 
         attrs = {"bias": (b is not None), "layout": "y = x @ W^T + b"}
         ir.emit(op="Linear", inputs=inputs, outputs=[yv], attrs=attrs)
         return y
 
-    # ---- EXECUTION PATH (runtime) ----
     bk = get_backend()
 
     if x.data.dim() != 2 or W.data.dim() != 2:
@@ -248,14 +266,11 @@ def linear(x: Tensor, W: Tensor, b: Optional[Tensor]) -> Tensor:
             f"linear shape mismatch: x={tuple(x.data.shape)} W={tuple(W.data.shape)} (W must be (OUT, IN))"
         )
 
-    # IMPORTANT: unique tags per-layer to avoid collisions across layers
     wid = int(W.data.data_ptr())
     tag_base = f"linear_{wid}"
 
-    # forward y buffer (stable)
     y_buf = _POOL.get(tag=f"{tag_base}_y", ref=x.data, shape=(B, OUT))
 
-    # y = x @ W^T  => gemm(A=x, B=W, transB=True)
     bk.op_call_out("gemm", [x.data, W.data], [y_buf], {"transB": True})
 
     if b is not None:
@@ -265,7 +280,6 @@ def linear(x: Tensor, W: Tensor, b: Optional[Tensor]) -> Tensor:
     if not y.requires_grad:
         return y
 
-    # backward buffers (stable) — ALSO unique per-layer
     dx_buf_t = _POOL.get(tag=f"{tag_base}_dx", ref=x.data, shape=(B, IN), zero_init=True)
     dW_buf_t = _POOL.get(tag=f"{tag_base}_dW", ref=x.data, shape=(OUT, IN), zero_init=True)
     db_buf_t = _POOL.get(tag=f"{tag_base}_db", ref=x.data, shape=(OUT,), zero_init=True) if b is not None else None
@@ -279,7 +293,7 @@ def linear(x: Tensor, W: Tensor, b: Optional[Tensor]) -> Tensor:
 
 
 # ============================================================
-# ReLU  (backward-safe saved tensor)
+# ReLU
 # ============================================================
 
 class _ReluNode(Node):
@@ -301,10 +315,7 @@ class _ReluNode(Node):
 
 def relu(x: Tensor) -> Tensor:
     """
-    y = relu(x)
-
-    Tracing mode:
-      emit high-level IR op "ReLU" and return symbolic tensor.
+    TRACING: output IRValue MUST be fresh (SSA).
     """
     if is_tracing():
         ir = get_ir()
@@ -318,14 +329,19 @@ def relu(x: Tensor) -> Tensor:
             device=x.device,
             requires_grad=grad_enabled(),
         )
-        yv = _as_ir_value(y, "relu_out")
+
+        yv = ir.new_value(
+            name=y.name or "relu_out",
+            shape=y.shape,
+            dtype=str(y.dtype),
+            device=str(y.device),
+        )
 
         ir.emit(op="ReLU", inputs=[xv], outputs=[yv], attrs={})
         return y
 
     bk = get_backend()
 
-    # forward output (can be reused downstream)
     y_buf = _POOL.get_like(tag="relu_y", ref=x.data)
     bk.op_call_out("relu", [x.data], [y_buf], {})
 
@@ -333,11 +349,9 @@ def relu(x: Tensor) -> Tensor:
     if not y.requires_grad:
         return y
 
-    # backward dx buffer (shape same as x)
     dx_buf_t = _POOL.get_like(tag="relu_dx", ref=x.data, zero_init=True)
     dx_buf = Tensor(dx_buf_t, requires_grad=False)
 
-    # dedicated saved y buffer keyed by input pointer
     xid = int(x.data.data_ptr())
     y_saved_t = _POOL.get_like(tag=f"relu_y_saved_{xid}", ref=x.data)
     bk.op_call_out("copy", [y_buf], [y_saved_t], {})
@@ -348,16 +362,12 @@ def relu(x: Tensor) -> Tensor:
 
 
 # ============================================================
-# MSE grad (for training) - out-buffer mode
+# MSE grad
 # ============================================================
 
 def mse_grad(pred: Tensor, target: Tensor, *, scale: Optional[float] = None) -> Tensor:
     """
-    dPred = (pred - target) * scale
-    default scale = 2/numel
-
-    Tracing mode:
-      emit "MseGrad" and return symbolic tensor.
+    TRACING: output IRValue MUST be fresh (SSA).
     """
     if is_tracing():
         if pred.shape != target.shape:
@@ -374,7 +384,13 @@ def mse_grad(pred: Tensor, target: Tensor, *, scale: Optional[float] = None) -> 
             device=pred.device,
             requires_grad=False,
         )
-        ov = _as_ir_value(out, "mse_grad_out")
+
+        ov = ir.new_value(
+            name=out.name or "mse_grad_out",
+            shape=out.shape,
+            dtype=str(out.dtype),
+            device=str(out.device),
+        )
 
         attrs = {}
         if scale is not None:
@@ -405,10 +421,6 @@ def mse_grad(pred: Tensor, target: Tensor, *, scale: Optional[float] = None) -> 
 # ============================================================
 
 def grad_zero_(g: Tensor) -> Tensor:
-    """
-    In-place grad reset (capture-safe).
-    Tracing: do nothing (zero_grad is not required in IR v0).
-    """
     if is_tracing():
         return g
 
@@ -418,10 +430,22 @@ def grad_zero_(g: Tensor) -> Tensor:
 
 
 def step_inc_(step_i32: torch.Tensor) -> torch.Tensor:
+    """
+    SSA TRACING:
+      step_in  -> StepInc -> step_out
+      그리고 step_i32 handle은 동일하므로 scalar-cache를 step_out으로 업데이트한다.
+    """
     if is_tracing():
         ir = get_ir()
-        sv = ir.new_value(name="step", shape=tuple(step_i32.shape), dtype=str(step_i32.dtype), device=str(step_i32.device))
-        ir.emit(op="StepInc", inputs=[sv], outputs=[sv], attrs={})
+        step_in = _as_ir_scalar(step_i32, "step")
+        step_out = ir.new_value(
+            name="step",
+            shape=tuple(step_i32.shape),
+            dtype=str(step_i32.dtype),
+            device=str(step_i32.device),
+        )
+        ir.emit(op="StepInc", inputs=[step_in], outputs=[step_out], attrs={})
+        _update_ir_scalar(step_i32, step_out)
         return step_i32
 
     bk = get_backend()
@@ -436,12 +460,33 @@ def bias_corr_out(
     beta1: float,
     beta2: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    SSA TRACING:
+      step_in -> BiasCorr -> bc1_out, bc2_out
+      그리고 bc1_inv/bc2_inv handle은 동일하므로 scalar-cache를 output으로 업데이트한다.
+    """
     if is_tracing():
         ir = get_ir()
-        sv = ir.new_value(name="step", shape=tuple(step_i32.shape), dtype=str(step_i32.dtype), device=str(step_i32.device))
-        b1 = ir.new_value(name="bc1_inv", shape=tuple(bc1_inv.shape), dtype=str(bc1_inv.dtype), device=str(bc1_inv.device))
-        b2 = ir.new_value(name="bc2_inv", shape=tuple(bc2_inv.shape), dtype=str(bc2_inv.dtype), device=str(bc2_inv.device))
-        ir.emit(op="BiasCorr", inputs=[sv], outputs=[b1, b2], attrs={"beta1": float(beta1), "beta2": float(beta2)})
+        step_v = _as_ir_scalar(step_i32, "step")
+
+        b1_out = ir.new_value(
+            name="bc1_inv",
+            shape=tuple(bc1_inv.shape),
+            dtype=str(bc1_inv.dtype),
+            device=str(bc1_inv.device),
+        )
+        b2_out = ir.new_value(
+            name="bc2_inv",
+            shape=tuple(bc2_inv.shape),
+            dtype=str(bc2_inv.dtype),
+            device=str(bc2_inv.device),
+        )
+
+        ir.emit(op="BiasCorr", inputs=[step_v], outputs=[b1_out, b2_out],
+                attrs={"beta1": float(beta1), "beta2": float(beta2)})
+
+        _update_ir_scalar(bc1_inv, b1_out)
+        _update_ir_scalar(bc2_inv, b2_out)
         return bc1_inv, bc2_inv
 
     bk = get_backend()
@@ -466,26 +511,35 @@ def adam_step_(
     beta2: float,
     eps: float,
 ) -> None:
+    """
+    TRACING: bc1_inv/bc2_inv는 scalar-cache로 연결 (BiasCorr output을 공유).
+    """
     if is_tracing():
         ir = get_ir()
-        pv = ir.new_value(name=p.name or "p", shape=p.shape, dtype=str(p.dtype), device=str(p.device))
-        gv = ir.new_value(name=g.name or "g", shape=g.shape, dtype=str(g.dtype), device=str(g.device))
-        mv = ir.new_value(name=m.name or "m", shape=m.shape, dtype=str(m.dtype), device=str(m.device))
-        vv = ir.new_value(name=v.name or "v", shape=v.shape, dtype=str(v.dtype), device=str(v.device))
-        b1 = ir.new_value(name="bc1_inv", shape=tuple(bc1_inv.shape), dtype=str(bc1_inv.dtype), device=str(bc1_inv.device))
-        b2 = ir.new_value(name="bc2_inv", shape=tuple(bc2_inv.shape), dtype=str(bc2_inv.dtype), device=str(bc2_inv.device))
+
+        # inputs: 기존 버전(SSA input)
+        p_in = _as_ir_value(p, p.name or "p")
+        g_in = ir.new_value(name=g.name or "grad", shape=g.shape, dtype=str(g.dtype), device=str(g.device))
+        m_in = _as_ir_value(m, "m")
+        v_in = _as_ir_value(v, "v")
+
+        b1 = _as_ir_scalar(bc1_inv, "bc1_inv")
+        b2 = _as_ir_scalar(bc2_inv, "bc2_inv")
+
+        # outputs: 새 버전(SSA output)
+        p_out = ir.new_value(name=p.name or "p", shape=p.shape, dtype=str(p.dtype), device=str(p.device))
+        m_out = ir.new_value(name="m", shape=m.shape, dtype=str(m.dtype), device=str(m.device))
+        v_out = ir.new_value(name="v", shape=v.shape, dtype=str(v.dtype), device=str(v.device))
+
         ir.emit(
             op="AdamStep",
-            inputs=[pv, gv, mv, vv, b1, b2],
-            outputs=[pv, mv, vv],
+            inputs=[p_in, g_in, m_in, v_in, b1, b2],
+            outputs=[p_out, m_out, v_out],
             attrs={"lr": float(lr), "beta1": float(beta1), "beta2": float(beta2), "eps": float(eps)},
         )
-        return
 
-    bk = get_backend()
-    bk.op_call_out(
-        "adam_step",
-        [p.data, g.data, m.data, v.data, bc1_inv, bc2_inv],
-        [p.data, m.data, v.data],
-        attrs={"lr": float(lr), "beta1": float(beta1), "beta2": float(beta2), "eps": float(eps)},
-    )
+        # (선택) SSA cache 갱신: 이후 노드가 최신 p/m/v를 보게
+        _TRACE_VAL_CACHE[id(p)] = p_out
+        _TRACE_VAL_CACHE[id(m)] = m_out
+        _TRACE_VAL_CACHE[id(v)] = v_out
+        return

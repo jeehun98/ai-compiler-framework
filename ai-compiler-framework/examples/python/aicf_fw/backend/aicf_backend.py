@@ -30,22 +30,24 @@ import aicf_cuda  # noqa: E402
 class AICFBackend(Backend):
     """
     Backend adapter for aicf_cuda._C.op_call
+
+    NOTE:
+      - trace is collected in C++ binding (authoritative)
+      - python only proxies trace_get/reset/enable
     """
 
     def __init__(self):
-        # ---- NEW: op trace buffer ----
-        self._trace_ops: List[str] = []
-        self._trace_enabled: bool = True
+        pass
 
-    # ---- NEW: trace helpers ----
+    # ---- trace helpers (C++ authoritative) ----
     def trace_reset(self) -> None:
-        self._trace_ops.clear()
+        aicf_cuda._C.trace_reset()
 
     def trace_get(self) -> List[str]:
-        return list(self._trace_ops)
+        return list(aicf_cuda._C.trace_get())
 
     def trace_enable(self, flag: bool = True) -> None:
-        self._trace_enabled = bool(flag)
+        aicf_cuda._C.trace_enable(bool(flag))
 
     # ----------------------------
     # Core execution path (single-output convenience)
@@ -80,11 +82,6 @@ class AICFBackend(Backend):
     # ----------------------------
     def op_call_out(self, op: str, inputs: List[Any], outputs: List[Any], attrs: Dict[str, Any]) -> None:
         op_l = self._normalize_op(op)
-
-        # ---- NEW: record op trace (always record runtime calls) ----
-        if self._trace_enabled:
-            self._trace_ops.append(op_l)
-
         inputs_t = self._prepare_inputs(op_l, inputs)
         outputs_t = [self._as_torch(x) for x in outputs]
         kind, _ = self._resolve_op(op_l, inputs_t, attrs)
@@ -147,9 +144,8 @@ class AICFBackend(Backend):
         from aicf_fw.core.autograd import _set_capture_guard
 
         _set_capture_guard(True)
-        # ---- NEW: clear trace at start of capture ----
+        # trace reset happens in C++ capture_begin too, but keep explicit
         self.trace_reset()
-
         aicf_cuda._C.capture_begin()
 
     def capture_end(self):
@@ -159,7 +155,6 @@ class AICFBackend(Backend):
         _set_capture_guard(False)
 
     def replay(self):
-        # replay도 trace를 재수집하고 싶으면 여기서 reset하고 싶을 수 있음.
         aicf_cuda._C.replay()
 
     def capture_reset(self):
@@ -167,7 +162,6 @@ class AICFBackend(Backend):
 
         aicf_cuda._C.capture_reset()
         _set_capture_guard(False)
-        # 안전하게 trace도 리셋
         self.trace_reset()
 
     # ----------------------------
