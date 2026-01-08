@@ -505,7 +505,7 @@ def main():
         fail(f"Replay determinism broken (stepdiff sequence) at iter {bad:02d}: {stepdiff_A[bad]:.6e} != {stepdiff_B[bad]:.6e}")
 
     ok(f"Determinism OK: {REPLAY_N} replays stepdiff-sequence matches")
-    print("OK")
+    print("OK.")
     return 0
 
 
