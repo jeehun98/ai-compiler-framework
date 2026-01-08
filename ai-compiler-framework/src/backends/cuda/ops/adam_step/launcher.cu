@@ -74,13 +74,19 @@ aicf::Status adam_step_v1(
   if (!pack) return aicf::Status::InvalidArgument;
 
   float lr=0, beta1=0, beta2=0, eps=0;
+  bool has_lr=false, has_b1=false, has_b2=false, has_eps=false;
+
 
   for (int i = 0; i < pack->size; ++i) {
     const auto& kv = pack->items[i];
-    if (!std::strcmp(kv.key, "lr"))         lr = kv.val.f32;
-    else if (!std::strcmp(kv.key, "beta1")) beta1 = kv.val.f32;
-    else if (!std::strcmp(kv.key, "beta2")) beta2 = kv.val.f32;
-    else if (!std::strcmp(kv.key, "eps"))   eps = kv.val.f32;
+    if (!std::strcmp(kv.key, "lr"))         { lr = kv.val.f32; has_lr=true; }
+    else if (!std::strcmp(kv.key, "beta1")) { beta1 = kv.val.f32; has_b1=true; }
+    else if (!std::strcmp(kv.key, "beta2")) { beta2 = kv.val.f32; has_b2=true; }
+    else if (!std::strcmp(kv.key, "eps"))   { eps = kv.val.f32; has_eps=true; }
+  }
+
+  if (!(has_lr && has_b1 && has_b2 && has_eps)) {
+    return aicf::Status::InvalidArgument;
   }
 
   const int64_t n = numel(P);

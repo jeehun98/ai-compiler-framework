@@ -77,18 +77,8 @@ def loss_like(model, x, t) -> float:
 # ------------------------------------------------------------
 # IR validators
 # ------------------------------------------------------------
-def _shape(v):
-    return tuple(v.shape)
-
 def verify_ir_shape_consistency(ir):
-    """
-    Validate shape consistency for:
-      - Linear: x(B,IN), W(OUT,IN), b(OUT,) -> y(B,OUT)
-      - ReLU: x(...) -> y(...)
-      - MseGrad: pred==target -> out same shape
-    """
     vals = ir.values
-
     def V(vid):
         return vals[int(vid)]
 
@@ -142,12 +132,7 @@ def verify_ir_shape_consistency(ir):
     ok("[ir] shape consistency OK: Linear/ReLU/MseGrad")
 
 def verify_ir_topo_ssa(ir):
-    """
-    - SSA single-producer: each value id produced by <=1 node output
-    - use-after-define: node input value must be either graph input (never produced) or produced by an earlier node
-    """
-    produced_by = {}  # vid -> node_id
-
+    produced_by = {}
     for node in ir.nodes:
         for vid in node.outputs:
             if vid in produced_by:
@@ -165,16 +150,12 @@ def verify_ir_topo_ssa(ir):
     ok("[ir] topo OK: single-producer SSA + use-after-define")
 
 def verify_ir_links_backward(ir):
-    """
-    Verify Backward(loss, grad) links to existing values that are produced/flowed from forward.
-    """
     vals = ir.values
     produced = set()
     for n in ir.nodes:
         for o in n.outputs:
             produced.add(o)
 
-    # find Backward node(s)
     backs = [n for n in ir.nodes if n.op == "Backward"]
     if not backs:
         warn("[ir] no Backward node found (ok if v0 omits it)")
@@ -191,8 +172,6 @@ def verify_ir_links_backward(ir):
         if grad_vid is not None and grad_vid not in vals:
             fail(f"[ir][links] Backward grad value missing: {grad_vid}")
 
-        # For this PR: loss/grad are expected to come from earlier nodes
-        # (produced by Linear/MseGrad path). If they are "graph inputs" only, it's suspicious.
         if loss_vid not in produced:
             warn(f"[ir][links] Backward loss vid={loss_vid} is not produced by any node (might be okay in v0)")
         if grad_vid is not None and grad_vid not in produced:
@@ -268,8 +247,7 @@ def main():
     x = Tensor(torch.randn(64, 8, device="cuda", dtype=torch.float32), requires_grad=False, name="x")
     t = Tensor(torch.randn(64, 8, device="cuda", dtype=torch.float32), requires_grad=False, name="t")
 
-    named_params = list(model.named_parameters())
-    for n, p in named_params:
+    for n, p in list(model.named_parameters()):
         print("[param]", n, tuple(p.data.shape), p.data.dtype, p.data.device)
 
     # Train step
@@ -322,6 +300,10 @@ def main():
         for i, op in enumerate(trace_ops):
             print(f"[trace {i:02d}] op={op}")
 
+    # HARD FAIL if adam_step missing: now it MUST be present
+    if "adam_step" not in trace_ops:
+        fail(f"[trace] adam_step missing in captured runtime ops: {trace_ops}")
+
     # 5) Lowering vs runtime
     lower_ops = [x["op"] for x in lowered]
 
@@ -337,30 +319,28 @@ def main():
             fail("Lowering mismatch (forward-slice):\n"
                  f"  trace_fw={tr_fw}\n  lower_fw={lo_fw}\n")
 
-        # optim slice: trace로는 step_inc/bias_corr만 검증 (adam_step은 '상태 변화'로 검증)
-        KEEP_OPT_TRACE = {"step_inc", "bias_corr"}
-        KEEP_OPT_LOWER = {"step_inc", "bias_corr", "adam_step"}
+        # optim slice: step_inc(1) + bias_corr(1) + adam_step(N=params)
+        KEEP_OPT = {"step_inc", "bias_corr", "adam_step"}
+        tr_opt = [op for op in tr if op in KEEP_OPT]
+        lo_opt = [op for op in lo if op in KEEP_OPT]
 
-        tr_opt = [op for op in tr if op in KEEP_OPT_TRACE]
-        lo_opt = [op for op in lo if op in KEEP_OPT_LOWER]
+        # expected N = number of parameters
+        N_PARAM = len(list(model.named_parameters()))
 
-        # trace 쪽은 step_inc/bias_corr만 있어야 정상
-        if tr_opt != ["step_inc", "bias_corr"]:
+        exp = ["step_inc", "bias_corr"] + ["adam_step"] * N_PARAM
+
+        if tr_opt != exp:
             fail("Runtime trace optim-slice mismatch:\n"
-                 f"  trace_opt={tr_opt}\n  expected=['step_inc','bias_corr']\n")
+                f"  trace_opt={tr_opt}\n  expected={exp}\n"
+                f"  N_PARAM={N_PARAM}\n")
 
-        # lowering 쪽은 adam_step까지 포함되어야 정상
-        exp_lo_prefix = ["step_inc", "bias_corr"]
-        if lo_opt[:2] != exp_lo_prefix:
-            fail("Lowering optim-slice missing step/biascorr:\n"
-                 f"  lower_opt={lo_opt}\n")
+        if lo_opt != exp:
+            fail("Lowering optim-slice mismatch:\n"
+                f"  lower_opt={lo_opt}\n  expected={exp}\n"
+                f"  N_PARAM={N_PARAM}\n")
 
-        if "adam_step" not in lo_opt:
-            fail("Lowering optim-slice missing adam_step:\n"
-                 f"  lower_opt={lo_opt}\n")
+        ok(f"[lowering] match: forward slice OK, optim slice OK (adam_step x{N_PARAM})")
 
-        ok("[lowering] match: forward slice OK, optim (trace) step_inc/bias_corr OK")
-        warn("[lowering] NOTE: adam_step is validated by state mutation (not trace), because runtime trace may not observe it in current backend path.")
     else:
         if trace_ops != lower_ops:
             fail("Lowering mismatch (strict):\n"
@@ -444,7 +424,6 @@ def main():
     # Snapshot AFTER capture (real starting state for sequences)
     st0 = snapshot_train_state()
 
-    # ---- NEW: validate that "adam_step" actually mutates state (params + m/v) on replay ----
     @torch.no_grad()
     def assert_adam_state_mutates(tag: str):
         ps0, _, ms0, vs0, step0, _, _ = snapshot_train_state()
@@ -452,13 +431,11 @@ def main():
         torch.cuda.synchronize()
         ps1, _, ms1, vs1, step1, _, _ = snapshot_train_state()
 
-        # params must change
         max_p = 0.0
         for n in ps0.keys():
             d = max_abs_diff(ps1[n], ps0[n])
             max_p = max(max_p, d)
 
-        # m/v must change for at least one param
         max_m = 0.0
         max_v = 0.0
         for i in ms0.keys():
@@ -476,12 +453,11 @@ def main():
 
         ok(f"[adam] state mutation OK on replay: max_param_diff={max_p:.6e}, max_m={max_m:.6e}, max_v={max_v:.6e}")
 
-    # run once: proves adam_step is in captured graph even if trace doesn't show it
+    # smoke: now must pass
     restore_train_state(st0)
     torch.cuda.synchronize()
     assert_adam_state_mutates("smoke")
 
-    # restore again to start determinism runs cleanly
     restore_train_state(st0)
     torch.cuda.synchronize()
     if CHECK_RESTORE:
@@ -534,4 +510,6 @@ def main():
 
 
 if __name__ == "__main__":
+    # optional: make adam_step runtime dispatch strict
+    os.environ.setdefault("AICF_ENFORCE_ADAMSTEP_RUNTIME", "1")
     raise SystemExit(main())

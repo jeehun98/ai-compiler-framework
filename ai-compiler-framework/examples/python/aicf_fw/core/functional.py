@@ -513,11 +513,11 @@ def adam_step_(
 ) -> None:
     """
     TRACING: bc1_inv/bc2_inv는 scalar-cache로 연결 (BiasCorr output을 공유).
+    RUNTIME: _C.op_call(OpKind.AdamStep)로 dispatch (capture-safe).
     """
     if is_tracing():
         ir = get_ir()
 
-        # inputs: 기존 버전(SSA input)
         p_in = _as_ir_value(p, p.name or "p")
         g_in = ir.new_value(name=g.name or "grad", shape=g.shape, dtype=str(g.dtype), device=str(g.device))
         m_in = _as_ir_value(m, "m")
@@ -526,7 +526,6 @@ def adam_step_(
         b1 = _as_ir_scalar(bc1_inv, "bc1_inv")
         b2 = _as_ir_scalar(bc2_inv, "bc2_inv")
 
-        # outputs: 새 버전(SSA output)
         p_out = ir.new_value(name=p.name or "p", shape=p.shape, dtype=str(p.dtype), device=str(p.device))
         m_out = ir.new_value(name="m", shape=m.shape, dtype=str(m.dtype), device=str(m.device))
         v_out = ir.new_value(name="v", shape=v.shape, dtype=str(v.dtype), device=str(v.device))
@@ -538,8 +537,52 @@ def adam_step_(
             attrs={"lr": float(lr), "beta1": float(beta1), "beta2": float(beta2), "eps": float(eps)},
         )
 
-        # (선택) SSA cache 갱신: 이후 노드가 최신 p/m/v를 보게
         _TRACE_VAL_CACHE[id(p)] = p_out
         _TRACE_VAL_CACHE[id(m)] = m_out
         _TRACE_VAL_CACHE[id(v)] = v_out
         return
+
+    # -------------------------
+    # RUNTIME PATH (NEW)
+    # -------------------------
+    # fail fast: data buffers must exist (especially during capture)
+    if p.data is None or m.data is None or v.data is None:
+        raise RuntimeError("F.adam_step_: p/m/v has no data buffer (None).")
+    if g is None or g.data is None:
+        raise RuntimeError("F.adam_step_: grad has no data buffer (None).")
+
+    if not isinstance(bc1_inv, torch.Tensor) or not isinstance(bc2_inv, torch.Tensor):
+        raise RuntimeError("F.adam_step_: bc1_inv/bc2_inv must be torch.Tensor scalars on device.")
+
+    attrs = {"lr": float(lr), "beta1": float(beta1), "beta2": float(beta2), "eps": float(eps)}
+
+    # dispatch via backend (eventually _C.op_call)
+    from aicf_fw.backend import get_backend
+    bk = get_backend()
+
+    # optional strict debug guard: ensure adam_step actually got dispatched
+    import os
+    dbg = os.getenv("AICF_ENFORCE_ADAMSTEP_RUNTIME", "0") == "1"
+    if dbg:
+        import aicf_cuda as aicf
+        before = aicf.trace_get().count("adam_step")
+
+    # IMPORTANT: pass torch tensors to backend op_call
+    bk = get_backend()
+    attrs = {"lr": float(lr), "beta1": float(beta1), "beta2": float(beta2), "eps": float(eps)}
+
+    # inputs: P,G,M,V,BC1,BC2 (torch.Tensor)
+    inputs_t = [p.data, g.data, m.data, v.data, bc1_inv, bc2_inv]
+
+    # outputs: P,M,V (torch.Tensor)  <-- in-place 업데이트
+    outputs_t = [p.data, m.data, v.data]
+
+    bk.op_call_out("adam_step", inputs_t, outputs_t, attrs)
+
+
+
+    if dbg:
+        import aicf_cuda as aicf
+        after = aicf.trace_get().count("adam_step")
+        if after != before + 1:
+            raise RuntimeError(f"F.adam_step_ did not dispatch adam_step (trace {before}->{after}).")

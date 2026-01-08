@@ -17,6 +17,7 @@
 #include <utility>
 #include <vector>
 #include <cstdio>
+#include <cstdlib>   // getenv
 
 namespace py = pybind11;
 
@@ -135,7 +136,7 @@ static inline cudaStream_t aicf_dispatch_stream_locked() {
 }
 
 // ============================================================
-// AttrPack builder (same as yours)
+// AttrPack builder (v0.2)
 // ============================================================
 
 static void build_attr_pack_v0_2(
@@ -215,6 +216,7 @@ static void build_descs_v0_2(
 static std::string op_fail_msg(aicf::cuda::OpKind kind, aicf::Status st) {
   return std::string("aicf_cuda.op_call failed: kind=")
        + std::to_string((int)kind)
+       + " (" + std::string(opkind_to_name(kind)) + ")"
        + " status=" + aicf::status_to_string(st);
 }
 
@@ -243,8 +245,15 @@ static void op_call_impl(
   {
     std::lock_guard<std::mutex> lock(g_graph_mu);
 
-    // ★ NEW: record trace here (authoritative)
+    // record trace
     trace_record_locked(kind);
+
+    // optional stderr trace (PR7-like)
+    if (std::getenv("AICF_TRACE_STDERR")) {
+      std::fprintf(stderr, "[aicf][op_call] %s (kind=%d) capturing=%d captured=%d\n",
+                   opkind_to_name(kind), (int)kind,
+                   (int)g_graph.capturing, (int)g_graph.captured);
+    }
 
     stream = aicf_dispatch_stream_locked();
   }
@@ -315,7 +324,7 @@ PYBIND11_MODULE(_C, m) {
     py::arg("attrs") = py::dict()
   );
 
-  // ---------------- NEW: trace API ----------------
+  // ---------------- trace API ----------------
   m.def("trace_enable", [](bool flag) {
     std::lock_guard<std::mutex> lock(g_graph_mu);
     g_trace_enabled = flag;
@@ -337,7 +346,7 @@ PYBIND11_MODULE(_C, m) {
 
     std::fprintf(stderr, "[aicf] capture_begin entered (dedicated stream)\n");
 
-    // ★ NEW: clear trace at capture begin
+    // clear trace at capture begin
     trace_reset_locked();
 
     g_graph.reset_full();
@@ -398,7 +407,6 @@ PYBIND11_MODULE(_C, m) {
   m.def("capture_reset", []() {
     std::lock_guard<std::mutex> lock(g_graph_mu);
     g_graph.reset_full();
-    // 안전하게 trace도 리셋
     trace_reset_locked();
   });
 }
