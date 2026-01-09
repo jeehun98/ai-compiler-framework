@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from typing import Dict, Iterator, Tuple, Optional, Any
+from typing import Dict, Iterator, Tuple, Optional, Any, Callable, Sequence, Literal
 
 from .tensor import Tensor
 import torch
+
+
+LossKind = Literal["mse"]
+
 
 class Module:
     """
@@ -13,11 +17,17 @@ class Module:
     - Registers parameters and child modules.
     - Provides parameters()/named_parameters()/modules()/named_modules()
     - zero_grad() included.
+
+    Added:
+    - compile(): compile+warmup+capture+trace into a CompileArtifact and store it.
+    - replay(): replay captured CUDA graph for the compiled step.
+    - get_artifact(): access last CompileArtifact.
     """
 
     def __init__(self) -> None:
         object.__setattr__(self, "_parameters", OrderedDict())  # name -> Tensor
         object.__setattr__(self, "_modules", OrderedDict())     # name -> Module
+        object.__setattr__(self, "_compiled_artifact", None)    # CompileArtifact | None
 
     # -------------------------
     # Registration
@@ -121,23 +131,16 @@ class Module:
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
 
-
     # -------------------------
     # checkpointing (minimal)
     # -------------------------
     def state_dict(self) -> Dict[str, torch.Tensor]:
-        import torch
         sd: Dict[str, torch.Tensor] = {}
-
         for name, p in self.named_parameters(recurse=True):
-            # store raw torch tensor (detach to be safe)
             sd[name] = p.data.detach().clone()
-
         return sd
 
     def load_state_dict(self, sd: Dict[str, Any], strict: bool = True) -> None:
-        import torch
-
         cur = {name: p for name, p in self.named_parameters(recurse=True)}
         missing = []
         unexpected = []
@@ -156,7 +159,6 @@ class Module:
             if tuple(src.shape) != tuple(p.data.shape):
                 raise ValueError(f"shape mismatch for {k}: {tuple(src.shape)} vs {tuple(p.data.shape)}")
             if src.dtype != p.data.dtype:
-                # allow dtype mismatch only if you want; default strict
                 if strict:
                     raise ValueError(f"dtype mismatch for {k}: {src.dtype} vs {p.data.dtype}")
                 src = src.to(dtype=p.data.dtype)
@@ -168,3 +170,124 @@ class Module:
 
         if strict and (missing or unexpected):
             raise KeyError(f"load_state_dict strict failed. missing={missing}, unexpected={unexpected}")
+
+    # ============================================================
+    # New: compile/replay API (framework-style)
+    # ============================================================
+    def compile(
+        self,
+        *,
+        # Mode 1: explicit step_fn (advanced / custom)
+        step_fn: Optional[Callable[[], None]] = None,
+
+        # Mode 2: auto train step (framework-style)
+        optim: Optional[Any] = None,
+        x: Optional[Any] = None,
+        t: Optional[Any] = None,
+        loss: LossKind = "mse",
+
+        # compile/capture options
+        name: str = "train_step",
+        warmup_runs: int = 2,
+        warmup_sync: bool = True,
+        validate: bool = True,
+        trace: bool = True,
+        enforce_ops: Sequence[str] = ("adam_step",),
+        torch_sync: bool = True,
+    ):
+        """
+        Compile + validate + lower + warmup + CUDA graph capture + runtime trace.
+
+        Two modes:
+          - step_fn is provided: compile exactly that closure.
+          - step_fn is None: build a standard train-step with (optim, x, t, loss).
+
+        Returns:
+          CompileArtifact (also saved into self._compiled_artifact)
+        """
+        from aicf_fw.core.compile import compile_and_capture
+        from aicf_fw.core.autograd import backward as autograd_backward
+        from aicf_fw.core import functional as F
+
+        if step_fn is None:
+            if optim is None or x is None or t is None:
+                raise ValueError("Either provide step_fn=..., or provide optim=..., x=..., t=... for auto train_step.")
+            if loss != "mse":
+                raise ValueError(f"Unsupported loss='{loss}' in v0. Only 'mse' is supported.")
+
+            def _auto_train_step():
+                optim.zero_grad()
+                y = self(x)
+                dY = F.mse_grad(y, t)
+                autograd_backward(y, grad=dY, accumulate=False)
+                optim.step_()
+
+            step_fn = _auto_train_step
+
+        art = compile_and_capture(
+            step_fn,
+            name=name,
+            warmup_runs=warmup_runs,
+            warmup_sync=warmup_sync,
+            validate=validate,
+            trace=trace,
+            enforce_ops=tuple(enforce_ops),
+            torch_sync=torch_sync,
+        )
+        object.__setattr__(self, "_compiled_artifact", art)
+        return art
+
+    def replay(self) -> None:
+        """
+        Replay captured CUDA graph for the last compiled step.
+        """
+        art = getattr(self, "_compiled_artifact", None)
+        if art is None:
+            raise RuntimeError("Model is not compiled. Call model.compile(...) first.")
+        art.backend.replay()
+
+    def get_artifact(self):
+        """
+        Get last CompileArtifact.
+        """
+        art = getattr(self, "_compiled_artifact", None)
+        if art is None:
+            raise RuntimeError("Model is not compiled. Call model.compile(...) first.")
+        return art
+
+    def compile_train(
+        self,
+        *,
+        optim: Any,
+        input_spec: Dict[str, Tuple[Tuple[int, ...], torch.dtype, str]],
+        loss: str = "mse",
+        name: str = "train_step",
+        warmup_runs: int = 2,
+        warmup_sync: bool = True,
+        validate: bool = True,
+        trace: bool = True,
+        enforce_ops: Sequence[str] = ("adam_step",),
+        torch_sync: bool = True,
+    ):
+        """
+        Framework-style training compile:
+        - allocates static input buffers from input_spec
+        - captures a CUDA graph that reads those buffers
+        - returns TrainGraph which can be fed via set_inputs() + replay()
+        """
+        from aicf_fw.core.train_graph import TrainGraph
+
+        tg = TrainGraph(
+            self,
+            optim,
+            input_spec=input_spec,
+            loss=loss,  # type: ignore[arg-type]
+            name=name,
+            warmup_runs=warmup_runs,
+            warmup_sync=warmup_sync,
+            validate=validate,
+            trace=trace,
+            enforce_ops=tuple(enforce_ops),
+            torch_sync=torch_sync,
+        )
+        return tg
