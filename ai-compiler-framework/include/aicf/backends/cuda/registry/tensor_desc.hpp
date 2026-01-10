@@ -16,7 +16,7 @@ enum class DType : uint8_t {
   kF32  = 1,
   kF16  = 2,
   kBF16 = 3,
-  kI32  = 4,   // ✅ 추가
+  kI32  = 4,   // ✅ int32
 
   // backward-compatible aliases (keep)
   Unknown = kUnknown,
@@ -37,9 +37,13 @@ static inline constexpr bool dtype_is_float(DType t) {
   return (t == DType::kF32) || (t == DType::kF16) || (t == DType::kBF16);
 }
 
+static inline constexpr bool dtype_is_int(DType t) {
+  return (t == DType::kI32);
+}
+
 static inline constexpr bool dtype_is_supported(DType t) {
   // extend here when you add int8, etc.
-  return dtype_is_float(t) || (t == DType::kUnknown);
+  return dtype_is_float(t) || dtype_is_int(t) || (t == DType::kUnknown);
 }
 
 static inline constexpr int32_t dtype_bits(DType t) {
@@ -47,6 +51,7 @@ static inline constexpr int32_t dtype_bits(DType t) {
     case DType::kF32:  return 32;
     case DType::kF16:  return 16;
     case DType::kBF16: return 16;
+    case DType::kI32:  return 32;  // ✅
     default:           return 0;
   }
 }
@@ -61,6 +66,7 @@ static inline constexpr const char* dtype_name(DType t) {
     case DType::kF32:     return "f32";
     case DType::kF16:     return "f16";
     case DType::kBF16:    return "bf16";
+    case DType::kI32:     return "i32";     // ✅
     default:              return "invalid";
   }
 }
@@ -71,6 +77,7 @@ static inline constexpr DType dtype_accum_for(DType t) {
     case DType::kF16:  return DType::kF32;
     case DType::kBF16: return DType::kF32;
     case DType::kF32:  return DType::kF32;
+    case DType::kI32:  return DType::kI32;  // ✅ (정수는 정수 누산이 자연스러움)
     default:           return DType::kF32;
   }
 }
@@ -104,13 +111,15 @@ struct TensorDesc {
   // Convenience helpers
   // -------------------------
   bool is_valid_rank() const {
-    return rank() > 0 && rank() <= kMaxRank;
+    return rank() >= 0 && rank() <= kMaxRank;
   }
 
   bool has_data() const { return data != nullptr; }
 
   bool has_valid_strides_and_shapes() const {
+    // rank==0(스칼라)은 shape/stride 검증을 요구하지 않는다.
     if (!is_valid_rank()) return false;
+    if (rank() == 0) return true;
     for (int32_t i = 0; i < rank(); ++i) {
       if (shape[i] <= 0) return false;
       if (stride[i] <= 0) return false;
@@ -119,7 +128,10 @@ struct TensorDesc {
   }
 
   int64_t numel() const {
+    // ✅ 기존 구현은 rank<=0이면 0이었을 가능성이 큼.
+    // torch scalar(rank=0)를 안전하게 지원하려면 numel=1이 맞다.
     if (!is_valid_rank()) return 0;
+    if (rank() == 0) return 1;
     int64_t n = 1;
     for (int32_t i = 0; i < rank(); ++i) n *= shape[i];
     return n;

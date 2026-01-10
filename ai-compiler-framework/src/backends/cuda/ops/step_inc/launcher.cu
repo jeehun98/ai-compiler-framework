@@ -3,99 +3,169 @@
 
 #include <aicf/core/status.hpp>
 
-#include <aicf/backends/cuda/ops/step_inc/api.hpp>
+// registry glue
 #include <aicf/backends/cuda/registry/kernel_variant.hpp>
 #include <aicf/backends/cuda/registry/tensor_desc.hpp>
+#include <aicf/backends/cuda/registry/attr_pack.hpp>
 
+// common shim
 #include "aicf/backends/cuda/ops/_common/shim/status.hpp"
+
+#include "kernels.cuh"
 
 namespace aicf::cuda {
 
-__global__ void step_inc_i32_kernel(int32_t* step) {
-  // single element
-  if (blockIdx.x == 0 && threadIdx.x == 0) {
-    step[0] += 1;
+// -------------------------
+// kernels (definitions live here)
+// -------------------------
+namespace step_inc_impl {
+
+static __forceinline__ __device__ int64_t global_tid_1d() {
+  return (int64_t)blockIdx.x * (int64_t)blockDim.x + (int64_t)threadIdx.x;
+}
+static __forceinline__ __device__ int64_t global_stride_1d() {
+  return (int64_t)gridDim.x * (int64_t)blockDim.x;
+}
+
+// step[i] += 1 (supports scalar: numel==1)
+__global__ void step_inc_i32_kernel(int32_t* __restrict__ step, int64_t numel) {
+  for (int64_t i = global_tid_1d(); i < numel; i += global_stride_1d()) {
+    step[i] += 1;
   }
 }
 
-// contract-compatible op entry (not strictly needed but keeps symmetry)
-aicf::Status step_inc_v0(
-    const TensorDesc* inputs, int num_inputs,
-    TensorDesc* outputs, int num_outputs,
-    const void* /*attr*/,
-    void* /*workspace*/, size_t /*workspace_bytes*/,
-    cudaStream_t stream) {
+} // namespace step_inc_impl
 
-  if (!inputs || !outputs) return aicf::Status::InvalidArgument;
-  if (num_inputs != 1 || num_outputs != 1) return aicf::Status::InvalidArgument;
+// -------------------------
+// Shape helpers
+// -------------------------
 
-  const TensorDesc& S = inputs[0];
-  TensorDesc& O = outputs[0];
+// NOTE: step_inc는 scalar(rank=0)도 허용해야 함.
+// TensorDesc가 rank==0이면 numel을 1로 취급.
+static inline bool compute_numel_allow_scalar0d(const TensorDesc& T, int64_t* out) {
+  if (!out) return false;
 
-  // must be int32 scalar
-  if (S.dtype != DType::kI32 || O.dtype != DType::kI32) return aicf::Status::NotImplemented;
-  if (!S.contiguous || !O.contiguous) return aicf::Status::NotImplemented;
+  const int64_t r = T.rank();
+  if (r < 0) return false;
 
-  // scalar rank=0 (shape_len=0) OR rank=1 with shape[0]==1(혹시 구현체가 그렇게 올 수도)
-  // 여기선 rank=0만 요구해도 되는데, 호환성 위해 둘 다 허용.
-  const bool scalar0 = (S.r.rank == 0 && O.r.rank == 0);
-  const bool scalar1 = (S.r.rank == 1 && O.r.rank == 1 && S.shape[0] == 1 && O.shape[0] == 1);
-  if (!(scalar0 || scalar1)) return aicf::Status::NotImplemented;
-
-  // in-place allowed: O.data == S.data
-  if (S.data != O.data) {
-    // 그래도 out-buffer 정책이면 동일 버퍼로 주는게 정석이라서,
-    // 여기서는 강제해버리자.
-    return aicf::Status::InvalidArgument;
+  if (r == 0) {  // 0-d scalar
+    *out = 1;
+    return true;
   }
 
-  step_inc_i32_kernel<<<1, 32, 0, stream>>>((int32_t*)O.data);
-  return aicf::cuda::shim::cuda_last_error_to_status();
-}
+  if (r > (int64_t)kMaxRank) return false;
 
-// -------------------------
-// KernelVariant glue
-// -------------------------
-static size_t ws_step_inc(const TensorDesc*, int, const void*) { return 0; }
-
-static bool supported_step_inc(
-    const TensorDesc* in, int ni,
-    const TensorDesc* out, int no,
-    const void* /*attr*/) {
-
-  if (!in || !out) return false;
-  if (ni != 1 || no != 1) return false;
-  if (in[0].dtype != DType::kI32 || out[0].dtype != DType::kI32) return false;
-  if (!in[0].contiguous || !out[0].contiguous) return false;
-
-  const bool scalar0 = (in[0].r.rank == 0 && out[0].r.rank == 0);
-  const bool scalar1 = (in[0].r.rank == 1 && out[0].r.rank == 1 && in[0].shape[0] == 1 && out[0].shape[0] == 1);
-  if (!(scalar0 || scalar1)) return false;
-
-  // enforce in-place
-  if (in[0].data != out[0].data) return false;
-
+  int64_t n = 1;
+  for (int64_t i = 0; i < r; ++i) {
+    const int64_t d = T.shape[i];
+    if (d <= 0) return false;
+    n *= d;
+  }
+  *out = n;
   return true;
 }
 
-static aicf::Status launch_step_inc(
-    const TensorDesc* inputs, int num_inputs,
-    TensorDesc* outputs, int num_outputs,
-    const void* attr,
-    void* workspace, size_t workspace_bytes,
-    cudaStream_t stream) {
-
-  return step_inc_v0(inputs, num_inputs, outputs, num_outputs, attr, workspace, workspace_bytes, stream);
+static inline bool same_shape_allow_scalar0d(const TensorDesc& A, const TensorDesc& B) {
+  if (A.rank() != B.rank()) return false;
+  const int64_t r = A.rank();
+  if (r == 0) return true; // both scalar
+  for (int64_t i = 0; i < r; ++i) {
+    if (A.shape[i] != B.shape[i]) return false;
+  }
+  return true;
 }
 
+static inline bool is_i32_contig_allow_scalar0d(const TensorDesc& T) {
+  // scalar(0d)는 contiguous 플래그가 false로 올 수도 있어 애매함.
+  // 하지만 step_inc는 1 element만 쓰기 때문에, rank==0이면 contiguous 검사 완화.
+  if (T.dtype != DType::kI32) return false;
+  if (T.rank() == 0) return true;
+  return T.contiguous;
+}
+
+static inline int choose_blocks_1d(int64_t numel, int threads) {
+  int64_t blocks64 = (numel + threads - 1) / threads;
+  const int kMaxBlocks = 65535;
+  int blocks = (blocks64 > (int64_t)kMaxBlocks) ? kMaxBlocks : (int)blocks64;
+  if (blocks < 1) blocks = 1;
+  return blocks;
+}
+
+static size_t step_inc_workspace(const TensorDesc*, int, const void*) { return 0; }
+
+// ============================================================================
+// Variant: StepInc i32
+// Contract: inputs=(S), outputs=(Sout)
+//   Sout = S + 1
+// In-place allowed: outputs[0] may alias inputs[0] (and typical).
+// ============================================================================
+static inline bool step_inc_check_i32(
+    const TensorDesc* inputs, int num_inputs,
+    const TensorDesc* outputs, int num_outputs) {
+
+  if (!inputs || !outputs) return false;
+  if (num_inputs != 1 || num_outputs != 1) return false;
+
+  const TensorDesc& S  = inputs[0];
+  const TensorDesc& SO = outputs[0];
+
+  if (!is_i32_contig_allow_scalar0d(S) || !is_i32_contig_allow_scalar0d(SO)) return false;
+  if (!same_shape_allow_scalar0d(S, SO)) return false;
+
+  int64_t numel = 0;
+  if (!compute_numel_allow_scalar0d(S, &numel)) return false;
+
+  // step는 scalar를 기대하지만, 안전하게 numel>=1이면 허용
+  return (numel >= 1);
+}
+
+static bool step_inc_supported_i32(
+    const TensorDesc* inputs, int num_inputs,
+    const TensorDesc* outputs, int num_outputs,
+    const void* /*attr*/) {
+  return step_inc_check_i32(inputs, num_inputs, outputs, num_outputs);
+}
+
+static aicf::Status step_inc_launch_i32(
+    const TensorDesc* inputs, int num_inputs,
+    TensorDesc* outputs, int num_outputs,
+    const void* /*attr*/,
+    void*, size_t,
+    cudaStream_t stream) {
+
+  if (!step_inc_check_i32(inputs, num_inputs, outputs, num_outputs)) {
+    return aicf::Status::InvalidArgument;
+  }
+
+  const TensorDesc& S  = inputs[0];
+  TensorDesc& SO = outputs[0];
+
+  // step_inc는 in-place가 정상 케이스.
+  // out이 다른 버퍼여도 안전함.
+  int64_t numel = 0;
+  (void)compute_numel_allow_scalar0d(S, &numel);
+
+  constexpr int kThreads = 256;
+  const int blocks = choose_blocks_1d(numel, kThreads);
+
+  step_inc_impl::step_inc_i32_kernel<<<blocks, kThreads, 0, stream>>>(
+      (int32_t*)SO.data, numel);
+
+  return aicf::cuda::shim::cuda_last_error_to_status();
+}
+
+// ============================================================
+// IMPORTANT: register_all.cpp가 찾는 정확한 심볼 이름
+// ============================================================
 KernelVariant make_step_inc_variant() {
-  KernelVariant kv{};
-  kv.name = "step_inc_i32_v0";
-  kv.priority = 0;
-  kv.query_workspace = ws_step_inc;
-  kv.supported = supported_step_inc;
-  kv.launch = launch_step_inc;
-  return kv;
+  KernelVariant v{};
+  v.name = "step_inc_i32";
+  v.priority = 0;
+  v.flags = 0;
+  v.launch = step_inc_launch_i32;
+  v.supported = step_inc_supported_i32;
+  v.query_workspace = step_inc_workspace;
+  return v;
 }
 
 } // namespace aicf::cuda

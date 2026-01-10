@@ -9,6 +9,9 @@ enum class Status : int32_t {
   NotImplemented = 2,
   InvalidArgument = 3,
   RuntimeError = 4,
+  kInvalidArgument = 5,
+  kCudaError = 6,
+  kOk = 7,
 };
 
 constexpr bool ok(Status s) { return s == Status::Ok; }

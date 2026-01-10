@@ -1,12 +1,13 @@
+# aicf_fw/core/functional.py
 from __future__ import annotations
 
 from typing import List, Optional, Tuple, Dict, Any
+import os
 import torch
 
 from aicf_fw.core.tensor import Tensor, TensorMeta
 from aicf_fw.core.autograd import Node, grad_enabled, in_capture
 from aicf_fw.backend import get_backend
-
 from aicf_fw.core.trace import is_tracing, get_ir
 
 
@@ -82,7 +83,7 @@ def functional_buffer_stats() -> Dict[str, int]:
 
 
 # ============================================================
-# Tracing helpers
+# Tracing helpers (SSA + proper linkage)
 # ============================================================
 
 def _sym_tensor(
@@ -97,18 +98,20 @@ def _sym_tensor(
     return Tensor(None, requires_grad=requires_grad, name=name, meta=meta)
 
 
-# Tensor(id) -> IRValue cache (good for INPUT linkage)
+# Tensor(id) -> IRValue cache (SSA-aware for "current value")
 _TRACE_VAL_CACHE: Dict[int, Any] = {}  # Any = IRValue
 
 
 def _trace_reset_cache():
     _TRACE_VAL_CACHE.clear()
+    _TRACE_SCALAR_CACHE.clear()
 
 
 def _as_ir_value(t: Tensor, fallback_name: str):
     """
     Return cached IRValue for a Tensor while tracing.
-    NOTE: inputs are ok to be cached; outputs should be fresh (SSA).
+    - Inputs/params/state: cache is used to keep identity
+    - Outputs: caller MUST write-back with _bind_tensor_ir_value(out_tensor, out_ir_value)
     """
     if not is_tracing():
         raise RuntimeError("_as_ir_value() called outside tracing")
@@ -123,6 +126,14 @@ def _as_ir_value(t: Tensor, fallback_name: str):
     v = ir.new_value(name=nm, shape=t.shape, dtype=str(t.dtype), device=str(t.device))
     _TRACE_VAL_CACHE[tid] = v
     return v
+
+
+def _bind_tensor_ir_value(t: Tensor, v) -> None:
+    """
+    After producing a new SSA value for Tensor t, bind t -> v.
+    This is THE missing piece that fixes IR linkage.
+    """
+    _TRACE_VAL_CACHE[id(t)] = v
 
 
 # torch.Tensor scalar cache (for step/bc1_inv/bc2_inv) — SSA update support
@@ -213,7 +224,9 @@ def linear(x: Tensor, W: Tensor, b: Optional[Tensor]) -> Tensor:
     """
     y = x @ W^T + b
 
-    TRACING: output IRValue MUST be fresh (SSA).
+    TRACING:
+      - produce fresh IRValue (SSA) for y
+      - bind (Tensor y) -> (IRValue yv) so downstream nodes use it
     """
     if is_tracing():
         if len(x.shape) != 2 or len(W.shape) != 2:
@@ -250,6 +263,9 @@ def linear(x: Tensor, W: Tensor, b: Optional[Tensor]) -> Tensor:
 
         attrs = {"bias": (b is not None), "layout": "y = x @ W^T + b"}
         ir.emit(op="Linear", inputs=inputs, outputs=[yv], attrs=attrs)
+
+        # ★ CRITICAL: link Tensor->IRValue for downstream
+        _bind_tensor_ir_value(y, yv)
         return y
 
     bk = get_backend()
@@ -315,7 +331,9 @@ class _ReluNode(Node):
 
 def relu(x: Tensor) -> Tensor:
     """
-    TRACING: output IRValue MUST be fresh (SSA).
+    TRACING:
+      - produce fresh IRValue (SSA) for y
+      - bind (Tensor y) -> (IRValue yv)
     """
     if is_tracing():
         ir = get_ir()
@@ -338,6 +356,9 @@ def relu(x: Tensor) -> Tensor:
         )
 
         ir.emit(op="ReLU", inputs=[xv], outputs=[yv], attrs={})
+
+        # ★ CRITICAL: link Tensor->IRValue
+        _bind_tensor_ir_value(y, yv)
         return y
 
     bk = get_backend()
@@ -367,7 +388,9 @@ def relu(x: Tensor) -> Tensor:
 
 def mse_grad(pred: Tensor, target: Tensor, *, scale: Optional[float] = None) -> Tensor:
     """
-    TRACING: output IRValue MUST be fresh (SSA).
+    TRACING:
+      - produce fresh IRValue (SSA) for out
+      - bind (Tensor out) -> (IRValue ov)
     """
     if is_tracing():
         if pred.shape != target.shape:
@@ -397,6 +420,9 @@ def mse_grad(pred: Tensor, target: Tensor, *, scale: Optional[float] = None) -> 
             attrs["scale"] = float(scale)
 
         ir.emit(op="MseGrad", inputs=[pv, tv], outputs=[ov], attrs=attrs)
+
+        # ★ CRITICAL: link Tensor->IRValue
+        _bind_tensor_ir_value(out, ov)
         return out
 
     bk = get_backend()
@@ -421,7 +447,23 @@ def mse_grad(pred: Tensor, target: Tensor, *, scale: Optional[float] = None) -> 
 # ============================================================
 
 def grad_zero_(g: Tensor) -> Tensor:
+    """
+    TRACING:
+      emit GradZero so IR sees the op (optional but useful),
+      and re-bind g -> new SSA value (even if runtime is in-place).
+    """
     if is_tracing():
+        ir = get_ir()
+
+        gi = _as_ir_value(g, g.name or "grad")
+        go = ir.new_value(
+            name=g.name or "grad",
+            shape=g.shape,
+            dtype=str(g.dtype),
+            device=str(g.device),
+        )
+        ir.emit(op="GradZero", inputs=[gi], outputs=[go], attrs={})
+        _bind_tensor_ir_value(g, go)
         return g
 
     bk = get_backend()
@@ -433,7 +475,7 @@ def step_inc_(step_i32: torch.Tensor) -> torch.Tensor:
     """
     SSA TRACING:
       step_in  -> StepInc -> step_out
-      그리고 step_i32 handle은 동일하므로 scalar-cache를 step_out으로 업데이트한다.
+      update scalar-cache to step_out
     """
     if is_tracing():
         ir = get_ir()
@@ -463,7 +505,7 @@ def bias_corr_out(
     """
     SSA TRACING:
       step_in -> BiasCorr -> bc1_out, bc2_out
-      그리고 bc1_inv/bc2_inv handle은 동일하므로 scalar-cache를 output으로 업데이트한다.
+      update scalar-cache for bc1_inv/bc2_inv
     """
     if is_tracing():
         ir = get_ir()
@@ -482,8 +524,12 @@ def bias_corr_out(
             device=str(bc2_inv.device),
         )
 
-        ir.emit(op="BiasCorr", inputs=[step_v], outputs=[b1_out, b2_out],
-                attrs={"beta1": float(beta1), "beta2": float(beta2)})
+        ir.emit(
+            op="BiasCorr",
+            inputs=[step_v],
+            outputs=[b1_out, b2_out],
+            attrs={"beta1": float(beta1), "beta2": float(beta2)},
+        )
 
         _update_ir_scalar(bc1_inv, b1_out)
         _update_ir_scalar(bc2_inv, b2_out)
@@ -512,14 +558,24 @@ def adam_step_(
     eps: float,
 ) -> None:
     """
-    TRACING: bc1_inv/bc2_inv는 scalar-cache로 연결 (BiasCorr output을 공유).
-    RUNTIME: _C.op_call(OpKind.AdamStep)로 dispatch (capture-safe).
+    TRACING:
+      - p/m/v are SSA updated: emit AdamStep and bind (Tensor -> new IRValue)
+      - grad 'g' is treated as a value (SSA) (fresh IRValue each time is OK)
+      - bc1_inv/bc2_inv linked by scalar-cache (BiasCorr outputs)
+    RUNTIME:
+      - dispatch via backend op_call_out("adam_step", ...)
+      - optional strict check using aicf_cuda trace_get()
     """
     if is_tracing():
         ir = get_ir()
 
         p_in = _as_ir_value(p, p.name or "p")
-        g_in = ir.new_value(name=g.name or "grad", shape=g.shape, dtype=str(g.dtype), device=str(g.device))
+
+        # grad: treat as a value input; if it's a Tensor we want linkage too.
+        # If you want grad to share identity across nodes, call _as_ir_value(g,...)
+        # Here: allow SSA fresh grad value for clarity.
+        g_in = _as_ir_value(g, g.name or "grad")
+
         m_in = _as_ir_value(m, "m")
         v_in = _as_ir_value(v, "v")
 
@@ -537,15 +593,15 @@ def adam_step_(
             attrs={"lr": float(lr), "beta1": float(beta1), "beta2": float(beta2), "eps": float(eps)},
         )
 
-        _TRACE_VAL_CACHE[id(p)] = p_out
-        _TRACE_VAL_CACHE[id(m)] = m_out
-        _TRACE_VAL_CACHE[id(v)] = v_out
+        # ★ CRITICAL: update Tensor->IRValue to reflect SSA state update
+        _bind_tensor_ir_value(p, p_out)
+        _bind_tensor_ir_value(m, m_out)
+        _bind_tensor_ir_value(v, v_out)
         return
 
     # -------------------------
-    # RUNTIME PATH (NEW)
+    # RUNTIME PATH
     # -------------------------
-    # fail fast: data buffers must exist (especially during capture)
     if p.data is None or m.data is None or v.data is None:
         raise RuntimeError("F.adam_step_: p/m/v has no data buffer (None).")
     if g is None or g.data is None:
@@ -556,30 +612,17 @@ def adam_step_(
 
     attrs = {"lr": float(lr), "beta1": float(beta1), "beta2": float(beta2), "eps": float(eps)}
 
-    # dispatch via backend (eventually _C.op_call)
-    from aicf_fw.backend import get_backend
     bk = get_backend()
 
-    # optional strict debug guard: ensure adam_step actually got dispatched
-    import os
     dbg = os.getenv("AICF_ENFORCE_ADAMSTEP_RUNTIME", "0") == "1"
     if dbg:
         import aicf_cuda as aicf
         before = aicf.trace_get().count("adam_step")
 
-    # IMPORTANT: pass torch tensors to backend op_call
-    bk = get_backend()
-    attrs = {"lr": float(lr), "beta1": float(beta1), "beta2": float(beta2), "eps": float(eps)}
-
-    # inputs: P,G,M,V,BC1,BC2 (torch.Tensor)
     inputs_t = [p.data, g.data, m.data, v.data, bc1_inv, bc2_inv]
-
-    # outputs: P,M,V (torch.Tensor)  <-- in-place 업데이트
     outputs_t = [p.data, m.data, v.data]
 
     bk.op_call_out("adam_step", inputs_t, outputs_t, attrs)
-
-
 
     if dbg:
         import aicf_cuda as aicf

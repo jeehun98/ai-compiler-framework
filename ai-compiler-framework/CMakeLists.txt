@@ -46,6 +46,7 @@ add_library(aicf
 
     src/backends/cuda/registry/registry.cpp
     src/backends/cuda/registry/register_all.cpp
+  
 )
 
 target_include_directories(aicf PUBLIC

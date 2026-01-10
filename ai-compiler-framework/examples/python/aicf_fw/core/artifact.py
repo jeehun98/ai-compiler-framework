@@ -1,8 +1,8 @@
 # aicf_fw/core/artifact.py
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import torch
 
@@ -34,10 +34,11 @@ class CompileArtifact:
     Compilation artifact produced by compile/lower/capture.
 
     Fields:
-      - ir: compiled IR object (must have dump_json if you want printing)
-      - lowered: list of backend ops (dicts with at least "op")
+      - ir: compiled IR object
+      - lowered: list of backend ops (dicts)
       - trace_ops: runtime trace op names (strings) captured during CUDA graph capture
       - backend: backend instance (must support replay())
+      - env: IRValue vid -> torch.Tensor runtime binding (for IRExecutor)
     """
     name: str
     ir: Any
@@ -45,6 +46,37 @@ class CompileArtifact:
     trace_ops: List[str]
     backend: Any
 
+    # NEW: runtime bindings for IRExecutor (vid -> torch.Tensor)
+    env: Dict[int, torch.Tensor] = field(default_factory=dict)
+
+    # -------------------------
+    # NEW: runtime env API
+    # -------------------------
+    def attach_env(self, env: Dict[int, torch.Tensor]) -> None:
+        """
+        Attach/replace runtime env mapping (vid -> torch.Tensor).
+        Useful if you build env after compile_and_capture returns.
+        """
+        if env is None:
+            raise RuntimeError("CompileArtifact.attach_env: env is None")
+        norm: Dict[int, torch.Tensor] = {}
+        for k, v in env.items():
+            vid = int(k)
+            if not isinstance(v, torch.Tensor):
+                raise RuntimeError(f"CompileArtifact.attach_env: env[{vid}] is not torch.Tensor: {type(v)}")
+            norm[vid] = v
+        self.env = norm
+
+    def runtime_env(self) -> Dict[int, torch.Tensor]:
+        """
+        IRExecutor.from_artifact() will call this.
+        Must return a dict: vid(int) -> torch.Tensor.
+        """
+        return self.env
+
+    # -------------------------
+    # Existing checks
+    # -------------------------
     def assert_trace_has(self, op: str) -> None:
         if op not in self.trace_ops:
             raise AssertionError(f"[trace] {op} missing in captured runtime ops: {self.trace_ops}")
@@ -166,10 +198,8 @@ class CompileArtifact:
         Ported from PR3: snapshot full train state st0, run A sequence, restore, run B sequence,
         and compare stepdiff sequences exactly.
         """
-        # Snapshot AFTER capture is assumed in caller; but determinism check should use current state.
         st0 = TrainState.capture(model, optim)
 
-        # Optional: verify restore works before any run
         if check_restore:
             st0.restore(model, optim)
             torch.cuda.synchronize()
@@ -186,7 +216,7 @@ class CompileArtifact:
             snaps = _snapshot_params(model)
             if print_every and (i % print_every == 0):
                 if loss_fn is not None:
-                    _ = loss_fn()  # caller decides printing; we keep it side-effect free here
+                    _ = loss_fn()
 
         # Restore
         st0.restore(model, optim)
@@ -207,9 +237,15 @@ class CompileArtifact:
                 if loss_fn is not None:
                     _ = loss_fn()
 
-        # Compare exactly (matches PR3 behavior)
         for i, (a, b) in enumerate(zip(stepdiff_A, stepdiff_B)):
             if a != b:
                 raise AssertionError(
                     f"Replay determinism broken (stepdiff sequence) at iter {i:02d}: {a:.6e} != {b:.6e}"
                 )
+
+    def attach_env(self, env: Dict[int, torch.Tensor]) -> None:
+        self._env = dict(env)
+
+    def runtime_env(self) -> Dict[int, torch.Tensor]:
+        env = getattr(self, "_env", None)
+        return dict(env) if env is not None else {}
