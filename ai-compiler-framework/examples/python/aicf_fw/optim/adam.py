@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import torch
 
-from aicf_fw.core.tensor import Tensor, TensorMeta
+from aicf_fw.core.autograd import Tensor, TensorMeta
 from aicf_fw.nn.sequential import Sequential
 from aicf_fw.core import functional as F
-from aicf_fw.core.trace import is_tracing
+from aicf_fw.core.compile import is_tracing
 from aicf_fw.core.autograd import in_capture
 
 

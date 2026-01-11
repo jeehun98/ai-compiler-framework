@@ -209,15 +209,15 @@ def main():
     seed_all(SEED)
     torch.set_grad_enabled(False)
 
-    # AICF imports
+    # AICF imports (UPDATED for new core structure)
     from aicf_fw.backend.aicf_backend import AICFBackend
     from aicf_fw.backend import set_backend, get_backend
-    from aicf_fw.core.tensor import Tensor
+    from aicf_fw.core.autograd import Tensor
     from aicf_fw.nn.linear import Linear
     from aicf_fw.nn.relu import ReLU
     from aicf_fw.nn.sequential import Sequential
     from aicf_fw.optim.adam import Adam
-    from aicf_fw.core.executor import IRExecutor
+    from aicf_fw.core.runtime import IRExecutor
     from aicf_fw.core.train_state import TrainState
 
     # backend
@@ -247,6 +247,7 @@ def main():
     os.environ.setdefault("AICF_ENFORCE_ADAMSTEP_RUNTIME", "1")
 
     # compile+capture
+    # NOTE: attach_env=True ensures IRExecutor.from_artifact works.
     art = model.compile(
         optim=optim,
         x=x,
@@ -259,6 +260,7 @@ def main():
         trace=True,
         enforce_ops=("adam_step",),
         torch_sync=True,
+        attach_env=True,
     )
 
     art.assert_runtime_matches_lowering(model, trace_filter=True)

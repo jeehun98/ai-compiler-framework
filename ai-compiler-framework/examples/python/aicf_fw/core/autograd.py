@@ -1,9 +1,85 @@
+# aicf_fw/core/autograd.py
 from __future__ import annotations
 
-from typing import List, Optional, Dict
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
+
 import torch
 
-from .tensor import Tensor
+
+# ============================================================
+# Tensor (+ Parameter) lives here now (tensor.py absorbed)
+# ============================================================
+
+@dataclass
+class TensorMeta:
+    shape: Tuple[int, ...]
+    dtype: torch.dtype
+    device: torch.device
+
+
+class Tensor:
+    """
+    data: backend handle (torch.Tensor or None for symbolic)
+    creator: Node that created this Tensor (None for leaf/Parameter)
+    grad: Tensor or backend handle (we keep as Tensor for simplicity)
+    meta: TensorMeta (always available; for symbolic tensors meta is required)
+    """
+    __slots__ = ("data", "requires_grad", "grad", "creator", "name", "meta")
+
+    def __init__(
+        self,
+        data: Any,
+        requires_grad: bool = False,
+        creator=None,
+        name: str = "",
+        meta: Optional[TensorMeta] = None,
+    ):
+        self.data = data
+        self.requires_grad = requires_grad
+        self.grad: Optional["Tensor"] = None
+        self.creator = creator
+        self.name = name
+
+        if meta is not None:
+            self.meta = meta
+        else:
+            if isinstance(data, torch.Tensor):
+                self.meta = TensorMeta(tuple(data.shape), data.dtype, data.device)
+            else:
+                raise TypeError("Tensor(meta=None) requires torch.Tensor data; for symbolic Tensor, pass meta.")
+
+    @property
+    def shape(self) -> Tuple[int, ...]:
+        return tuple(self.meta.shape)
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return self.meta.dtype
+
+    @property
+    def device(self) -> torch.device:
+        return self.meta.device
+
+    @property
+    def is_symbolic(self) -> bool:
+        return self.data is None
+
+    def zero_grad(self):
+        self.grad = None
+
+    def backward(self, grad: Optional["Tensor"] = None):
+        backward(self, grad)
+
+
+class Parameter(Tensor):
+    def __init__(self, data: Any, requires_grad: bool = True, name: str = ""):
+        super().__init__(data, requires_grad=requires_grad, creator=None, name=name)
+
+
+# ============================================================
+# Grad enable switch (framework-level)
+# ============================================================
 
 _grad_enabled = True
 
@@ -42,7 +118,8 @@ def in_capture() -> bool:
 # ============================================================
 # Tracing guard (IR compile)
 # ============================================================
-from aicf_fw.core.trace import is_tracing, get_ir, as_ir_value_obj
+
+from aicf_fw.core.compile import is_tracing, get_ir, as_ir_value_obj
 
 
 # ============================================================
@@ -188,7 +265,7 @@ def backward(loss: Tensor, grad: Optional[Tensor] = None, *, accumulate: bool = 
         return
 
     # --------------------------------------------------------
-    # EXECUTION PATH (existing)
+    # EXECUTION PATH
     # --------------------------------------------------------
     from ..backend import get_backend
     backend = get_backend()
@@ -244,3 +321,16 @@ def backward(loss: Tensor, grad: Optional[Tensor] = None, *, accumulate: bool = 
                     gmap[id(inp)] = Tensor(summed, requires_grad=False)
                 else:
                     gmap[id(inp)] = ig
+
+
+__all__ = [
+    "TensorMeta",
+    "Tensor",
+    "Parameter",
+    "Node",
+    "no_grad",
+    "grad_enabled",
+    "backward",
+    "in_capture",
+    "_set_capture_guard",
+]

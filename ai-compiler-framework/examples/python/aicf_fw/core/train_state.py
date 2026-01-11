@@ -1,8 +1,8 @@
-# aicf_fw/core/train_state.py
+# aicf_fw/python_framework_test/train_state.py
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 import torch
 
@@ -41,7 +41,6 @@ class TrainState:
             else:
                 gs[n] = p.grad.data.detach().clone()
 
-        # Adam state
         ms: Dict[int, torch.Tensor] = {i: optim.m[i].data.detach().clone() for i in optim.m.keys()}
         vs: Dict[int, torch.Tensor] = {i: optim.v[i].data.detach().clone() for i in optim.v.keys()}
 
@@ -53,31 +52,26 @@ class TrainState:
     @torch.no_grad()
     def restore(self, model: Any, optim: Any) -> None:
         # Lazy import to avoid circular deps at import time
-        from aicf_fw.core.tensor import Tensor  # noqa: WPS433
+        from aicf_fw.core.autograd import Tensor  # noqa: WPS433
 
         cur = {n: p for n, p in model.named_parameters()}
 
-        # params
         for n, src in self.params.items():
             cur[n].data.copy_(src)
 
-        # grads
         for n, g in self.grads.items():
             p = cur[n]
             if g is None:
                 p.grad = None
             else:
                 if getattr(p, "grad", None) is None:
-                    # Make a Tensor wrapper for grad, consistent with PR3 test.
                     p.grad = Tensor(torch.empty_like(g), requires_grad=False)
                 p.grad.data.copy_(g)
 
-        # moments
         for i in self.adam_m.keys():
             optim.m[i].data.copy_(self.adam_m[i])
             optim.v[i].data.copy_(self.adam_v[i])
 
-        # scalars
         optim.step.copy_(self.step)
         optim.bc1_inv.copy_(self.bc1_inv)
         optim.bc2_inv.copy_(self.bc2_inv)
@@ -86,13 +80,11 @@ class TrainState:
     def assert_equal(self, model: Any, optim: Any, *, tag: str = "") -> None:
         cur = {n: p for n, p in model.named_parameters()}
 
-        # params
         for n, ref in self.params.items():
             d = _max_abs_diff(cur[n].data, ref)
             if d != 0.0:
                 raise AssertionError(f"[state] param mismatch {tag}: {n} maxdiff={d}")
 
-        # grads
         for n, refg in self.grads.items():
             pg = getattr(cur[n], "grad", None)
             if refg is None:
@@ -105,7 +97,6 @@ class TrainState:
                 if d != 0.0:
                     raise AssertionError(f"[state] grad mismatch {tag}: {n} maxdiff={d}")
 
-        # moments
         for i in self.adam_m.keys():
             dm = _max_abs_diff(optim.m[i].data, self.adam_m[i])
             dv = _max_abs_diff(optim.v[i].data, self.adam_v[i])
@@ -114,7 +105,6 @@ class TrainState:
             if dv != 0.0:
                 raise AssertionError(f"[state] v mismatch {tag}: idx={i} maxdiff={dv}")
 
-        # scalars (match PR3 behavior: compare as int/float)
         if int(optim.step.item()) != int(self.step.item()):
             raise AssertionError(
                 f"[state] step mismatch {tag}: {int(optim.step.item())} != {int(self.step.item())}"

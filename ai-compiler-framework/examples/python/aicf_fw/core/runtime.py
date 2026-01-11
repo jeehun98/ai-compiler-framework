@@ -1,13 +1,42 @@
-# aicf_fw/core/executor.py
+# aicf_fw/core/runtime.py
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 
 import torch
 
 from aicf_fw.backend import get_backend
 from aicf_fw.core.ir import IRGraph
+
+
+@torch.no_grad()
+def warmup_capture_safe(
+    *,
+    train_step: Callable[[], None],
+    runs: int = 1,
+    sync: bool = True,
+) -> None:
+    """
+    Capture 전에 모든 '포인터가 고정돼야 하는' 버퍼를 미리 materialize.
+
+    - BufferPool/activation 등 런타임 할당
+    - leaf parameter.grad 할당
+    - 커널 lazy init(첫 호출 때 생성되는 것들) 방출
+    """
+    if runs <= 0:
+        return
+
+    # capture 안에서 호출되면 정책 깨짐
+    from aicf_fw.core.autograd import in_capture
+    if in_capture():
+        raise RuntimeError("warmup_capture_safe() must be called OUTSIDE capture.")
+
+    for _ in range(runs):
+        train_step()
+
+    if sync:
+        torch.cuda.synchronize()
 
 
 @dataclass
@@ -21,13 +50,12 @@ class IRExecutor:
     ir: IRGraph
     lowered: List[Dict[str, Any]]
     env: Dict[int, torch.Tensor]
-    backend: Any
+    backend: Any = None
 
     @staticmethod
     def from_artifact(art: Any) -> "IRExecutor":
         if not hasattr(art, "runtime_env"):
             raise RuntimeError("IRExecutor.from_artifact: artifact has no runtime_env()")
-
         env = art.runtime_env()
         if not isinstance(env, dict) or len(env) == 0:
             aname = getattr(art, "name", "<unnamed>")
@@ -35,7 +63,7 @@ class IRExecutor:
                 f"IRExecutor.from_artifact: empty env for artifact={aname}. "
                 "Attach env first: art.attach_env(vid->torch.Tensor)."
             )
-        return IRExecutor(ir=art.ir, lowered=art.lowered, env=dict(env), backend=art.backend)
+        return IRExecutor(ir=art.ir, lowered=art.lowered, env=dict(env), backend=getattr(art, "backend", None))
 
     def _get_t(self, vid: int, *, op: str = "?", io: str = "?") -> torch.Tensor:
         t = self.env.get(int(vid), None)
@@ -66,20 +94,19 @@ class IRExecutor:
             inputs_t = [self._get_t(v, op=op, io="in") for v in in_vids]
             outputs_t = [self._get_t(v, op=op, io="out") for v in out_vids]
 
-            # -----------------------------
-            # CRITICAL: force in-place semantics for adam_step
+            # force in-place semantics for adam_step
             # inputs:  [p_in, g_in, m_in, v_in, bc1, bc2]
             # outputs: [p_out, m_out, v_out]
-            # -----------------------------
             if op == "adam_step":
                 if len(inputs_t) < 4 or len(outputs_t) < 3:
-                    raise RuntimeError(f"IRExecutor: malformed adam_step io. inputs={len(inputs_t)} outputs={len(outputs_t)}")
+                    raise RuntimeError(
+                        f"IRExecutor: malformed adam_step io. inputs={len(inputs_t)} outputs={len(outputs_t)}"
+                    )
                 outputs_t = [inputs_t[0], inputs_t[2], inputs_t[3]]
 
-            # dispatch
             bk.op_call_out(op, inputs_t, outputs_t, attrs)
 
-            # SSA rebind: bind output vids to the tensor handles we used
+            # SSA rebind
             for ov, ot in zip(out_vids, outputs_t):
                 self.env[int(ov)] = ot
 

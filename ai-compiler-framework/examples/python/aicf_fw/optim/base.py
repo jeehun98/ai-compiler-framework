@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional, Union
 
-from aicf_fw.core.tensor import Tensor
+from aicf_fw.core.autograd import Tensor
 from aicf_fw.core.module import Module
 
 ParamsLike = Union[Module, Iterable[Tensor]]

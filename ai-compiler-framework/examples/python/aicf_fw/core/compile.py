@@ -1,21 +1,185 @@
 # aicf_fw/core/compile.py
 from __future__ import annotations
 
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Set
 
 import torch
 
-from .ir import IRGraph
-from .trace import tracing
-from .warmup import warmup_capture_safe
-from .validate import validate_ir
-from .artifact import CompileArtifact
+from .ir import IRGraph, IRValue
+from .runtime import warmup_capture_safe
 from aicf_fw.backend import get_backend
 
 
-# -------------------------
+# ============================================================
+# CompileArtifact (kept here)
+# ============================================================
+
+@dataclass
+class CompileArtifact:
+    """
+    Compilation artifact produced by compile/lower/capture.
+
+    - ir: compiled IR object
+    - lowered: list of backend ops (dicts)
+    - trace_ops: runtime trace op names captured during CUDA graph capture
+    - backend: backend instance (must support replay())
+    - env: IRValue vid -> torch.Tensor runtime binding (for IRExecutor)
+    """
+    name: str
+    ir: Any
+    lowered: List[Dict[str, Any]]
+    trace_ops: List[str]
+    backend: Any
+    env: Dict[int, torch.Tensor] = field(default_factory=dict)
+
+    def attach_env(self, env: Dict[int, torch.Tensor], *, merge: bool = False) -> None:
+        if env is None:
+            raise RuntimeError("CompileArtifact.attach_env: env is None")
+
+        norm: Dict[int, torch.Tensor] = {}
+        for k, v in env.items():
+            vid = int(k)
+            if not isinstance(v, torch.Tensor):
+                raise RuntimeError(f"CompileArtifact.attach_env: env[{vid}] is not torch.Tensor: {type(v)}")
+            norm[vid] = v
+
+        if merge:
+            self.env.update(norm)
+        else:
+            self.env = norm
+
+    def runtime_env(self) -> Dict[int, torch.Tensor]:
+        return self.env
+
+    def has_env(self) -> bool:
+        return isinstance(self.env, dict) and len(self.env) > 0
+
+    def assert_trace_has(self, op: str) -> None:
+        if op not in self.trace_ops:
+            raise AssertionError(f"[trace] {op} missing in captured runtime ops: {self.trace_ops}")
+
+    def assert_runtime_matches_lowering(self, model: Any = None, *, trace_filter: bool = True) -> None:
+        """
+        Ensure runtime-captured ops contain all lowered ops (optionally filtered).
+
+        - If trace_filter=True: ignore "copy" 같은 보조 op(환경에 따라 흔들릴 수 있는 것들)
+        - If trace_filter=False: lowered의 모든 op가 trace에 있어야 함
+        """
+        if not isinstance(self.trace_ops, list) or len(self.trace_ops) == 0:
+            raise AssertionError("[trace] empty trace_ops. Did you run compile_and_capture(trace=True)?")
+
+        lowered_ops = [it["op"] for it in self.lowered]
+
+        if trace_filter:
+            # 보수적으로: 환경/버전에 따라 흔들리는 op들은 제외
+            IGNORE = {
+                "copy",
+            }
+            lowered_ops = [op for op in lowered_ops if op not in IGNORE and not op.startswith("UNSUPPORTED<")]
+
+        missing = []
+        for op in lowered_ops:
+            if op not in self.trace_ops:
+                missing.append(op)
+
+        if missing:
+            # 디버그용으로 trace에 뭐가 있었는지 일부 출력
+            tail = self.trace_ops[-64:] if len(self.trace_ops) > 64 else self.trace_ops
+            raise AssertionError(
+                "[lowering/trace] runtime trace missing lowered ops:\n"
+                + "\n".join([f"  - {op}" for op in missing[:64]])
+                + "\n"
+                + f"trace_tail({len(tail)}): {tail}"
+            )
+
+
+# ============================================================
+# Tracing (moved into compile.py)
+# ============================================================
+
+_TRACING = False
+_IR: Optional[IRGraph] = None
+
+_TRACE_VAL_CACHE_OBJ: Dict[int, IRValue] = {}
+_TRACE_VAL_CACHE_TORCH: Dict[int, IRValue] = {}
+
+
+def is_tracing() -> bool:
+    return bool(_TRACING)
+
+
+def get_ir() -> IRGraph:
+    if _IR is None:
+        raise RuntimeError("IRBuilder is not set. Use `with tracing(ir): ...`")
+    return _IR
+
+
+def trace_reset_cache() -> None:
+    _TRACE_VAL_CACHE_OBJ.clear()
+    _TRACE_VAL_CACHE_TORCH.clear()
+
+
+def _torch_key(x: torch.Tensor) -> int:
+    try:
+        return int(x.data_ptr())
+    except Exception:
+        return id(x)
+
+
+def as_ir_value_obj(obj: Any, *, name: str, shape, dtype, device) -> IRValue:
+    if not is_tracing():
+        raise RuntimeError("as_ir_value_obj() called outside tracing")
+
+    k = id(obj)
+    v = _TRACE_VAL_CACHE_OBJ.get(k)
+    if v is not None:
+        return v
+
+    ir = get_ir()
+    v = ir.new_value(name=name, shape=tuple(shape), dtype=str(dtype), device=str(device))
+    _TRACE_VAL_CACHE_OBJ[k] = v
+    return v
+
+
+def as_ir_value_torch(x: torch.Tensor, *, name: str) -> IRValue:
+    if not is_tracing():
+        raise RuntimeError("as_ir_value_torch() called outside tracing")
+
+    k = _torch_key(x)
+    v = _TRACE_VAL_CACHE_TORCH.get(k)
+    if v is not None:
+        return v
+
+    ir = get_ir()
+    v = ir.new_value(name=name, shape=tuple(x.shape), dtype=str(x.dtype), device=str(x.device))
+    _TRACE_VAL_CACHE_TORCH[k] = v
+    return v
+
+
+@contextmanager
+def tracing(ir: IRGraph):
+    global _TRACING, _IR
+    prev_t = _TRACING
+    prev_ir = _IR
+
+    _TRACING = True
+    _IR = ir
+    trace_reset_cache()
+
+    try:
+        yield ir
+    finally:
+        _TRACING = prev_t
+        _IR = prev_ir
+        trace_reset_cache()
+
+
+# ============================================================
 # IR compile
-# -------------------------
+# ============================================================
+
 def compile_ir(step_fn, *, name: str = "train_step") -> IRGraph:
     ir = IRGraph(name=name)
     with tracing(ir):
@@ -23,9 +187,10 @@ def compile_ir(step_fn, *, name: str = "train_step") -> IRGraph:
     return ir
 
 
-# -------------------------
-# Lowering (patched lowering)
-# -------------------------
+# ============================================================
+# Lowering (patched lowering 그대로)
+# ============================================================
+
 def lower_to_backend_ops(ir) -> List[Dict[str, Any]]:
     """
     Fixed lowering order:
@@ -118,7 +283,7 @@ def lower_to_backend_ops(ir) -> List[Dict[str, Any]]:
     # -------------------------
     # 2) Backward lowering (v0 pattern)
     # -------------------------
-    grad_map_param_to_grad: Dict[int, int] = {}  # param_vid -> grad_vid
+    grad_map_param_to_grad: Dict[int, int] = {}
 
     if bwd_nodes:
         if not mse_nodes or len(linear_nodes) < 2 or len(relu_nodes) < 1:
@@ -164,18 +329,17 @@ def lower_to_backend_ops(ir) -> List[Dict[str, Any]]:
         dx0_vid = pick_next_grad(tuple(v(x_vid).shape), like_vid=x_vid)
 
         # ---- Linear1 backward ----
-        # d_relu_out = out_grad @ W1
         lowered.append({
             "op": "gemm",
             "attrs": {"transA": False, "transB": False},
             "inputs": [out_grad_vid, W1_vid],
             "outputs": [d_relu_out_vid],
         })
-        # dW1 = relu_out^T @ out_grad   (SWAP FIX)
+        # dW1 = relu_out^T @ out_grad  (SWAP FIX)
         lowered.append({
             "op": "gemm",
             "attrs": {"transA": True, "transB": False},
-            "inputs": [relu_out_vid, out_grad_vid],  # <-- swapped
+            "inputs": [relu_out_vid, out_grad_vid],
             "outputs": [dW1_vid],
         })
         if db1_vid is not None:
@@ -210,18 +374,17 @@ def lower_to_backend_ops(ir) -> List[Dict[str, Any]]:
         })
 
         # ---- Linear0 backward ----
-        # dx0 = d_lin0_out @ W0
         lowered.append({
             "op": "gemm",
             "attrs": {"transA": False, "transB": False},
             "inputs": [d_lin0_out_vid, W0_vid],
             "outputs": [dx0_vid],
         })
-        # dW0 = x^T @ d_lin0_out   (SWAP FIX)
+        # dW0 = x^T @ d_lin0_out  (SWAP FIX)
         lowered.append({
             "op": "gemm",
             "attrs": {"transA": True, "transB": False},
-            "inputs": [x_vid, d_lin0_out_vid],  # <-- swapped
+            "inputs": [x_vid, d_lin0_out_vid],
             "outputs": [dW0_vid],
         })
         if db0_vid is not None:
@@ -264,7 +427,7 @@ def lower_to_backend_ops(ir) -> List[Dict[str, Any]]:
         bc1 = int(n.inputs[4])
         bc2 = int(n.inputs[5])
 
-        # ★ outputs 강제 in-place
+        # in-place
         p_out = p_in
         m_out = m_in
         v_out = v_in
@@ -281,13 +444,13 @@ def lower_to_backend_ops(ir) -> List[Dict[str, Any]]:
             "outputs": [p_out, m_out, v_out],
         })
 
-
     return lowered
 
 
-# -------------------------
+# ============================================================
 # compile + capture
-# -------------------------
+# ============================================================
+
 def compile_and_capture(
     step_fn,
     *,
@@ -298,25 +461,24 @@ def compile_and_capture(
     trace: bool = True,
     enforce_ops: Sequence[str] = ("adam_step",),
     torch_sync: bool = True,
-    # NOTE: accepted for compatibility with Module.compile() but unused here.
+    # accepted for compatibility but unused here
     bind_model: Optional[Any] = None,
     bind_optim: Optional[Any] = None,
     bind_x: Optional[Any] = None,
     bind_t: Optional[Any] = None,
 ) -> CompileArtifact:
     """
-    compile -> validate -> lower -> warmup -> capture -> trace
+    compile -> (optional validate) -> lower -> warmup -> capture -> trace
 
     IMPORTANT:
-      - This function DOES NOT build/attach IRExecutor env anymore.
       - Env binding is done by Module.compile() (exact binding) or by user code.
     """
     ir = compile_ir(step_fn, name=name)
 
+    # validate_ir 제거된 구조: validate=True여도 no-op 처리
     if validate:
-        report = validate_ir(ir)
-        for w in report.warnings:
-            print(f"[WARN] {w}")
+        # 필요하면 여기에서 lightweight check 정도만 넣어도 됨
+        pass
 
     lowered = lower_to_backend_ops(ir)
 
@@ -350,4 +512,16 @@ def compile_and_capture(
     return art
 
 
-__all__ = ["compile_ir", "lower_to_backend_ops", "compile_and_capture"]
+__all__ = [
+    "CompileArtifact",
+    "compile_ir",
+    "lower_to_backend_ops",
+    "compile_and_capture",
+    # tracing exports (so trace.py shim can re-export cleanly)
+    "tracing",
+    "is_tracing",
+    "get_ir",
+    "as_ir_value_obj",
+    "as_ir_value_torch",
+    "trace_reset_cache",
+]

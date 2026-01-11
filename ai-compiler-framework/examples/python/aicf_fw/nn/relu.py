@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from aicf_fw.core.module import Module
-from aicf_fw.core.tensor import Tensor
+from aicf_fw.core.autograd import Tensor
 from aicf_fw.core.functional import relu
 
 

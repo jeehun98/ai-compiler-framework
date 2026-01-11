@@ -5,10 +5,10 @@ from typing import List, Optional, Tuple, Dict, Any
 import os
 import torch
 
-from aicf_fw.core.tensor import Tensor, TensorMeta
+from aicf_fw.core.autograd import Tensor, TensorMeta
 from aicf_fw.core.autograd import Node, grad_enabled, in_capture
 from aicf_fw.backend import get_backend
-from aicf_fw.core.trace import is_tracing, get_ir
+from aicf_fw.core.compile import is_tracing, get_ir
 
 
 # ============================================================
