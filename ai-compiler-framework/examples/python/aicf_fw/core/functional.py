@@ -544,7 +544,6 @@ def bias_corr_out(
     )
     return bc1_inv, bc2_inv
 
-
 def adam_step_(
     p: Tensor,
     g: Tensor,
@@ -558,49 +557,41 @@ def adam_step_(
     eps: float,
 ) -> None:
     """
-    TRACING:
-      - p/m/v are SSA updated: emit AdamStep and bind (Tensor -> new IRValue)
-      - grad 'g' is treated as a value (SSA) (fresh IRValue each time is OK)
+    TRACING (FIXED: in-place semantics):
+      - AdamStep outputs MUST alias inputs (p/m/v) to match capture/replay behavior
+      - grad g is still treated as a value input (can be SSA)
       - bc1_inv/bc2_inv linked by scalar-cache (BiasCorr outputs)
+
     RUNTIME:
       - dispatch via backend op_call_out("adam_step", ...)
-      - optional strict check using aicf_cuda trace_get()
     """
     if is_tracing():
         ir = get_ir()
 
+        # current SSA handles (may already be bound by previous ops)
         p_in = _as_ir_value(p, p.name or "p")
-
-        # grad: treat as a value input; if it's a Tensor we want linkage too.
-        # If you want grad to share identity across nodes, call _as_ir_value(g,...)
-        # Here: allow SSA fresh grad value for clarity.
         g_in = _as_ir_value(g, g.name or "grad")
-
         m_in = _as_ir_value(m, "m")
         v_in = _as_ir_value(v, "v")
 
         b1 = _as_ir_scalar(bc1_inv, "bc1_inv")
         b2 = _as_ir_scalar(bc2_inv, "bc2_inv")
 
-        p_out = ir.new_value(name=p.name or "p", shape=p.shape, dtype=str(p.dtype), device=str(p.device))
-        m_out = ir.new_value(name="m", shape=m.shape, dtype=str(m.dtype), device=str(m.device))
-        v_out = ir.new_value(name="v", shape=v.shape, dtype=str(v.dtype), device=str(v.device))
-
+        # ★ FIX: in-place outputs (same vids as inputs)
+        # This guarantees replay and IRExecutor write to the same storages.
         ir.emit(
             op="AdamStep",
             inputs=[p_in, g_in, m_in, v_in, b1, b2],
-            outputs=[p_out, m_out, v_out],
+            outputs=[p_in, m_in, v_in],
             attrs={"lr": float(lr), "beta1": float(beta1), "beta2": float(beta2), "eps": float(eps)},
         )
 
-        # ★ CRITICAL: update Tensor->IRValue to reflect SSA state update
-        _bind_tensor_ir_value(p, p_out)
-        _bind_tensor_ir_value(m, m_out)
-        _bind_tensor_ir_value(v, v_out)
+        # ★ FIX: do NOT rebind p/m/v to new IRValues (there are none now).
+        # Keeping bindings intact is correct because outputs are same vids.
         return
 
     # -------------------------
-    # RUNTIME PATH
+    # RUNTIME PATH (unchanged)
     # -------------------------
     if p.data is None or m.data is None or v.data is None:
         raise RuntimeError("F.adam_step_: p/m/v has no data buffer (None).")
@@ -620,7 +611,7 @@ def adam_step_(
         before = aicf.trace_get().count("adam_step")
 
     inputs_t = [p.data, g.data, m.data, v.data, bc1_inv, bc2_inv]
-    outputs_t = [p.data, m.data, v.data]
+    outputs_t = [p.data, m.data, v.data]  # in-place
 
     bk.op_call_out("adam_step", inputs_t, outputs_t, attrs)
 

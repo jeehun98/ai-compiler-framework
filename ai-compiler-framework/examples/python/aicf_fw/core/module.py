@@ -14,20 +14,12 @@ LossKind = Literal["mse"]
 class Module:
     """
     Minimal nn.Module-like base.
-    - Registers parameters and child modules.
-    - Provides parameters()/named_parameters()/modules()/named_modules()
-    - zero_grad() included.
-
-    Added:
-    - compile(): compile+warmup+capture+trace into a CompileArtifact and store it.
-    - replay(): replay captured CUDA graph for the compiled step.
-    - get_artifact(): access last CompileArtifact.
     """
 
     def __init__(self) -> None:
         object.__setattr__(self, "_parameters", OrderedDict())  # name -> Tensor
         object.__setattr__(self, "_modules", OrderedDict())     # name -> Module
-        object.__setattr__(self, "_compiled_artifact", None)    # CompileArtifact | None
+        object.__setattr__(self, "_compiled_artifact", None)
 
     # -------------------------
     # Registration
@@ -46,14 +38,8 @@ class Module:
             raise TypeError(f"module '{name}' must be a Module, got {type(module)}")
         self._modules[name] = module
 
-    # -------------------------
-    # Attribute hooks (optional convenience)
-    # - Assigning Tensor to attribute auto-registers as parameter
-    # - Assigning Module to attribute auto-registers as child
-    # -------------------------
     def __setattr__(self, name: str, value):
         if isinstance(value, Tensor):
-            # treat as parameter by default
             self.register_parameter(name, value)
         elif isinstance(value, Module):
             self.add_module(name, value)
@@ -67,7 +53,6 @@ class Module:
             yield p
 
     def named_parameters(self, prefix: str = "", recurse: bool = True) -> Iterator[Tuple[str, Tensor]]:
-        # de-dup by id for shared parameters
         seen = set()
 
         def _emit(name: str, t: Tensor):
@@ -79,12 +64,10 @@ class Module:
             seen.add(tid)
             yield name, t
 
-        # own params
         for n, p in self._parameters.items():
             full = f"{prefix}.{n}" if prefix else n
             yield from _emit(full, p)
 
-        # child params
         if recurse:
             for mn, m in self._modules.items():
                 child_prefix = f"{prefix}.{mn}" if prefix else mn
@@ -101,26 +84,11 @@ class Module:
             yield from m.named_modules(prefix=child_prefix)
 
     # -------------------------
-    # Mode (optional)
-    # -------------------------
-    def train(self, mode: bool = True):
-        for _, m in self._modules.items():
-            m.train(mode)
-        return self
-
-    def eval(self):
-        return self.train(False)
-
-    # -------------------------
     # Grad utils
     # -------------------------
     def zero_grad(self, set_to_none: bool = True) -> None:
         for p in self.parameters(recurse=True):
-            if set_to_none:
-                p.grad = None
-            else:
-                # if you want zeros, do it here (requires backend zeros_like)
-                p.grad = None
+            p.grad = None if set_to_none else None
 
     # -------------------------
     # Call
@@ -131,62 +99,17 @@ class Module:
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
 
-    # -------------------------
-    # checkpointing (minimal)
-    # -------------------------
-    def state_dict(self) -> Dict[str, torch.Tensor]:
-        sd: Dict[str, torch.Tensor] = {}
-        for name, p in self.named_parameters(recurse=True):
-            sd[name] = p.data.detach().clone()
-        return sd
-
-    def load_state_dict(self, sd: Dict[str, Any], strict: bool = True) -> None:
-        cur = {name: p for name, p in self.named_parameters(recurse=True)}
-        missing = []
-        unexpected = []
-
-        for k in sd.keys():
-            if k not in cur:
-                unexpected.append(k)
-
-        for k, p in cur.items():
-            if k not in sd:
-                missing.append(k)
-                continue
-            src = sd[k]
-            if not isinstance(src, torch.Tensor):
-                raise TypeError(f"state_dict[{k}] must be torch.Tensor, got {type(src)}")
-            if tuple(src.shape) != tuple(p.data.shape):
-                raise ValueError(f"shape mismatch for {k}: {tuple(src.shape)} vs {tuple(p.data.shape)}")
-            if src.dtype != p.data.dtype:
-                if strict:
-                    raise ValueError(f"dtype mismatch for {k}: {src.dtype} vs {p.data.dtype}")
-                src = src.to(dtype=p.data.dtype)
-            if src.device != p.data.device:
-                src = src.to(device=p.data.device)
-
-            # copy into existing tensor (preserves storage for CUDA Graph friendliness)
-            p.data.copy_(src)
-
-        if strict and (missing or unexpected):
-            raise KeyError(f"load_state_dict strict failed. missing={missing}, unexpected={unexpected}")
-
     # ============================================================
-    # New: compile/replay API (framework-style)
+    # compile/replay API
     # ============================================================
     def compile(
         self,
         *,
-        # Mode 1: explicit step_fn (advanced / custom)
         step_fn: Optional[Callable[[], None]] = None,
-
-        # Mode 2: auto train step (framework-style)
         optim: Optional[Any] = None,
         x: Optional[Any] = None,
         t: Optional[Any] = None,
         loss: LossKind = "mse",
-
-        # compile/capture options
         name: str = "train_step",
         warmup_runs: int = 2,
         warmup_sync: bool = True,
@@ -194,17 +117,8 @@ class Module:
         trace: bool = True,
         enforce_ops: Sequence[str] = ("adam_step",),
         torch_sync: bool = True,
+        attach_env: bool = True,
     ):
-        """
-        Compile + validate + lower + warmup + CUDA graph capture + runtime trace.
-
-        Two modes:
-          - step_fn is provided: compile exactly that closure.
-          - step_fn is None: build a standard train-step with (optim, x, t, loss).
-
-        Returns:
-          CompileArtifact (also saved into self._compiled_artifact)
-        """
         from aicf_fw.core.compile import compile_and_capture
         from aicf_fw.core.autograd import backward as autograd_backward
         from aicf_fw.core import functional as F
@@ -234,65 +148,25 @@ class Module:
             enforce_ops=tuple(enforce_ops),
             torch_sync=torch_sync,
         )
-        env = _build_env_exact(art, model=self, optim=optim, x=x, t=t)
-        art.attach_env(env)
+
+        if attach_env:
+            env = _build_env_exact(art, model=self, optim=optim, x=x, t=t)
+            art.attach_env(env)
+
         object.__setattr__(self, "_compiled_artifact", art)
         return art
 
     def replay(self) -> None:
-        """
-        Replay captured CUDA graph for the last compiled step.
-        """
         art = getattr(self, "_compiled_artifact", None)
         if art is None:
             raise RuntimeError("Model is not compiled. Call model.compile(...) first.")
         art.backend.replay()
 
     def get_artifact(self):
-        """
-        Get last CompileArtifact.
-        """
         art = getattr(self, "_compiled_artifact", None)
         if art is None:
             raise RuntimeError("Model is not compiled. Call model.compile(...) first.")
         return art
-
-    def compile_train(
-        self,
-        *,
-        optim: Any,
-        input_spec: Dict[str, Tuple[Tuple[int, ...], torch.dtype, str]],
-        loss: str = "mse",
-        name: str = "train_step",
-        warmup_runs: int = 2,
-        warmup_sync: bool = True,
-        validate: bool = True,
-        trace: bool = True,
-        enforce_ops: Sequence[str] = ("adam_step",),
-        torch_sync: bool = True,
-    ):
-        """
-        Framework-style training compile:
-        - allocates static input buffers from input_spec
-        - captures a CUDA graph that reads those buffers
-        - returns TrainGraph which can be fed via set_inputs() + replay()
-        """
-        from aicf_fw.core.train_graph import TrainGraph
-
-        tg = TrainGraph(
-            self,
-            optim,
-            input_spec=input_spec,
-            loss=loss,  # type: ignore[arg-type]
-            name=name,
-            warmup_runs=warmup_runs,
-            warmup_sync=warmup_sync,
-            validate=validate,
-            trace=trace,
-            enforce_ops=tuple(enforce_ops),
-            torch_sync=torch_sync,
-        )
-        return tg
 
 
 def _dtype_from_ir_dtype_str(s: str) -> torch.dtype:
@@ -305,181 +179,181 @@ def _dtype_from_ir_dtype_str(s: str) -> torch.dtype:
         return torch.bfloat16
     if "int32" in ss or "i32" in ss:
         return torch.int32
-    # fallback
+    if "int64" in ss or "i64" in ss:
+        return torch.int64
+    return torch.float32
+
+# aicf_fw/core/module.py 안의 _build_env_exact 교체
+from typing import Dict, List, Tuple, Any
+import torch
+
+
+def _dtype_from_ir_dtype_str(s: str) -> torch.dtype:
+    ss = str(s)
+    if "float32" in ss or "f32" in ss:
+        return torch.float32
+    if "float16" in ss or "f16" in ss:
+        return torch.float16
+    if "bfloat16" in ss or "bf16" in ss:
+        return torch.bfloat16
+    if "int32" in ss or "i32" in ss:
+        return torch.int32
+    if "int64" in ss or "i64" in ss:
+        return torch.int64
     return torch.float32
 
 
-def _build_env_exact(art, model, optim, x, t) -> Dict[int, torch.Tensor]:
+def _build_env_exact(art, *, model, optim, x, t) -> Dict[int, torch.Tensor]:
     """
-    Deterministic vid->torch.Tensor binding.
-    We bind:
-      - params, adam m/v, grads
-      - step scalar
-      - bias_corr outputs (bc1_inv, bc2_inv)
-      - x/t
-      - forward intermediates by allocating (safe for IRExecutor)
-      - SSA alias rules for in-place ops
+    Exact vid->torch.Tensor binding for IRExecutor.
+
+    Rules:
+      - Bind x/t by IRValue.name == 'x'/'t'
+      - Bind model params by Linear node param vids -> model.named_parameters() order
+      - Bind Adam state by param index:
+          step, bc1_inv, bc2_inv come from optim
+          m/v come from optim.m[i].data / optim.v[i].data
+          grad comes from optim.params[i].grad (must exist after warmup)
+      - Allocate intermediates needed by lowered ops
+      - Apply SSA alias rules (bias_add/step_inc/copy), but adam_step in-place is enforced in IRExecutor too.
     """
     ir = art.ir
     lowered = art.lowered
-
     env: Dict[int, torch.Tensor] = {}
 
-    # -------------------------
-    # helper: allocate by IRValue meta
-    # -------------------------
     def alloc_for_vid(vid: int) -> torch.Tensor:
         v = ir.values[int(vid)]
         device = torch.device(str(v.device))
         dtype = _dtype_from_ir_dtype_str(str(v.dtype))
         shape = tuple(v.shape)
-        # scalar: allow shape=() or (1,) depending on your IR
         return torch.empty(shape, device=device, dtype=dtype)
 
     # -------------------------
-    # 1) bind x / t (exact)
+    # 1) bind x / t
     # -------------------------
-    # Find IR values named "x" and "t" (or whatever you used)
+    x_t = x.data if hasattr(x, "data") else x
+    t_t = t.data if hasattr(t, "data") else t
+
     for vid, val in ir.values.items():
         nm = getattr(val, "name", "")
         if nm == "x":
-            env[int(vid)] = x.data
+            env[int(vid)] = x_t
         elif nm == "t":
-            env[int(vid)] = t.data
+            env[int(vid)] = t_t
 
     # -------------------------
-    # 2) bind model params (exact by (name, shape))
+    # 2) bind model params via Linear node vids (order-stable)
     # -------------------------
-    # IR side param naming varies; easiest is shape/dtype match + stable ordering.
-    # We use model.named_parameters() order and match by shape/dtype.
-    params: List[torch.Tensor] = [p.data for _, p in list(model.named_parameters())]
-    param_used = [False] * len(params)
-
-    def match_param(shape: Tuple[int, ...], dtype: torch.dtype) -> Optional[torch.Tensor]:
-        for i, p in enumerate(params):
-            if param_used[i]:
-                continue
-            if tuple(p.shape) == tuple(shape) and p.dtype == dtype:
-                param_used[i] = True
-                return p
-        return None
-
-    # bind IR values named "param" first if present
-    for vid, val in ir.values.items():
-        if getattr(val, "name", "") in ("param", "weight", "bias"):
-            dt = _dtype_from_ir_dtype_str(str(val.dtype))
-            p = match_param(tuple(val.shape), dt)
-            if p is not None:
-                env[int(vid)] = p
-
-    # fallback: any remaining unbound values that look like params by shape (8,8)/(8,)
-    for vid, val in ir.values.items():
-        if int(vid) in env:
+    # Collect param vids in execution order: W0,b0,W1,b1,...
+    param_vids: List[int] = []
+    for n in ir.nodes:
+        if n.op != "Linear":
             continue
-        if getattr(val, "name", "") not in ("param", "weight", "bias"):
-            continue
-        dt = _dtype_from_ir_dtype_str(str(val.dtype))
-        p = match_param(tuple(val.shape), dt)
-        if p is not None:
-            env[int(vid)] = p
+        W_vid = int(n.inputs[1])
+        if W_vid not in param_vids:
+            param_vids.append(W_vid)
+        if bool(n.attrs.get("bias", False)):
+            b_vid = int(n.inputs[2])
+            if b_vid not in param_vids:
+                param_vids.append(b_vid)
+
+    model_params: List[torch.Tensor] = [p.data for _, p in list(model.named_parameters())]
+    if len(model_params) != len(param_vids):
+        # not fatal, but it means your param discovery assumption broke
+        raise RuntimeError(f"_build_env_exact: param count mismatch. model={len(model_params)} ir_linear_params={len(param_vids)}")
+
+    for vid, p in zip(param_vids, model_params):
+        env[int(vid)] = p
 
     # -------------------------
-    # 3) bind adam state: step, m, v, grads
+    # 3) bind Adam scalar state (step, bc1_inv, bc2_inv) EXACT
     # -------------------------
-    # You already have TrainState capture util; but we can bind directly from optim if your Adam stores tensors.
-    # We'll traverse optim fields and collect tensors, then match by (shape,dtype) and IRValue.name tags.
-    tensor_pool: List[torch.Tensor] = []
+    if optim is not None:
+        # These are torch tensors (not wrappers) in your Adam
+        # step: int32 scalar
+        # bc1_inv/bc2_inv: float32 scalars
+        step_t = getattr(optim, "step", None)
+        bc1_t = getattr(optim, "bc1_inv", None)
+        bc2_t = getattr(optim, "bc2_inv", None)
 
-    def collect(obj: Any):
-        if isinstance(obj, torch.Tensor):
-            tensor_pool.append(obj)
-            return
-        if hasattr(obj, "data") and isinstance(getattr(obj, "data"), torch.Tensor):
-            tensor_pool.append(obj.data)
-        if isinstance(obj, (list, tuple)):
-            for z in obj: collect(z)
-        if isinstance(obj, dict):
-            for z in obj.values(): collect(z)
-        if hasattr(obj, "__dict__"):
-            for z in obj.__dict__.values(): collect(z)
-
-    collect(optim)
-
-    # dedup
-    uniq = {}
-    for tt in tensor_pool:
-        if tt.is_cuda:
-            uniq[int(tt.data_ptr())] = tt
-    tensor_pool = list(uniq.values())
-
-    def match_pool(shape: Tuple[int, ...], dtype: torch.dtype) -> Optional[torch.Tensor]:
-        for tt in tensor_pool:
-            if tuple(tt.shape) == tuple(shape) and tt.dtype == dtype:
-                return tt
-        return None
-
-    # Bind step scalar by name
-    for vid, val in ir.values.items():
-        if getattr(val, "name", "") in ("step", "global_step", "adam_step_i32", "step_i32"):
-            dt = _dtype_from_ir_dtype_str(str(val.dtype))
-            st = match_pool(tuple(val.shape), dt)
-            if st is not None:
-                env[int(vid)] = st
-
-    # Bind grad/m/v by name if IR names exist ("grad","adam_m","adam_v")
-    for vid, val in ir.values.items():
-        nm = getattr(val, "name", "")
-        if nm in ("grad", "adam_m", "adam_v"):
-            if int(vid) in env:
-                continue
-            dt = _dtype_from_ir_dtype_str(str(val.dtype))
-            tt = match_pool(tuple(val.shape), dt)
-            if tt is not None:
-                env[int(vid)] = tt
+        # Bind by IRValue.name where possible
+        for vid, val in ir.values.items():
+            nm = getattr(val, "name", "")
+            if nm in ("step", "step_i32", "global_step") and step_t is not None:
+                env[int(vid)] = step_t
+            elif nm in ("bc1_inv", "bias_corr_out1") and bc1_t is not None:
+                env[int(vid)] = bc1_t
+            elif nm in ("bc2_inv", "bias_corr_out2") and bc2_t is not None:
+                env[int(vid)] = bc2_t
 
     # -------------------------
-    # 4) bind bias_corr outputs (bc1_inv, bc2_inv) by name or allocate
+    # 4) bind Adam per-param state + grads EXACT by param index
     # -------------------------
-    for vid, val in ir.values.items():
-        nm = getattr(val, "name", "")
-        if nm in ("bc1_inv", "bc2_inv", "bias_corr_out1", "bias_corr_out2"):
-            if int(vid) not in env:
-                # try pool first, else alloc
-                dt = _dtype_from_ir_dtype_str(str(val.dtype))
-                tt = match_pool(tuple(val.shape), dt)
-                env[int(vid)] = tt if tt is not None else alloc_for_vid(int(vid))
+    if optim is not None:
+        # optim.params is list of aicf Tensor (with .data and .grad)
+        oparams = getattr(optim, "params", None)
+        om = getattr(optim, "m", None)
+        ov = getattr(optim, "v", None)
+        if oparams is None or om is None or ov is None:
+            raise RuntimeError("_build_env_exact: optim is missing params/m/v required for exact binding")
+
+        # Build a mapping for each adam_step op instance in lowered:
+        # We assume lowered optim slice is in param order (it is in your lowering loop).
+        adam_items = [it for it in lowered if it["op"] == "adam_step"]
+        if len(adam_items) != len(oparams):
+            raise RuntimeError(f"_build_env_exact: adam_step count mismatch. lowered={len(adam_items)} optim.params={len(oparams)}")
+
+        for i, it in enumerate(adam_items):
+            in_vids = list(it.get("inputs", []))
+            # inputs: [p_in, g_in, m_in, v_in, bc1, bc2]
+            if len(in_vids) < 6:
+                raise RuntimeError(f"_build_env_exact: bad adam_step inputs at i={i}: {in_vids}")
+
+            p_in, g_in, m_in, v_in = map(int, in_vids[:4])
+
+            # p: from model param binding (already set)
+            # grad: from oparams[i].grad (aicf Tensor wrapper)
+            gwrap = getattr(oparams[i], "grad", None)
+            if gwrap is None:
+                raise RuntimeError(
+                    f"_build_env_exact: optim.params[{i}].grad is None. "
+                    "Warmup must materialize all grad buffers before IRExecutor compare."
+                )
+            env[g_in] = gwrap.data
+
+            # m/v: from optim.m[i] / optim.v[i] (aicf Tensor wrapper)
+            env[m_in] = om[i].data
+            env[v_in] = ov[i].data
+
+            # NOTE: p_in already bound to param tensor, but we can sanity overwrite:
+            env[p_in] = env[p_in]
 
     # -------------------------
-    # 5) allocate remaining tensors required by lowered ops
+    # 5) allocate remaining tensors needed by lowered ops
     # -------------------------
     for it in lowered:
-        for vid in it.get("inputs", []):
-            vid = int(vid)
-            if vid not in env:
-                # must exist for execution; allocate if it's an intermediate
-                env[vid] = alloc_for_vid(vid)
-        for vid in it.get("outputs", []):
-            vid = int(vid)
-            if vid not in env:
-                env[vid] = alloc_for_vid(vid)
+        for iv in it.get("inputs", []):
+            iv = int(iv)
+            if iv not in env:
+                env[iv] = alloc_for_vid(iv)
+        for ovv in it.get("outputs", []):
+            ovv = int(ovv)
+            if ovv not in env:
+                env[ovv] = alloc_for_vid(ovv)
 
     # -------------------------
-    # 6) SSA alias rules (critical for params actually changing)
+    # 6) SSA alias rules for obvious in-place ops
     # -------------------------
     for it in lowered:
         op = it["op"]
         ins = list(it.get("inputs", []))
         outs = list(it.get("outputs", []))
 
-        if op in ("bias_add", "grad_zero", "step_inc", "copy"):
+        if op in ("bias_add", "step_inc", "copy"):
             if ins and outs:
                 env[int(outs[0])] = env[int(ins[0])]
 
-        if op == "adam_step":
-            # outputs alias inputs: (p_out,p_in), (m_out,m_in), (v_out,v_in)
-            if len(ins) >= 4 and len(outs) >= 3:
-                env[int(outs[0])] = env[int(ins[0])]
-                env[int(outs[1])] = env[int(ins[2])]
-                env[int(outs[2])] = env[int(ins[3])]
+        # adam_step in-place alias는 executor에서 강제하므로 여기선 굳이 안 해도 됨
+        # (해도 무방하지만, executor 강제가 더 안전)
 
     return env

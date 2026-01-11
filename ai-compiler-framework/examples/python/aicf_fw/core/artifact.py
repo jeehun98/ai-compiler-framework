@@ -1,4 +1,3 @@
-# aicf_fw/core/artifact.py
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -46,33 +45,33 @@ class CompileArtifact:
     trace_ops: List[str]
     backend: Any
 
-    # NEW: runtime bindings for IRExecutor (vid -> torch.Tensor)
+    # runtime bindings for IRExecutor (vid -> torch.Tensor)
     env: Dict[int, torch.Tensor] = field(default_factory=dict)
 
     # -------------------------
-    # NEW: runtime env API
+    # runtime env API
     # -------------------------
-    def attach_env(self, env: Dict[int, torch.Tensor]) -> None:
-        """
-        Attach/replace runtime env mapping (vid -> torch.Tensor).
-        Useful if you build env after compile_and_capture returns.
-        """
+    def attach_env(self, env: Dict[int, torch.Tensor], *, merge: bool = False) -> None:
         if env is None:
             raise RuntimeError("CompileArtifact.attach_env: env is None")
+
         norm: Dict[int, torch.Tensor] = {}
         for k, v in env.items():
             vid = int(k)
             if not isinstance(v, torch.Tensor):
                 raise RuntimeError(f"CompileArtifact.attach_env: env[{vid}] is not torch.Tensor: {type(v)}")
             norm[vid] = v
-        self.env = norm
+
+        if merge:
+            self.env.update(norm)
+        else:
+            self.env = norm
 
     def runtime_env(self) -> Dict[int, torch.Tensor]:
-        """
-        IRExecutor.from_artifact() will call this.
-        Must return a dict: vid(int) -> torch.Tensor.
-        """
         return self.env
+
+    def has_env(self) -> bool:
+        return isinstance(self.env, dict) and len(self.env) > 0
 
     # -------------------------
     # Existing checks
@@ -90,7 +89,7 @@ class CompileArtifact:
         opt_ops: Sequence[str] = ("step_inc", "bias_corr", "adam_step"),
     ) -> None:
         """
-        Ported from PR3: compare lowered ops vs runtime trace.
+        Compare lowered ops vs runtime trace.
         - If trace_filter=True: ignore some noisy ops + compare forward-slice and optim-slice.
         - Else: strict full sequence match.
         """
@@ -110,7 +109,6 @@ class CompileArtifact:
         tr = [op for op in trace_ops if op not in IGNORE]
         lo = list(lower_ops)
 
-        # forward slice until mse_grad (inclusive)
         tr_fw = tr[: tr.index("mse_grad") + 1] if "mse_grad" in tr else tr
         lo_fw = lo[: lo.index("mse_grad") + 1] if "mse_grad" in lo else lo
         if tr_fw != lo_fw:
@@ -120,7 +118,6 @@ class CompileArtifact:
                 f"  lower_fw={lo_fw}\n"
             )
 
-        # optim slice
         KEEP_OPT = set(opt_ops)
         tr_opt = [op for op in tr if op in KEEP_OPT]
         lo_opt = [op for op in lo if op in KEEP_OPT]
@@ -145,21 +142,16 @@ class CompileArtifact:
 
     @torch.no_grad()
     def assert_adam_state_mutates(self, model: Any, optim: Any, *, tag: str = "smoke") -> None:
-        """
-        Ported from PR3: one replay must advance step and mutate params + m/v.
-        """
         st0 = TrainState.capture(model, optim)
         self.backend.replay()
         torch.cuda.synchronize()
         st1 = TrainState.capture(model, optim)
 
-        # step must advance
         if int(st1.step.item()) == int(st0.step.item()):
             raise AssertionError(
                 f"[adam][{tag}] step did not advance on replay: {int(st0.step.item())} -> {int(st1.step.item())}"
             )
 
-        # params must change
         max_p = 0.0
         for n in st0.params.keys():
             max_p = max(max_p, _max_abs_diff(st1.params[n], st0.params[n]))
@@ -170,7 +162,6 @@ class CompileArtifact:
                 f"(3) captured step uses uninitialized static inputs. "
             )
 
-        # m/v must change
         max_m = 0.0
         max_v = 0.0
         for i in st0.adam_m.keys():
@@ -194,10 +185,6 @@ class CompileArtifact:
         loss_fn: Optional[Callable[[], float]] = None,
         tag: str = "",
     ) -> None:
-        """
-        Ported from PR3: snapshot full train state st0, run A sequence, restore, run B sequence,
-        and compare stepdiff sequences exactly.
-        """
         st0 = TrainState.capture(model, optim)
 
         if check_restore:
@@ -205,7 +192,6 @@ class CompileArtifact:
             torch.cuda.synchronize()
             st0.assert_equal(model, optim, tag=f"{tag}after-restore(pre-run)")
 
-        # Run A
         stepdiff_A: List[float] = []
         snaps = _snapshot_params(model)
         for i in range(replays):
@@ -218,13 +204,11 @@ class CompileArtifact:
                 if loss_fn is not None:
                     _ = loss_fn()
 
-        # Restore
         st0.restore(model, optim)
         torch.cuda.synchronize()
         if check_restore:
             st0.assert_equal(model, optim, tag=f"{tag}after-restore")
 
-        # Run B
         stepdiff_B: List[float] = []
         snaps = _snapshot_params(model)
         for i in range(replays):
@@ -242,10 +226,3 @@ class CompileArtifact:
                 raise AssertionError(
                     f"Replay determinism broken (stepdiff sequence) at iter {i:02d}: {a:.6e} != {b:.6e}"
                 )
-
-    def attach_env(self, env: Dict[int, torch.Tensor]) -> None:
-        self._env = dict(env)
-
-    def runtime_env(self) -> Dict[int, torch.Tensor]:
-        env = getattr(self, "_env", None)
-        return dict(env) if env is not None else {}

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any
 
 
 class IRValidationError(RuntimeError):
@@ -15,6 +15,16 @@ class IRValidationReport:
     warnings: list[str]
 
 
+# ------------------------------------------------------------
+# NEW: ops that are stateful / in-place (SSA exception)
+#  - These ops may "write back" into an existing value id.
+#  - Therefore:
+#      * allow multiple producers for their outputs
+#      * do not overwrite the first producer mapping (to avoid false use-before-define)
+# ------------------------------------------------------------
+_STATEFUL_INPLACE_OPS: set[str] = {"AdamStep", "StepInc", "BiasCorr"}
+
+
 def validate_ir(ir: Any, *, ruleset: str = "train_v0") -> IRValidationReport:
     """
     Validate IR invariants used by the training step pipeline.
@@ -22,6 +32,7 @@ def validate_ir(ir: Any, *, ruleset: str = "train_v0") -> IRValidationReport:
     Current ruleset ("train_v0"):
       - shape consistency for Linear/ReLU/MseGrad
       - topo + SSA single-producer + use-after-define
+        (NOTE: stateful/in-place ops are exceptions)
       - Backward node inputs must reference existing values (if Backward exists)
 
     Returns:
@@ -123,9 +134,22 @@ def _validate_ir_shape_consistency(ir: Any) -> list[str]:
 
 
 def _validate_ir_topo_ssa(ir: Any) -> list[str]:
+    """
+    Invariants:
+      - For normal ops: each value id must have a single producer.
+      - For stateful/in-place ops: outputs may reuse existing value ids (SSA exception).
+      - Use-after-define: if an input has a producer, that producer must appear before the consumer in topo order.
+        (IMPORTANT: we keep the FIRST producer mapping; in-place ops must NOT overwrite it.)
+    """
     produced_by: dict[Any, int] = {}
 
+    # Pass 1: build producer map (FIRST producer wins)
     for node in ir.nodes:
+        # In-place/stateful ops: do NOT register/overwrite producers for their outputs
+        # (they "mutate" existing storage / ids)
+        if getattr(node, "op", None) in _STATEFUL_INPLACE_OPS:
+            continue
+
         for vid in node.outputs:
             if vid in produced_by:
                 raise IRValidationError(
@@ -133,6 +157,7 @@ def _validate_ir_topo_ssa(ir: Any) -> list[str]:
                 )
             produced_by[vid] = node.id
 
+    # Pass 2: use-after-define check (only when we know a producer)
     for node in ir.nodes:
         for vid in node.inputs:
             if vid in produced_by:

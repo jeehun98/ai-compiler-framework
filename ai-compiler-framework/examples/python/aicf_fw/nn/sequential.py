@@ -1,4 +1,3 @@
-# aicf_fw/nn/sequential.py
 from __future__ import annotations
 
 from aicf_fw.core.module import Module
