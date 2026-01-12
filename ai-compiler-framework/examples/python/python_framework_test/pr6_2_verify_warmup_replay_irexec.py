@@ -1,8 +1,15 @@
 from __future__ import annotations
-import os, sys
+
 import os, sys
 from pathlib import Path
+import random
+import numpy as np
+import torch
 
+
+# ------------------------------------------------------------
+# Path bootstrap (same style as your previous tests)
+# ------------------------------------------------------------
 THIS = Path(__file__).resolve()
 EXAMPLES_PY = THIS.parents[1]  # .../examples/python
 if str(EXAMPLES_PY) not in sys.path:
@@ -13,10 +20,6 @@ PROJECT_ROOT = os.path.abspath(os.path.join(THIS_DIR, "../../../.."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-import random
-import numpy as np
-import torch
-
 
 # ------------------------------------------------------------
 # Config (env)
@@ -26,6 +29,10 @@ SEED = int(os.environ.get("AICF_SEED", "0"))
 WARMUP_RUNS = int(os.environ.get("AICF_WARMUP_RUNS", "2"))
 IR_EXEC_RUNS = int(os.environ.get("AICF_IR_EXEC_RUNS", "1"))
 PRINT_EVERY = int(os.environ.get("AICF_PRINT_EVERY", "0"))  # 0=never
+
+# tolerance for replay vs irexec delta check
+ATOL = float(os.environ.get("AICF_ATOL", "0.0"))
+RTOL = float(os.environ.get("AICF_RTOL", "0.0"))
 
 
 def seed_all(seed: int):
@@ -38,10 +45,6 @@ def seed_all(seed: int):
 
 def ok(msg: str):
     print(f"[OK] {msg}")
-
-
-def warn(msg: str):
-    print(f"[WARN] {msg}")
 
 
 def fail(msg: str, code: int = 1):
@@ -59,8 +62,7 @@ def max_param_diff(model, snap: dict[str, torch.Tensor]) -> float:
     m = 0.0
     for n, p in model.named_parameters():
         d = (p.data - snap[n]).abs().max().item()
-        if d > m:
-            m = float(d)
+        m = max(m, float(d))
     return m
 
 
@@ -76,9 +78,27 @@ def assert_params_changed(before: dict[str, torch.Tensor], after: dict[str, torc
     ok(f"[{tag}] params changed: {changed}/{len(before)}")
 
 
+@torch.no_grad()
+def assert_params_unchanged(before: dict[str, torch.Tensor], after: dict[str, torch.Tensor], *, tag: str):
+    changed = 0
+    for n, b in before.items():
+        a = after[n]
+        if not torch.equal(b, a):
+            changed += 1
+    if changed != 0:
+        raise RuntimeError(f"[{tag}] params CHANGED unexpectedly: {changed}/{len(before)}")
+    ok(f"[{tag}] params unchanged: {len(before) - changed}/{len(before)}")
+
+
+@torch.no_grad()
+def tensor_maxabs(t: torch.Tensor) -> float:
+    return float(t.detach().abs().max().item()) if t.numel() else 0.0
+
+
 def main():
-    print("=== PR6 verify: CUDA-graph replay vs IRExecutor eager ===")
+    print("=== PR6.2 verify: warmup(no-drift) + CUDA-graph replay vs IRExecutor eager ===")
     print(f"seed={SEED}, warmup_runs={WARMUP_RUNS}, replay_n={REPLAY_N}, ir_exec_runs={IR_EXEC_RUNS}")
+    print(f"atol={ATOL} rtol={RTOL}")
 
     if not torch.cuda.is_available():
         fail("CUDA not available")
@@ -120,16 +140,24 @@ def main():
     for n, p in list(model.named_parameters()):
         print("[param]", n, tuple(p.data.shape), p.data.dtype, p.data.device)
 
-    # enforce adam_step dispatch in runtime
+    # enforce adam_step dispatch in runtime (if you use this flag downstream)
     os.environ.setdefault("AICF_ENFORCE_ADAMSTEP_RUNTIME", "1")
 
-    # compile+capture (env attach should happen inside Module.compile)
+    # ------------------------------------------------------------
+    # (0) Snapshot before compile: to verify warmup drift-free
+    # ------------------------------------------------------------
+    st_pre = TrainState.capture(model, optim)
+    snap_pre = snapshot_named_params(model)
+
+    # ------------------------------------------------------------
+    # compile+capture
+    # ------------------------------------------------------------
     art = model.compile(
         optim=optim,
         x=x,
         t=t,
         loss="mse",
-        name="train_step_pr6",
+        name="train_step_pr6_2",
         warmup_runs=WARMUP_RUNS,
         warmup_sync=True,
         validate=True,
@@ -138,12 +166,22 @@ def main():
         torch_sync=True,
     )
 
-    # quick sanity: trace contains adam_step
+    # (1) Warmup drift-free check
+    # compile path executed warmup internally. 상태가 그대로여야 함.
+    st_post = TrainState.capture(model, optim)
+    snap_post = snapshot_named_params(model)
+
+    if int(st_post.step.item()) != int(st_pre.step.item()):
+        fail(f"[warmup] step drift: {int(st_pre.step.item())} -> {int(st_post.step.item())}")
+    assert_params_unchanged(snap_pre, snap_post, tag="warmup_no_drift")
+    ok(f"[warmup_no_drift] step stays {int(st_post.step.item())}")
+
+    # (2) trace vs lowering coverage
     art.assert_runtime_matches_lowering(model, trace_filter=True)
-    ok("[lowering/trace] forward-slice + optim-slice match")
+    ok("[lowering/trace] match OK")
 
     # ------------------------------------------------------------
-    # A) CUDA-graph replay mutates state
+    # (A) Replay mutates state
     # ------------------------------------------------------------
     st0 = TrainState.capture(model, optim)
     snap0 = snapshot_named_params(model)
@@ -160,26 +198,62 @@ def main():
     ok(f"[replay_once] step {int(st0.step.item())} -> {int(st1.step.item())}")
 
     # ------------------------------------------------------------
-    # B) IRExecutor eager run mutates params too (restore first)
+    # (B) IRExecutor eager run mutates params too (restore first)
     # ------------------------------------------------------------
     st0.restore(model, optim)
     torch.cuda.synchronize()
 
     exe = IRExecutor.from_artifact(art)
-    snap2 = snapshot_named_params(model)
 
+    snap2 = snapshot_named_params(model)
     for _ in range(IR_EXEC_RUNS):
         exe.run()
     torch.cuda.synchronize()
-
     snap3 = snapshot_named_params(model)
     assert_params_changed(snap2, snap3, tag="ir_exec")
     ok(f"[ir_exec] runs={IR_EXEC_RUNS}")
 
     # ------------------------------------------------------------
-    # C) Determinism: replay stepdiff sequence matches after restore
+    # (C) Replay vs IRExec single-step delta compare (tolerance)
     # ------------------------------------------------------------
+    # 기준 상태를 하나 잡고,
+    #  - replay 1회 후 delta
+    #  - restore 후 irexec 1회 후 delta
+    # 두 delta가 유사해야 함.
     st_base = TrainState.capture(model, optim)
+
+    # replay delta
+    st_base.restore(model, optim)
+    torch.cuda.synchronize()
+    snap_r0 = snapshot_named_params(model)
+    art.backend.replay()
+    torch.cuda.synchronize()
+    delta_replay = max_param_diff(model, snap_r0)
+
+    # irexec delta
+    st_base.restore(model, optim)
+    torch.cuda.synchronize()
+    snap_i0 = snapshot_named_params(model)
+    exe.run()
+    torch.cuda.synchronize()
+    delta_irexec = max_param_diff(model, snap_i0)
+
+    # compare
+    diff = abs(delta_replay - delta_irexec)
+    tol = ATOL + RTOL * max(abs(delta_replay), abs(delta_irexec))
+    if diff > tol:
+        fail(
+            "[replay_vs_irexec] delta mismatch "
+            f"replay={delta_replay:.6e} irexec={delta_irexec:.6e} diff={diff:.6e} tol={tol:.6e}"
+        )
+    ok(
+        f"[replay_vs_irexec] delta close: replay={delta_replay:.6e} irexec={delta_irexec:.6e} "
+        f"(diff={diff:.3e} tol={tol:.3e})"
+    )
+
+    # ------------------------------------------------------------
+    # (D) Determinism: replay stepdiff sequence matches after restore
+    # ------------------------------------------------------------
     st_base.restore(model, optim)
     torch.cuda.synchronize()
 

@@ -12,6 +12,7 @@ enum class Status : int32_t {
   kInvalidArgument = 5,
   kCudaError = 6,
   kOk = 7,
+  Internal = 8,
 };
 
 constexpr bool ok(Status s) { return s == Status::Ok; }

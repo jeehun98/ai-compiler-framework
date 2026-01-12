@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import torch
 
 from aicf_fw.core.autograd import Tensor, TensorMeta
@@ -58,6 +59,26 @@ class Adam:
             self.m[i] = Tensor(torch.zeros_like(p.data), requires_grad=False)
             self.v[i] = Tensor(torch.zeros_like(p.data), requires_grad=False)
 
+    # --------------------------------------------------------
+    # DEBUG HELPERS (AICF_ADAM_DEBUG=1)
+    # --------------------------------------------------------
+    def _dbg_on(self) -> bool:
+        return os.environ.get("AICF_ADAM_DEBUG", "0") == "1"
+
+
+    @staticmethod
+    def _tstat(tag: str, x) -> str:
+        t = x.data
+        # 캡처 중에는 item/mean/norm 같은 동기화 금지
+        if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+            return f"{tag:6s} ptr={t.data_ptr():>12d} shape={tuple(t.shape)} dtype={t.dtype}"
+        t32 = t.float()
+        mean = float(t32.mean().item())
+        mx = float(t32.max().item())
+        nrm = float(t32.norm().item())
+        return f"{tag:6s} ptr={t.data_ptr():>12d} mean={mean:+.6e} max={mx:+.6e} norm={nrm:+.6e}"
+
+
     def zero_grad(self):
         # capture-safe grad reset (does NOT set grad=None)
         for p in self.params:
@@ -111,11 +132,11 @@ class Adam:
         F.bias_corr_out(self.step, self.bc1_inv, self.bc2_inv, self.beta1, self.beta2)
 
         cap = in_capture()
+        cap_stream = torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
 
         for i, p in enumerate(self.params):
             g = p.grad
 
-            # ★ 핵심 수정: capture 중 grad=None이면 "조용히 continue" 금지
             if g is None:
                 if cap:
                     raise RuntimeError(
@@ -126,10 +147,51 @@ class Adam:
                 continue
 
             # optional grad clip (runtime-only)
-            if (self.grad_clip is not None) and (not cap):
+            # 캡처 중에는 norm().item() 같은 host read 금지
+            if (self.grad_clip is not None) and (not cap_stream) and (not cap):
                 gn = g.data.norm().item()
                 if gn > self.grad_clip:
                     g.data.mul_(self.grad_clip / (gn + 1e-12))
+
+
+            # --- DEBUG DUMP (replay vs irexec 비교용) ---
+            if self._dbg_on():
+                # AICF의 캡처 플래그를 신뢰한다 (dedicated stream capture 대응)
+                if cap:
+                    print(f"[adam_debug] (capturing) i={i} name={getattr(p, 'name', '')}")
+
+                    def _meta(tag, x):
+                        t = x.data
+                        return f"{tag:6s} ptr={t.data_ptr():>12d} shape={tuple(t.shape)} dtype={t.dtype}"
+
+                    print("[adam_debug]", _meta("W", p))
+                    print("[adam_debug]", _meta("g", g))
+                    print("[adam_debug]", _meta("m", self.m[i]))
+                    print("[adam_debug]", _meta("v", self.v[i]))
+
+                    # (선택) torch의 current-stream capture 상태도 같이 참고로만
+                    try:
+                        cs = torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
+                        print(f"[adam_debug] (capturing) torch_is_current_stream_capturing={cs}")
+                    except Exception:
+                        pass
+
+                else:
+                    # 캡처가 아닐 때만 host read 허용
+                    step_val = int(self.step.item())
+                    bc1 = float(self.bc1_inv.item())
+                    bc2 = float(self.bc2_inv.item())
+
+                    print(f"[adam_debug] step={step_val} i={i} name={getattr(p, 'name', '')}")
+                    print("[adam_debug]", self._tstat("W", p))
+                    print("[adam_debug]", self._tstat("g", g))
+                    print("[adam_debug]", self._tstat("m", self.m[i]))
+                    print("[adam_debug]", self._tstat("v", self.v[i]))
+                    print(
+                        f"[adam_debug] bc1_inv={bc1:+.6e} bc2_inv={bc2:+.6e} "
+                        f"lr={self.lr} b1={self.beta1} b2={self.beta2} eps={self.eps}"
+                    )
+
 
             F.adam_step_(
                 p=p,

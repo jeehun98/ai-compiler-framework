@@ -82,8 +82,28 @@ class AICFBackend(Backend):
     # ----------------------------
     def op_call_out(self, op: str, inputs: List[Any], outputs: List[Any], attrs: Dict[str, Any]) -> None:
         op_l = self._normalize_op(op)
+        warmup = os.getenv("AICF_WARMUP", "0") == "1"
+
+        # warmup safe-guard: do not update params during warmup
+        # (compile lowering should already set lr=0, but this doubles safety)
+        if warmup and op_l in ("adam_step", "adamstep"):
+            attrs = dict(attrs)
+            attrs["lr"] = 0.0
+
         inputs_t = self._prepare_inputs(op_l, inputs)
         outputs_t = [self._as_torch(x) for x in outputs]
+
+        # ✅ warmup safe-guard: do not advance step during warmup (NO-OP)
+        # step_inc(in_step) -> out_step (scalar tensor)
+        if warmup and op_l in ("step_inc", "stepinc"):
+            if len(inputs_t) != 1 or len(outputs_t) != 1:
+                raise RuntimeError(
+                    f"AICFBackend.op_call_out: step_inc expects 1 input/1 output, got {len(inputs_t)}/{len(outputs_t)}"
+                )
+            # pointer-stable, capture-safe
+            outputs_t[0].copy_(inputs_t[0])
+            return
+
         kind, _ = self._resolve_op(op_l, inputs_t, attrs)
 
         try:
@@ -165,7 +185,7 @@ class AICFBackend(Backend):
         self.trace_reset()
 
     # ----------------------------
-    # Op resolution (unchanged)
+    # Op resolution (UPDATED: copy_saved/copy_aux)
     # ----------------------------
     def _resolve_op(
         self,
@@ -191,8 +211,11 @@ class AICFBackend(Backend):
             return C.OpKind.MseGrad, {"like": 0}
         if op_l in ("sgd_step", "sgdstep"):
             return C.OpKind.SgdStep, {"like": 0}
-        if op_l in ("copy",):
+
+        # UPDATED: copy variants
+        if op_l in ("copy", "copy_saved", "copy_aux"):
             return C.OpKind.Copy, {"like": 0}
+
         if op_l in ("grad_zero", "zero_grad"):
             return C.OpKind.GradZero, {"like": 0}
         if op_l in ("step_inc", "stepinc"):

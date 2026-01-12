@@ -544,6 +544,33 @@ def bias_corr_out(
     )
     return bc1_inv, bc2_inv
 
+
+
+# ... (기존 import들: Tensor, is_tracing, get_ir, get_backend, _as_ir_value, _as_ir_scalar 등)
+
+# ---- DEBUG helpers (module-scope) ----
+_ADAM_DBG_COUNT = 0
+
+def _adam_dbg_on() -> bool:
+    return os.getenv("AICF_ADAM_DEBUG", "0") == "1"
+
+def _adam_dbg_limit() -> int:
+    try:
+        return int(os.getenv("AICF_ADAM_DEBUG_LIMIT", "8"))
+    except Exception:
+        return 8
+
+@torch.no_grad()
+def _tstat(tag: str, t: torch.Tensor) -> str:
+    if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+        return f"{tag:6s} ptr={t.data_ptr():>12d} shape={tuple(t.shape)} dtype={t.dtype}"
+    t32 = t.float()
+    mean = float(t32.mean().item())
+    mx = float(t32.max().item())
+    nrm = float(t32.norm().item())
+    return f"{tag:6s} ptr={t.data_ptr():>12d} mean={mean:+.6e} max={mx:+.6e} norm={nrm:+.6e}"
+
+
 def adam_step_(
     p: Tensor,
     g: Tensor,
@@ -591,7 +618,7 @@ def adam_step_(
         return
 
     # -------------------------
-    # RUNTIME PATH (unchanged)
+    # RUNTIME PATH
     # -------------------------
     if p.data is None or m.data is None or v.data is None:
         raise RuntimeError("F.adam_step_: p/m/v has no data buffer (None).")
@@ -600,6 +627,24 @@ def adam_step_(
 
     if not isinstance(bc1_inv, torch.Tensor) or not isinstance(bc2_inv, torch.Tensor):
         raise RuntimeError("F.adam_step_: bc1_inv/bc2_inv must be torch.Tensor scalars on device.")
+
+    # ---- NEW: debug dump (IRExecutor 경로에서 찍힘) ----
+    global _ADAM_DBG_COUNT
+    if _adam_dbg_on() and _ADAM_DBG_COUNT < _adam_dbg_limit():
+        _ADAM_DBG_COUNT += 1
+
+        print(f"[adam_step_debug] call={_ADAM_DBG_COUNT} p_name={getattr(p, 'name', '')} g_name={getattr(g, 'name', '')}")
+        print("[adam_step_debug]", _tstat("W", p.data))
+        print("[adam_step_debug]", _tstat("g", g.data))
+        print("[adam_step_debug]", _tstat("m", m.data))
+        print("[adam_step_debug]", _tstat("v", v.data))
+
+        if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+            print(f"[adam_step_debug] (capturing) lr={float(lr)} b1={float(beta1)} b2={float(beta2)} eps={float(eps)}")
+        else:
+            bc1 = float(bc1_inv.item())
+            bc2 = float(bc2_inv.item())
+            print(f"[adam_step_debug] bc1_inv={bc1:+.6e} bc2_inv={bc2:+.6e} lr={float(lr)} b1={float(beta1)} b2={float(beta2)} eps={float(eps)}")
 
     attrs = {"lr": float(lr), "beta1": float(beta1), "beta2": float(beta2), "eps": float(eps)}
 
