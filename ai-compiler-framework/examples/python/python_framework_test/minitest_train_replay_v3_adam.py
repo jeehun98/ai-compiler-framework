@@ -107,9 +107,9 @@ def main():
     # --------------------------------------------------------
     from aicf_fw.backend.aicf_backend import AICFBackend
     from aicf_fw.backend import set_backend, get_backend
-    from aicf_fw.core.tensor import Tensor
+    from aicf_fw.core.autograd import Tensor
     from aicf_fw.core.autograd import backward as autograd_backward
-    from aicf_fw.core.warmup import warmup_capture_safe
+    from aicf_fw.core.compile import warmup_capture_safe
     from aicf_fw.core.functional import functional_buffer_stats
     from aicf_fw.nn.linear import Linear
     from aicf_fw.nn.relu import ReLU

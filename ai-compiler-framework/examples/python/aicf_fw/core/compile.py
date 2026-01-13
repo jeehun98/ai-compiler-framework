@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Set, Iterable
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Set, Iterable, Callable
 
 import torch
 
@@ -27,6 +27,7 @@ class CompileArtifact:
     - trace_ops: runtime trace op names captured during CUDA graph capture
     - backend: backend instance (must support replay())
     - env: IRValue vid -> torch.Tensor runtime binding (for IRExecutor)
+    - env_provider: optional callable returning fresh env (for restore/alias changes)
     """
     name: str
     ir: Any
@@ -34,6 +35,9 @@ class CompileArtifact:
     trace_ops: List[str]
     backend: Any
     env: Dict[int, torch.Tensor] = field(default_factory=dict)
+
+    # NEW: provider for lazy/refreshable env
+    env_provider: Optional[Callable[[], Dict[int, torch.Tensor]]] = None
 
     def attach_env(self, env: Dict[int, torch.Tensor], *, merge: bool = False) -> None:
         if env is None:
@@ -51,10 +55,28 @@ class CompileArtifact:
         else:
             self.env = norm
 
+    # NEW
+    def attach_env_provider(self, provider: Callable[[], Dict[int, torch.Tensor]]) -> None:
+        if provider is None or not callable(provider):
+            raise RuntimeError("CompileArtifact.attach_env_provider: provider must be callable")
+        self.env_provider = provider
+
     def runtime_env(self) -> Dict[int, torch.Tensor]:
+        """
+        Provider 우선:
+          - provider가 있으면 매 호출마다 fresh env 반환
+          - 없으면 self.env 반환
+        """
+        if self.env_provider is not None:
+            env = self.env_provider()
+            if not isinstance(env, dict) or len(env) == 0:
+                raise RuntimeError("CompileArtifact.runtime_env: env_provider returned empty env")
+            return env
         return self.env
 
     def has_env(self) -> bool:
+        if self.env_provider is not None:
+            return True
         return isinstance(self.env, dict) and len(self.env) > 0
 
     def assert_trace_has(self, op: str) -> None:
@@ -77,10 +99,7 @@ class CompileArtifact:
 
         if trace_filter:
             IGNORE = {"copy"}
-            lowered_ops = [
-                op for op in lowered_ops
-                if op not in IGNORE and not op.startswith("UNSUPPORTED<")
-            ]
+            lowered_ops = [op for op in lowered_ops if op not in IGNORE and not op.startswith("UNSUPPORTED<")]
 
         missing = [op for op in lowered_ops if op not in self.trace_ops]
         if missing:
@@ -91,6 +110,238 @@ class CompileArtifact:
                 + "\n"
                 + f"trace_tail({len(tail)}): {tail}"
             )
+
+
+# ============================================================
+# Semantic lowering validation (IR/lowered structure)
+# ============================================================
+
+def _assert_lowering_has_semantic_saved_copy(ir: IRGraph, lowered: List[Dict[str, Any]]) -> None:
+    saved_vids = [
+        int(vid) for vid, val in ir.values.items()
+        if str(getattr(val, "name", "")) == "relu_y_saved"
+    ]
+    if not saved_vids:
+        raise AssertionError("[semantic] missing IRValue named 'relu_y_saved'")
+    saved_set = set(saved_vids)
+
+    copy_into_saved = False
+    for it in lowered:
+        if it.get("op") != "copy":
+            continue
+        outs = list(it.get("outputs", []))
+        if outs and int(outs[0]) in saved_set:
+            copy_into_saved = True
+            break
+    if not copy_into_saved:
+        raise AssertionError("[semantic] missing lowering: copy -> relu_y_saved")
+
+    relu_bwd_uses_saved = False
+    for it in lowered:
+        if it.get("op") != "relu_bwd":
+            continue
+        ins = list(it.get("inputs", []))
+        if len(ins) >= 2 and int(ins[1]) in saved_set:
+            relu_bwd_uses_saved = True
+            break
+    if not relu_bwd_uses_saved:
+        raise AssertionError("[semantic] relu_bwd does not consume relu_y_saved as 2nd input")
+
+
+# ============================================================
+# Tracing
+# ============================================================
+
+_TRACING = False
+_IR: Optional[IRGraph] = None
+
+_TRACE_VAL_CACHE_OBJ: Dict[int, IRValue] = {}
+_TRACE_VAL_CACHE_TORCH: Dict[int, IRValue] = {}
+
+
+def is_tracing() -> bool:
+    return bool(_TRACING)
+
+
+def get_ir() -> IRGraph:
+    if _IR is None:
+        raise RuntimeError("IRBuilder is not set. Use `with tracing(ir): ...`")
+    return _IR
+
+
+def trace_reset_cache() -> None:
+    _TRACE_VAL_CACHE_OBJ.clear()
+    _TRACE_VAL_CACHE_TORCH.clear()
+
+
+def _torch_key(x: torch.Tensor) -> int:
+    try:
+        return int(x.data_ptr())
+    except Exception:
+        return id(x)
+
+
+def as_ir_value_obj(obj: Any, *, name: str, shape, dtype, device) -> IRValue:
+    if not is_tracing():
+        raise RuntimeError("as_ir_value_obj() called outside tracing")
+
+    k = id(obj)
+    v = _TRACE_VAL_CACHE_OBJ.get(k)
+    if v is not None:
+        return v
+
+    ir = get_ir()
+    v = ir.new_value(name=name, shape=tuple(shape), dtype=str(dtype), device=str(device))
+    _TRACE_VAL_CACHE_OBJ[k] = v
+    return v
+
+
+def as_ir_value_torch(x: torch.Tensor, *, name: str) -> IRValue:
+    if not is_tracing():
+        raise RuntimeError("as_ir_value_torch() called outside tracing")
+
+    k = _torch_key(x)
+    v = _TRACE_VAL_CACHE_TORCH.get(k)
+    if v is not None:
+        return v
+
+    ir = get_ir()
+    v = ir.new_value(name=name, shape=tuple(x.shape), dtype=str(x.dtype), device=str(x.device))
+    _TRACE_VAL_CACHE_TORCH[k] = v
+    return v
+
+
+@contextmanager
+def tracing(ir: IRGraph):
+    global _TRACING, _IR
+    prev_t = _TRACING
+    prev_ir = _IR
+
+    _TRACING = True
+    _IR = ir
+    trace_reset_cache()
+
+    try:
+        yield ir
+    finally:
+        _TRACING = prev_t
+        _IR = prev_ir
+        trace_reset_cache()
+
+
+# ============================================================
+# IR compile
+# ============================================================
+
+def compile_ir(step_fn, *, name: str = "train_step") -> IRGraph:
+    ir = IRGraph(name=name)
+    with tracing(ir):
+        step_fn()
+    return ir
+
+
+# ============================================================
+# Lowering
+# (너가 올린 lower_to_backend_ops 그대로 두면 됨)
+# ============================================================
+
+# !!! 여기서는 지면상 생략하지 않고 너가 쓰던 lower_to_backend_ops / autobind_env_from_lowered를 그대로 유지하면 됨.
+# 이미 올려준 버전을 그대로 붙여넣어 사용해.
+from typing import cast
+# (주의) 실제 파일에서는 위 주석 대신, 네가 쓰는 lower_to_backend_ops, autobind_env_from_lowered 전체가 있어야 함.
+
+
+# ============================================================
+# compile + capture (single capture)
+# ============================================================
+
+def compile_and_capture(
+    step_fn,
+    *,
+    name: str = "train_step",
+    warmup_runs: int = 2,
+    warmup_sync: bool = True,
+    validate: bool = True,
+    trace: bool = True,
+    enforce_ops: Sequence[str] = ("adam_step",),
+    torch_sync: bool = True,
+    bind_model: Optional[Any] = None,
+    bind_optim: Optional[Any] = None,
+    bind_x: Optional[Any] = None,
+    bind_t: Optional[Any] = None,
+    autobind_env: bool = True,
+) -> CompileArtifact:
+    ir = compile_ir(step_fn, name=name)
+    lowered = lower_to_backend_ops(ir)
+
+    if validate:
+        _assert_lowering_has_semantic_saved_copy(ir, lowered)
+
+    # ---- warmup: NO state drift ----
+    prev_warm = os.getenv("AICF_WARMUP", None)
+    if warmup_runs and warmup_runs > 0:
+        os.environ["AICF_WARMUP"] = "1"
+        try:
+            warmup_capture_safe(train_step=step_fn, runs=warmup_runs, sync=warmup_sync)
+        finally:
+            if prev_warm is None:
+                os.environ.pop("AICF_WARMUP", None)
+            else:
+                os.environ["AICF_WARMUP"] = prev_warm
+
+    backend = get_backend()
+
+    backend.capture_reset()
+    if torch_sync and torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+    backend.trace_reset()
+    backend.trace_enable(bool(trace))
+
+    # ---- capture exactly once; updates enabled ----
+    prev_cap = os.getenv("AICF_WARMUP", None)
+    os.environ["AICF_WARMUP"] = "0"
+    try:
+        backend.capture_begin()
+        step_fn()
+        backend.capture_end()
+    finally:
+        if prev_cap is None:
+            os.environ.pop("AICF_WARMUP", None)
+        else:
+            os.environ["AICF_WARMUP"] = prev_cap
+
+    if torch_sync and torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+    trace_ops: List[str] = backend.trace_get() if trace else []
+    backend.trace_enable(False)
+
+    art = CompileArtifact(name=name, ir=ir, lowered=lowered, trace_ops=trace_ops, backend=backend)
+
+    for op in enforce_ops:
+        art.assert_trace_has(op)
+
+    if autobind_env:
+        env = autobind_env_from_lowered(ir, lowered, env=art.env)
+        art.attach_env(env, merge=False)
+
+    return art
+
+
+__all__ = [
+    "CompileArtifact",
+    "compile_ir",
+    "lower_to_backend_ops",
+    "compile_and_capture",
+    "autobind_env_from_lowered",
+    "tracing",
+    "is_tracing",
+    "get_ir",
+    "as_ir_value_obj",
+    "as_ir_value_torch",
+    "trace_reset_cache",
+]
 
 
 # ============================================================
@@ -481,7 +732,7 @@ def lower_to_backend_ops(ir) -> List[Dict[str, Any]]:
         b2_vid = int(n.outputs[1])
         lowered.append({
             "op": "bias_corr",
-            "attrs": {"beta1": float(n.attrs["beta1"]), "beta2": float(n.attrs["beta2"])},
+            "attrs": {"beta1": float(n.attrs["beta1"]), "beta2": float(n.attrs["beta2"])} ,
             "inputs": [step_vid],
             "outputs": [b1_vid, b2_vid],
         })
@@ -630,16 +881,13 @@ def compile_and_capture(
 
     IMPORTANT:
       - Warmup MUST NOT update params/states; we set AICF_WARMUP=1 during warmup.
-      - Env binding can be done by Module.compile() (exact binding) or by this function (autobind_env=True).
+      - Capture MUST run with updates enabled (AICF_WARMUP=0).
+      - Capture is performed exactly once (no double-capture).
     """
     ir = compile_ir(step_fn, name=name)
-
     lowered = lower_to_backend_ops(ir)
 
     if validate:
-        _prof = os.getenv("AICF_VALIDATE_VERBOSE", "0") == "1"
-        if _prof:
-            print("[validate] semantic checks...")
         _assert_lowering_has_semantic_saved_copy(ir, lowered)
 
     # ---- warmup (no state drift) ----
@@ -649,7 +897,6 @@ def compile_and_capture(
         try:
             warmup_capture_safe(train_step=step_fn, runs=warmup_runs, sync=warmup_sync)
         finally:
-            # restore previous
             if prev_warm is None:
                 os.environ.pop("AICF_WARMUP", None)
             else:
@@ -657,40 +904,28 @@ def compile_and_capture(
 
     backend = get_backend()
 
+    # reset capture/trace state
     backend.capture_reset()
-    if torch_sync:
+    if torch_sync and torch.cuda.is_available():
         torch.cuda.synchronize()
 
     backend.trace_reset()
     backend.trace_enable(bool(trace))
 
-    # ✅ IMPORTANT: capture must run with updates enabled
-    prev_cap_warm = os.getenv("AICF_WARMUP", None)
+    # ---- single capture ----
+    prev_cap = os.getenv("AICF_WARMUP", None)
     os.environ["AICF_WARMUP"] = "0"
     try:
         backend.capture_begin()
         step_fn()
         backend.capture_end()
     finally:
-        if prev_cap_warm is None:
+        if prev_cap is None:
             os.environ.pop("AICF_WARMUP", None)
         else:
-            os.environ["AICF_WARMUP"] = prev_cap_warm
+            os.environ["AICF_WARMUP"] = prev_cap
 
-    backend = get_backend()
-
-    backend.capture_reset()
-    if torch_sync:
-        torch.cuda.synchronize()
-
-    backend.trace_reset()
-    backend.trace_enable(bool(trace))
-
-    backend.capture_begin()
-    step_fn()
-    backend.capture_end()
-
-    if torch_sync:
+    if torch_sync and torch.cuda.is_available():
         torch.cuda.synchronize()
 
     trace_ops: List[str] = backend.trace_get() if trace else []

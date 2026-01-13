@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 import os
 import torch
@@ -180,11 +180,18 @@ class IRExecutor:
       - Executes lowered ops list (artifact.lowered)
       - Uses env: vid(int) -> torch.Tensor
       - Dispatch via backend.op_call_out(op, inputs_t, outputs_t, attrs)
+
+    NOTE:
+      - env can become stale after TrainState.restore() if wrappers/aliases change.
+      - To avoid that, we support env_provider and refresh env at the start of each run().
     """
     ir: IRGraph
     lowered: List[Dict[str, Any]]
     env: Dict[int, torch.Tensor]
     backend: Any = None
+
+    # NEW: runtime env provider (pull latest binding each run)
+    env_provider: Optional[Callable[[], Dict[int, torch.Tensor]]] = None
 
     # debug storage
     _last_intermediates: Dict[str, torch.Tensor] | None = None
@@ -194,14 +201,22 @@ class IRExecutor:
     def from_artifact(art: Any) -> "IRExecutor":
         if not hasattr(art, "runtime_env"):
             raise RuntimeError("IRExecutor.from_artifact: artifact has no runtime_env()")
-        env = art.runtime_env()
+
+        prov = art.runtime_env  # keep callable
+        env = prov()
         if not isinstance(env, dict) or len(env) == 0:
             aname = getattr(art, "name", "<unnamed>")
             raise RuntimeError(
                 f"IRExecutor.from_artifact: empty env for artifact={aname}. "
                 "Attach env first: art.attach_env(vid->torch.Tensor)."
             )
-        return IRExecutor(ir=art.ir, lowered=art.lowered, env=dict(env), backend=getattr(art, "backend", None))
+        return IRExecutor(
+            ir=art.ir,
+            lowered=art.lowered,
+            env=dict(env),  # initial snapshot (will be refreshed on run)
+            backend=getattr(art, "backend", None),
+            env_provider=prov,
+        )
 
     def _get_t(self, vid: int, *, op: str = "?", io: str = "?") -> torch.Tensor:
         t = self.env.get(int(vid), None)
@@ -234,6 +249,11 @@ class IRExecutor:
             return
         bk.op_call_out(op, inputs_t, outputs_t, attrs)
 
+    def refresh_env(self, art: Any) -> None:
+        # TrainState.restore 이후 wrapper/alias 변경 반영
+        self.env = dict(art.runtime_env())
+
+
     @torch.no_grad()
     def run(
         self,
@@ -242,6 +262,13 @@ class IRExecutor:
         debug_intermediate: bool = False,
         return_intermediates: bool = False,
     ) -> Dict[str, torch.Tensor] | None:
+        # NEW: refresh env every run to avoid stale pointers after restore()
+        if self.env_provider is not None:
+            new_env = self.env_provider()
+            if not isinstance(new_env, dict) or len(new_env) == 0:
+                raise RuntimeError("IRExecutor.run: env_provider returned empty env")
+            self.env = dict(new_env)
+
         bk = self.backend or get_backend()
 
         watch_vids = _parse_watch_vids()

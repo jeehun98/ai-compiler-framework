@@ -18,21 +18,6 @@ def _make_static_tensor(shape: Tuple[int, ...], dtype: torch.dtype, device: str,
     return Tensor(t, requires_grad=False, name=name)
 
 
-def _dtype_from_ir_dtype_str(s: str) -> torch.dtype:
-    ss = str(s)
-    if "float32" in ss or "f32" in ss:
-        return torch.float32
-    if "float16" in ss or "f16" in ss:
-        return torch.float16
-    if "bfloat16" in ss or "bf16" in ss:
-        return torch.bfloat16
-    if "int32" in ss or "i32" in ss:
-        return torch.int32
-    if "int64" in ss or "i64" in ss:
-        return torch.int64
-    return torch.float32
-
-
 class Module:
     """
     Minimal nn.Module-like base.
@@ -96,16 +81,6 @@ class Module:
                 child_prefix = f"{prefix}.{mn}" if prefix else mn
                 yield from m.named_parameters(prefix=child_prefix, recurse=True)
 
-    def modules(self) -> Iterator["Module"]:
-        for _, m in self.named_modules():
-            yield m
-
-    def named_modules(self, prefix: str = "") -> Iterator[Tuple[str, "Module"]]:
-        yield prefix, self
-        for n, m in self._modules.items():
-            child_prefix = f"{prefix}.{n}" if prefix else n
-            yield from m.named_modules(prefix=child_prefix)
-
     # -------------------------
     # Grad utils
     # -------------------------
@@ -126,10 +101,6 @@ class Module:
     # static inputs API (replaces TrainGraph)
     # ============================================================
     def set_inputs(self, **kwargs: torch.Tensor) -> None:
-        """
-        Copy external torch tensors into static input buffers.
-        Requires compile(input_spec=...) to have been called.
-        """
         inputs = getattr(self, "_static_inputs", None)
         if inputs is None:
             raise RuntimeError("No static inputs. Compile with input_spec=... first.")
@@ -166,7 +137,7 @@ class Module:
         optim: Optional[Any] = None,
         x: Optional[Any] = None,
         t: Optional[Any] = None,
-        input_spec: Optional[InputSpec] = None,  # <-- TrainGraph replacement
+        input_spec: Optional[InputSpec] = None,
         loss: LossKind = "mse",
         name: str = "train_step",
         warmup_runs: int = 2,
@@ -187,11 +158,9 @@ class Module:
         if step_fn is None:
             if optim is None:
                 raise ValueError("Either provide step_fn=..., or provide optim=... for auto train_step.")
-
             if loss != "mse":
                 raise ValueError(f"Unsupported loss='{loss}' in v0. Only 'mse' is supported.")
 
-            # A) static input mode (replaces TrainGraph)
             if input_spec is not None:
                 inputs: Dict[str, Tensor] = {
                     k: _make_static_tensor(shape, dtype, device, name=k)
@@ -199,7 +168,6 @@ class Module:
                 }
                 object.__setattr__(self, "_static_inputs", inputs)
 
-                # make x/t aliases for env binding and convenience
                 x = inputs.get("x", None)
                 t = inputs.get("t", None)
                 if x is None or t is None:
@@ -213,8 +181,6 @@ class Module:
                     optim.step_()
 
                 step_fn = _auto_train_step
-
-            # B) external x/t mode (previous behavior)
             else:
                 if x is None or t is None:
                     raise ValueError("Either provide input_spec=..., or provide x=..., t=... for auto train_step.")
@@ -230,6 +196,7 @@ class Module:
 
         # -------------------------
         # 1) compile + capture
+        #    - compile.py가 STATIC env(temps/gradpool/saved)를 autobind로 채움
         # -------------------------
         art = compile_and_capture(
             step_fn,
@@ -240,15 +207,14 @@ class Module:
             trace=trace,
             enforce_ops=tuple(enforce_ops),
             torch_sync=torch_sync,
+            autobind_env=True,  # static env
         )
 
         # -------------------------
-        # 2) attach exact env (optional)
+        # 2) attach LIVE env provider (params/optim/grads/x/t)
         # -------------------------
         if attach_env:
-            # x/t might be Tensor wrappers (static inputs or user-provided wrappers) or raw torch tensors
-            env = _build_env_exact(art, model=self, optim=optim, x=x, t=t)
-            art.attach_env(env)
+            art.attach_env_provider(lambda: _build_env_live(art=art, model=self, optim=optim, x=x, t=t))
 
         object.__setattr__(self, "_compiled_artifact", art)
         return art
@@ -266,39 +232,26 @@ class Module:
         return art
 
 
-def _build_env_exact(art, *, model, optim, x, t) -> Dict[int, torch.Tensor]:
-    """
-    Exact vid->torch.Tensor binding for IRExecutor.
+def _unwrap_torch(x) -> torch.Tensor:
+    return x.data if hasattr(x, "data") else x
 
-    Rules:
-      - Bind x/t by IRValue.name == 'x'/'t'
-      - Bind model params by Linear node param vids -> model.named_parameters() order
-      - Bind Adam state by param index:
-          step, bc1_inv, bc2_inv come from optim
-          m/v come from optim.m[i].data / optim.v[i].data
-          grad comes from optim.params[i].grad (must exist after warmup)
-      - Allocate intermediates needed by lowered ops
-      - Apply SSA alias rules (bias_add/step_inc/copy), but adam_step in-place is enforced in IRExecutor too.
+
+def _build_env_live(*, art, model, optim, x, t) -> Dict[int, torch.Tensor]:
+    """
+    LIVE vid->torch.Tensor binding만 생성.
+    - params / optim state / grads / inputs(x,t)
+    - temps/gradpool/saved 등 STATIC은 compile.py autobind_env_from_lowered로 이미 art.env에 있음
     """
     if x is None or t is None:
-        raise RuntimeError("_build_env_exact: x/t must be provided (or compile with input_spec=... so they exist).")
+        raise RuntimeError("_build_env_live: x/t must be provided (or compile with input_spec=... so they exist).")
 
     ir = art.ir
     lowered = art.lowered
     env: Dict[int, torch.Tensor] = {}
 
-    def alloc_for_vid(vid: int) -> torch.Tensor:
-        vv = ir.values[int(vid)]
-        device = torch.device(str(vv.device))
-        dtype = _dtype_from_ir_dtype_str(str(vv.dtype))
-        shape = tuple(vv.shape)
-        return torch.empty(shape, device=device, dtype=dtype)
-
-    # -------------------------
-    # 1) bind x / t
-    # -------------------------
-    x_t = x.data if hasattr(x, "data") else x
-    t_t = t.data if hasattr(t, "data") else t
+    # 1) bind x/t
+    x_t = _unwrap_torch(x)
+    t_t = _unwrap_torch(t)
 
     for vid, val in ir.values.items():
         nm = getattr(val, "name", "")
@@ -307,9 +260,7 @@ def _build_env_exact(art, *, model, optim, x, t) -> Dict[int, torch.Tensor]:
         elif nm == "t":
             env[int(vid)] = t_t
 
-    # -------------------------
-    # 2) bind model params via Linear node vids (order-stable)
-    # -------------------------
+    # 2) bind model params in stable order using Linear node vids
     param_vids: List[int] = []
     for n in ir.nodes:
         if n.op != "Linear":
@@ -325,15 +276,13 @@ def _build_env_exact(art, *, model, optim, x, t) -> Dict[int, torch.Tensor]:
     model_params: List[torch.Tensor] = [p.data for _, p in list(model.named_parameters())]
     if len(model_params) != len(param_vids):
         raise RuntimeError(
-            f"_build_env_exact: param count mismatch. model={len(model_params)} ir_linear_params={len(param_vids)}"
+            f"_build_env_live: param count mismatch. model={len(model_params)} ir_linear_params={len(param_vids)}"
         )
 
     for vid, p in zip(param_vids, model_params):
         env[int(vid)] = p
 
-    # -------------------------
-    # 3) bind Adam scalar state (step, bc1_inv, bc2_inv) by IRValue.name where possible
-    # -------------------------
+    # 3) bind Adam scalar state by IRValue.name
     if optim is not None:
         step_t = getattr(optim, "step", None)
         bc1_t = getattr(optim, "bc1_inv", None)
@@ -348,69 +297,35 @@ def _build_env_exact(art, *, model, optim, x, t) -> Dict[int, torch.Tensor]:
             elif nm in ("bc2_inv", "bias_corr_out2") and bc2_t is not None:
                 env[int(vid)] = bc2_t
 
-    # -------------------------
-    # 4) bind Adam per-param state + grads EXACT by param index (from lowered adam_step slice)
-    # -------------------------
+    # 4) bind per-param state + grads by lowered adam_step order
     if optim is not None:
         oparams = getattr(optim, "params", None)
         om = getattr(optim, "m", None)
         ov = getattr(optim, "v", None)
         if oparams is None or om is None or ov is None:
-            raise RuntimeError("_build_env_exact: optim is missing params/m/v required for exact binding")
+            raise RuntimeError("_build_env_live: optim missing params/m/v")
 
         adam_items = [it for it in lowered if it["op"] == "adam_step"]
         if len(adam_items) != len(oparams):
             raise RuntimeError(
-                f"_build_env_exact: adam_step count mismatch. lowered={len(adam_items)} optim.params={len(oparams)}"
+                f"_build_env_live: adam_step count mismatch. lowered={len(adam_items)} optim.params={len(oparams)}"
             )
 
         for i, it in enumerate(adam_items):
             in_vids = list(it.get("inputs", []))
             if len(in_vids) < 6:
-                raise RuntimeError(f"_build_env_exact: bad adam_step inputs at i={i}: {in_vids}")
+                raise RuntimeError(f"_build_env_live: bad adam_step inputs at i={i}: {in_vids}")
 
             p_in, g_in, m_in, v_in = map(int, in_vids[:4])
 
-            # grad must exist after warmup
             gwrap = getattr(oparams[i], "grad", None)
             if gwrap is None:
                 raise RuntimeError(
-                    f"_build_env_exact: optim.params[{i}].grad is None. "
-                    "Warmup must materialize all grad buffers before IRExecutor compare."
+                    f"_build_env_live: optim.params[{i}].grad is None. warmup must materialize grads."
                 )
             env[g_in] = gwrap.data
-
             env[m_in] = om[i].data
             env[v_in] = ov[i].data
-
-            # param tensor already bound in (2); keep as-is
-            env[p_in] = env[p_in]
-
-    # -------------------------
-    # 5) allocate remaining tensors needed by lowered ops
-    # -------------------------
-    for it in lowered:
-        for iv in it.get("inputs", []):
-            iv = int(iv)
-            if iv not in env:
-                env[iv] = alloc_for_vid(iv)
-        for ovv in it.get("outputs", []):
-            ovv = int(ovv)
-            if ovv not in env:
-                env[ovv] = alloc_for_vid(ovv)
-
-    # -------------------------
-    # 6) SSA alias rules for obvious in-place ops
-    # -------------------------
-    for it in lowered:
-        op = it["op"]
-        ins = list(it.get("inputs", []))
-        outs = list(it.get("outputs", []))
-
-        if op in ("bias_add", "step_inc", "copy"):
-            if ins and outs:
-                env[int(outs[0])] = env[int(ins[0])]
-
-        # adam_step aliasing is enforced in IRExecutor (runtime.py)
+            env[p_in] = env[p_in]  # already bound
 
     return env
