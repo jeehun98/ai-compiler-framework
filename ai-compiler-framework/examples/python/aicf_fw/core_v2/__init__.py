@@ -3,6 +3,7 @@ from .printer import dump_ir, dump_lowered, dump_plan
 from .ops import SymTensor, sym_tensor, linear, relu, mse_grad
 from .lower import lower_to_backend_ops
 from .plan import build_binding_plan, allocate_static_env, BindingPlan, PlanOptions
+from .exec import PlannedExecutor, ExecOptions
 
 __all__ = [
     "trace_ir",
@@ -19,4 +20,6 @@ __all__ = [
     "linear",
     "relu",
     "mse_grad",
+    "PlannedExecutor",
+    "ExecOptions",
 ]
