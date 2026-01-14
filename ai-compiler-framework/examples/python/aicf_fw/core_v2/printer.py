@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, List
+from .plan import BindingPlan, ROLE_INPUT, ROLE_PARAM, ROLE_STATIC
 
 from .ir import IRGraph
 
@@ -94,3 +95,31 @@ def _fmt_attrs(attrs: Dict[str, Any]) -> str:
         else:
             items.append(f"{k}={v}")
     return "  {" + ", ".join(items) + "}"
+
+
+
+
+# ... (dump_ir, dump_lowered existing) ...
+
+
+def dump_plan(plan: BindingPlan, *, title: str = "BindingPlan") -> str:
+    lines: List[str] = []
+    lines.append(f"=== {title} ===")
+    lines.append(f"name: {plan.name}")
+    lines.append(f"inputs: {len(plan.inputs)}, params: {len(plan.params)}, statics: {len(plan.statics)}")
+    lines.append("")
+
+    def _sec(h: str, vids: List[int]):
+        lines.append(f"[{h}]")
+        for vid in vids:
+            s = plan.specs[int(vid)]
+            lines.append(
+                f"  v{s.vid:03d}  {s.name:12s} role={s.role:6s} shape={tuple(s.shape)} dtype={s.dtype} device={s.device}"
+            )
+        lines.append("")
+
+    _sec("inputs", plan.inputs)
+    _sec("params", plan.params)
+    _sec("statics", plan.statics)
+
+    return "\n".join(lines)
