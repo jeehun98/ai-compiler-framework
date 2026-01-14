@@ -1,7 +1,8 @@
+# aicf_fw/core_v2/exec.py
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import torch
 
@@ -30,10 +31,11 @@ def _unwrap(x) -> torch.Tensor:
 
 def _assert_tensor_matches(spec, t: torch.Tensor, opts: ExecOptions):
     if opts.check_shapes and tuple(t.shape) != tuple(spec.shape):
-        raise RuntimeError(f"[plan] shape mismatch for vid{spec.vid}({spec.name}): {tuple(t.shape)} != {tuple(spec.shape)}")
+        raise RuntimeError(
+            f"[plan] shape mismatch for vid{spec.vid}({spec.name}): {tuple(t.shape)} != {tuple(spec.shape)}"
+        )
     if opts.check_dtype:
-        # spec.dtype is string like "torch.float32" or "float32" depending on your IR printer
-        # We'll compare via substring.
+        # spec.dtype is string like "torch.float32" or "float32"
         ds = str(t.dtype)
         if ("float16" in spec.dtype and "float16" not in ds) or \
            ("bfloat16" in spec.dtype and "bfloat16" not in ds) or \
@@ -48,17 +50,87 @@ def _assert_tensor_matches(spec, t: torch.Tensor, opts: ExecOptions):
                 raise RuntimeError(f"[plan] device mismatch for vid{spec.vid}({spec.name}): expected cuda, got {t.device}")
 
 
+def _canon_name(s: str) -> str:
+    """
+    BindingPlan spec.name을 사용자 params 키와 매칭하기 위한 canonicalization.
+    예:
+      "d_2.W" -> "2.W"
+      "d_0.b" -> "0.b"
+      "2.W"   -> "2.W"
+    """
+    s = str(s)
+    if s.startswith("d_"):
+        s = s[2:]
+    return s
+
+
+def _build_name_maps(plan: BindingPlan) -> tuple[Dict[str, int], Dict[str, List[int]]]:
+    """
+    plan.specs (vid->spec)에서:
+      - exact name -> vid
+      - canon name -> [vid...]
+    """
+    name_to_vid: Dict[str, int] = {}
+    canon_to_vids: Dict[str, List[int]] = {}
+
+    for vid, spec in plan.specs.items():
+        n = str(spec.name)
+        name_to_vid[n] = int(vid)
+
+        cn = _canon_name(n)
+        canon_to_vids.setdefault(cn, []).append(int(vid))
+
+    return name_to_vid, canon_to_vids
+
+
+def _find_vid_for_key(
+    *,
+    key: str,
+    name_to_vid: Dict[str, int],
+    canon_to_vids: Dict[str, List[int]],
+) -> Optional[int]:
+    """
+    사용자 입력 key(예: "2.W")로 plan에서 대응되는 vid를 찾는다.
+    우선순위:
+      1) exact match
+      2) canon match (d_ prefix 제거)
+      3) suffix match (plan name이 key로 끝나는 vid)
+      4) canon suffix match
+    """
+    k = str(key)
+    if k in name_to_vid:
+        return int(name_to_vid[k])
+
+    ck = _canon_name(k)
+    vids = canon_to_vids.get(ck)
+    if vids:
+        # 보통 1개여야 정상. 여러 개면 첫 번째로(확장 시 role 체크로 강화 가능)
+        return int(vids[0])
+
+    # suffix match: plan name endswith user key
+    for pn, vid in name_to_vid.items():
+        if str(pn).endswith(k):
+            return int(vid)
+
+    # canon suffix match
+    for pn, vid in name_to_vid.items():
+        if _canon_name(pn).endswith(ck):
+            return int(vid)
+
+    return None
+
+
 class PlannedExecutor:
     """
-    Stage4: plan 기반 실행기
+    Stage4+: plan 기반 실행기
       - env는 (static alloc) + (user inputs) + (user params)로만 구성
       - lowered를 순서대로 backend.op_call_out로 실행
       - in-place(out==in) op도 lowered대로 그대로 수행
 
     NOTE:
       - 여기서는 IRExecutor처럼 SSA rebind를 할 필요가 없음.
-        왜냐면 lowered에서 vid는 'storage'로 해석되고, plan이 storage를 고정하기 때문.
-      - 다만, 안전하게 outputs가 다른 텐서를 가리키는 경우(env[vid]=out)을 허용하면 확장에 유리함.
+        lowered에서 vid는 'storage'로 해석되고, plan이 storage를 고정하기 때문.
+      - 다만, outputs가 다른 텐서를 가리키는 경우(env[vid]=out)을 허용하면 확장에 유리함.
     """
 
     def __init__(
@@ -98,15 +170,24 @@ class PlannedExecutor:
         if (not reuse_static) or (not self.env):
             self.env = allocate_static_env(self.ir, self.plan, device=self.device)
 
-        # 2) bind inputs/params by name using plan.specs
-        name_to_vid = {s.name: int(s.vid) for s in self.plan.specs.values()}
+        # 2) robust name maps from plan
+        name_to_vid, canon_to_vids = _build_name_maps(self.plan)
 
-        def bind_by_name(src: Dict[str, Any], kind: str):
+        def bind(src: Dict[str, Any], kind: str):
             for name, obj in src.items():
-                if name not in name_to_vid:
-                    raise KeyError(f"[plan] unknown {kind} name='{name}'. known={list(name_to_vid.keys())}")
-                vid = name_to_vid[name]
-                spec = self.plan.specs[vid]
+                vid = _find_vid_for_key(
+                    key=str(name),
+                    name_to_vid=name_to_vid,
+                    canon_to_vids=canon_to_vids,
+                )
+                if vid is None:
+                    # 보여주기용으로 known list는 짧게
+                    known = list(name_to_vid.keys())
+                    head = known[:24]
+                    tail_note = "" if len(known) <= 24 else f" ...(+{len(known)-24})"
+                    raise KeyError(f"[plan] unknown {kind} name='{name}'. known={head}{tail_note}")
+
+                spec = self.plan.specs[int(vid)]
                 t = _unwrap(obj)
                 if not isinstance(t, torch.Tensor):
                     raise TypeError(f"[plan] {kind} '{name}' must be torch.Tensor-like, got {type(obj)}")
@@ -114,8 +195,8 @@ class PlannedExecutor:
                 _assert_tensor_matches(spec, t, opts)
                 self.env[int(vid)] = t
 
-        bind_by_name(inputs, "input")
-        bind_by_name(params, "param")
+        bind(inputs, "input")
+        bind(params, "param")
 
         # 3) sanity: ensure all required vids exist
         for vid in self.plan.inputs + self.plan.params + self.plan.statics:

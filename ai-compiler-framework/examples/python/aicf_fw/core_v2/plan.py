@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
+import re
 
 import torch
 
-from .ir import IRGraph, IRValue
+from .ir import IRGraph
 
 
 # -----------------------------
-# Binding roles
+# Binding roles (KEEP for printer.py)
 # -----------------------------
 ROLE_INPUT = "input"
 ROLE_PARAM = "param"
@@ -31,8 +32,8 @@ class BindingPlan:
     """
     BindingPlan = "누가 외부에서 바인딩되고, 누가 런타임에서 allocate 되는지"를 고정.
     - inputs: 외부 주입 (x,t 등)
-    - params: 외부 주입 (W,b 등)
-    - statics: runtime allocate (lin0_out, relu0_out, dY 등)
+    - params: 외부 주입 (W,b 등)  <-- 진짜 파라미터만!
+    - statics: runtime allocate (intermediates, outputs, grads 등)
     """
     name: str
     specs: Dict[int, BindSpec] = field(default_factory=dict)
@@ -49,22 +50,37 @@ class BindingPlan:
 @dataclass
 class PlanOptions:
     """
-    Stage3 기본 규칙:
+    Stage3 기본 규칙(수정):
       - input_names: {"x","t"} 는 input
-      - param name 규칙: "*.W" or "*.b" (또는 suffix로 W/b)
+      - param name 규칙: "0.W", "0.b", "2.W", "2.b" 같은 layer 파라미터만 param
+      - "d_*", "grad*", "dY" 등은 절대 param이 아니고 static
       - 나머지는 static
     """
     input_names: Set[str] = field(default_factory=lambda: {"x", "t"})
-    param_suffixes: Tuple[str, ...] = (".W", ".b")
-    param_exact_suffixes: Tuple[str, ...] = ("W", "b")  # fallback: "0.W"가 아니라 "W"인 경우
+
+    # "0.W" / "2.b" 형태만 param 인정 (이게 핵심)
+    param_regex: str = r"^\d+\.(W|b)$"
+
+    # backward/grad 네이밍 prefix는 무조건 static으로
+    static_prefixes: Tuple[str, ...] = ("d_", "grad", "dY")
+
+
+_PARAM_RE = re.compile(PlanOptions().param_regex)
 
 
 def _is_param_name(nm: str, opts: PlanOptions) -> bool:
-    if any(nm.endswith(suf) for suf in opts.param_suffixes):
-        return True
-    if nm in opts.param_exact_suffixes:
+    """
+    IMPORTANT:
+      - 이전처럼 '.W'로 끝나면 다 param 처리하면 "d_2.W" 같은 게 param으로 오염됨.
+      - 이제는 '숫자. W/b' 형태만 param.
+    """
+    if _PARAM_RE.match(nm) is not None:
         return True
     return False
+
+
+def _is_forced_static(nm: str, opts: PlanOptions) -> bool:
+    return any(str(nm).startswith(p) for p in opts.static_prefixes)
 
 
 def build_binding_plan(ir: IRGraph, *, opts: Optional[PlanOptions] = None) -> BindingPlan:
@@ -73,14 +89,15 @@ def build_binding_plan(ir: IRGraph, *, opts: Optional[PlanOptions] = None) -> Bi
 
     plan = BindingPlan(name=f"{ir.name}:binding_plan")
 
-    # Stage3에서는 "ir.values 전체"를 분류 대상으로 삼는다.
-    # (Stage4에서 lowered-only subset 최적화 가능)
+    # Stage3에서는 ir.values 전체를 분류 대상으로 삼는다.
     for vid, v in ir.values.items():
         vid = int(vid)
-        nm = str(v.name)
+        nm = str(getattr(v, "name", f"v{vid}"))
 
         if nm in opts.input_names:
             role = ROLE_INPUT
+        elif _is_forced_static(nm, opts):
+            role = ROLE_STATIC
         elif _is_param_name(nm, opts):
             role = ROLE_PARAM
         else:
@@ -90,13 +107,17 @@ def build_binding_plan(ir: IRGraph, *, opts: Optional[PlanOptions] = None) -> Bi
             vid=vid,
             role=role,
             name=nm,
-            shape=tuple(v.shape),
-            dtype=str(v.dtype),
-            device=str(v.device),
+            shape=tuple(getattr(v, "shape", ())),
+            dtype=str(getattr(v, "dtype", "torch.float32")),
+            device=str(getattr(v, "device", "cuda")),
         )
         plan.specs[vid] = spec
 
     # stable lists (sorted by vid)
+    plan.inputs.clear()
+    plan.params.clear()
+    plan.statics.clear()
+
     for vid in sorted(plan.specs.keys()):
         r = plan.specs[vid].role
         if r == ROLE_INPUT:
@@ -136,18 +157,15 @@ def allocate_static_env(
     device: Optional[torch.device] = None,
 ) -> Dict[int, torch.Tensor]:
     """
-    Stage3 helper:
-      - plan.statics에 해당하는 vid들을 torch.empty로 allocate 해서 env dict로 반환.
-      - inputs/params는 여기서 만들지 않는다(외부 주입 대상).
+    plan.statics에 해당하는 vid들을 torch.empty로 allocate.
+    inputs/params는 외부 주입.
     """
     env: Dict[int, torch.Tensor] = {}
 
-    # choose default device if not provided
     if device is None:
-        # IRValue.device가 "cuda" 같은 문자열로 들어오는 케이스가 있으니 torch.device로 변환
         d0 = None
         for vid in plan.statics:
-            d0 = ir.values[int(vid)].device
+            d0 = getattr(ir.values[int(vid)], "device", None)
             if d0:
                 break
         try:
@@ -157,7 +175,7 @@ def allocate_static_env(
 
     for vid in plan.statics:
         v = ir.values[int(vid)]
-        dt = _dtype_from_string(v.dtype)
-        env[int(vid)] = torch.empty(tuple(v.shape), device=device, dtype=dt)
+        dt = _dtype_from_string(getattr(v, "dtype", "torch.float32"))
+        env[int(vid)] = torch.empty(tuple(getattr(v, "shape", ())), device=device, dtype=dt)
 
     return env
