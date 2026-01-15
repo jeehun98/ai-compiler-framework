@@ -1,25 +1,17 @@
 // bindings.cpp  (IR-only executable prototype; JSON parsed via Python's json module)
 //
-// What this adds on top of your existing bindings:
-//  - compile_ir_json(ir_json) -> handle
-//  - exe_bind(handle, name, tensor)
-//  - exe_required_inputs(handle) -> [names]
-//  - exe_dump(handle) -> dict (ops + bindings + required inputs)
-//  - exe_run_once(handle)  (eager run on current stream policy)
-//  - exe_capture(handle)   (capture_begin + run_once + capture_end)
-//  - exe_replay(handle)
+// FIXES in this version:
+//  1) py::list has NO reserve(): removed all list.reserve() calls (run_once + exe_dump)
+//  2) compile_ir_json can now accept already-lowered ops in JSON:
+//       "gemm", "bias_add", "copy", "reduce_sum", "relu_bwd", ...
+//     (previously only accepted IR ops like Linear/ReLU/...)
+//  3) lowered_kind_from_name() extended: copy / reduce_sum / relu_bwd (+ add)
 //
-// Notes:
-//  - This prototype lowers only these IR ops:
+// Notes (same as before):
+//  - This prototype lowers these IR ops:
 //      Linear, ReLU, MseGrad, GradZero, StepInc, BiasCorr, AdamStep
-//    Backward is NOT lowered here (yet). If your IR contains AdamStep grads
-//    produced by Backward, you must bind those grad tensors explicitly (dW/db etc)
-//    before running the optim slice.
-//  - Intermediates (e.g., linear_out / relu_out / mse_grad_out) are lazily allocated
-//    using IR value meta (shape/dtype/device). External inputs (x/t/W/b/m/v/grad/step/bc1/bc2)
-//    must be bound by user.
-//
-// This is intentionally "minimal diff": it reuses your op_call_impl + CUDA graph controls.
+//  - Backward is NOT lowered here (yet).
+//  - Intermediates are lazily allocated from meta; externals must be bound.
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -61,7 +53,7 @@ static inline void cuda_check(cudaError_t e, const char* what) {
 }
 
 // ============================================================
-// Graph state + stream policy (your original code, unchanged)
+// Graph state + stream policy
 // ============================================================
 
 struct CudaGraphState {
@@ -119,7 +111,7 @@ static CudaGraphState g_graph;
 static std::mutex g_graph_mu;
 
 // ============================================================
-// NEW: C++ op trace (authoritative) (your original code, unchanged)
+// C++ op trace
 // ============================================================
 
 static std::vector<std::string> g_trace_ops;
@@ -163,7 +155,7 @@ static inline cudaStream_t aicf_dispatch_stream_locked() {
 }
 
 // ============================================================
-// AttrPack builder (v0.2) (your original code, unchanged)
+// AttrPack builder (v0.2)
 // ============================================================
 
 static void build_attr_pack_v0_2(
@@ -298,7 +290,7 @@ static void op_call_impl(
 }
 
 // ============================================================
-// IR-only Executable (NEW)
+// IR-only Executable
 // ============================================================
 
 struct ValMeta {
@@ -320,7 +312,6 @@ static inline std::string to_lower(std::string s) {
 }
 
 static inline int parse_cuda_index(const std::string& dev) {
-  // "cuda:0" / "cuda" / "cuda:1"
   auto p = dev.find(':');
   if (p == std::string::npos) return 0;
   return std::max(0, std::atoi(dev.c_str() + (int)p + 1));
@@ -328,7 +319,6 @@ static inline int parse_cuda_index(const std::string& dev) {
 
 static inline torch::Dtype parse_torch_dtype(const std::string& dt) {
   std::string s = to_lower(dt);
-  // accept "torch.float32", "float32", etc.
   if (s.find("float32") != std::string::npos || s.find("f32") != std::string::npos) return torch::kFloat32;
   if (s.find("float16") != std::string::npos || s.find("f16") != std::string::npos || s.find("half") != std::string::npos) return torch::kFloat16;
   if (s.find("bfloat16") != std::string::npos || s.find("bf16") != std::string::npos) return torch::kBFloat16;
@@ -378,7 +368,6 @@ struct IRExec {
     torch::TensorOptions opt = torch::TensorOptions().dtype(dt).device(dv);
     std::vector<int64_t> sz = m.shape;
 
-    // scalars: allow empty shape -> []
     torch::Tensor t = torch::empty(sz, opt);
     bind.emplace(name, t);
     return t;
@@ -390,15 +379,10 @@ struct IRExec {
       py::list in_list;
       py::list out_list;
 
-      in_list.attr("reserve")(op.ins.size());
-      out_list.attr("reserve")(op.outs.size());
+      // NOTE: py::list has no reserve()
 
-      for (const auto& n : op.ins) {
-        in_list.append(get_or_alloc(n));
-      }
-      for (const auto& n : op.outs) {
-        out_list.append(get_or_alloc(n));
-      }
+      for (const auto& n : op.ins)  in_list.append(get_or_alloc(n));
+      for (const auto& n : op.outs) out_list.append(get_or_alloc(n));
 
       op_call_impl(op.kind, in_list, out_list, op.attrs);
     }
@@ -411,7 +395,7 @@ static int g_next_exec_id = 1;
 static std::unordered_map<int, std::shared_ptr<IRExec>> g_execs;
 
 // ============================================================
-// IR JSON parsing + lowering (NEW, dependency-free)
+// IR JSON parsing + lowering
 // ============================================================
 
 static py::object py_json_loads() {
@@ -427,10 +411,15 @@ static py::object py_json_loads() {
 static aicf::cuda::OpKind lowered_kind_from_name(const std::string& op) {
   const std::string s = to_lower(op);
 
-  // lowered kernel names (runtime)
+  if (s == "add") return aicf::cuda::OpKind::EltwiseAdd;
   if (s == "gemm") return aicf::cuda::OpKind::Gemm;
   if (s == "bias_add") return aicf::cuda::OpKind::BiasAdd;
   if (s == "relu") return aicf::cuda::OpKind::EltwiseRelu;
+
+  if (s == "copy") return aicf::cuda::OpKind::Copy;
+  if (s == "reduce_sum") return aicf::cuda::OpKind::ReduceSum;
+  if (s == "relu_bwd") return aicf::cuda::OpKind::ReluBwd;
+
   if (s == "mse_grad") return aicf::cuda::OpKind::MseGrad;
   if (s == "grad_zero") return aicf::cuda::OpKind::GradZero;
   if (s == "step_inc") return aicf::cuda::OpKind::StepInc;
@@ -450,6 +439,32 @@ static void lower_ir_node_into(
 
   const std::string op = to_lower(ir_op);
 
+  // ==========================================================
+  // FIX #1: Accept already-lowered ops as-is (direct mapping)
+  // ==========================================================
+  if (op == "add" || op == "gemm" || op == "bias_add" || op == "relu" ||
+      op == "copy" || op == "reduce_sum" || op == "relu_bwd" ||
+      op == "mse_grad" || op == "grad_zero" || op == "step_inc" ||
+      op == "bias_corr" || op == "adam_step") {
+
+    LoweredOp lop{};
+    lop.kind  = lowered_kind_from_name(op);
+    lop.ins   = in_names;
+    lop.outs  = out_names;
+    lop.attrs = py::dict();
+
+    // pass-through attrs
+    for (auto it : attrs) {
+      lop.attrs[it.first] = it.second;
+    }
+
+    out_ops.emplace_back(std::move(lop));
+    return;
+  }
+
+  // -------------------------------
+  // IR (high-level) lowering rules
+  // -------------------------------
   if (op == "linear") {
     // IR: inputs [x, W, (b)] outputs [y]
     // Lower: gemm(x, W) -> y   (transB=True)
@@ -487,7 +502,6 @@ static void lower_ir_node_into(
   }
 
   if (op == "relu") {
-    // IR: inputs [x] outputs [y]
     if (in_names.size() != 1 || out_names.size() != 1) throw std::runtime_error("ReLU: expects 1 in/1 out");
     LoweredOp r{};
     r.kind = aicf::cuda::OpKind::EltwiseRelu;
@@ -499,7 +513,6 @@ static void lower_ir_node_into(
   }
 
   if (op == "msegrad" || op == "mse_grad") {
-    // IR: inputs [pred, target] outputs [grad]
     if (in_names.size() != 2 || out_names.size() != 1) throw std::runtime_error("MseGrad: expects 2 in/1 out");
     LoweredOp m{};
     m.kind = aicf::cuda::OpKind::MseGrad;
@@ -512,7 +525,6 @@ static void lower_ir_node_into(
   }
 
   if (op == "gradzero" || op == "grad_zero") {
-    // IR: inputs [g] outputs [g] (in-place semantics)
     if (in_names.size() != 1 || out_names.size() != 1) throw std::runtime_error("GradZero: expects 1 in/1 out");
     LoweredOp z{};
     z.kind = aicf::cuda::OpKind::GradZero;
@@ -548,7 +560,6 @@ static void lower_ir_node_into(
   }
 
   if (op == "adamstep" || op == "adam_step") {
-    // inputs: [p, grad, m, v, bc1_inv, bc2_inv] outputs: [p, m, v]
     if (in_names.size() != 6 || out_names.size() != 3) throw std::runtime_error("AdamStep: expects 6 in/3 out");
     LoweredOp a{};
     a.kind = aicf::cuda::OpKind::AdamStep;
@@ -564,8 +575,6 @@ static void lower_ir_node_into(
   }
 
   if (op == "backward") {
-    // Not supported in this minimal prototype.
-    // You can still IR-run forward/optim slices if you bind grads explicitly.
     throw std::runtime_error("IR lowering: Backward is not supported in this bindings-only prototype yet.");
   }
 
@@ -582,11 +591,9 @@ static std::shared_ptr<IRExec> compile_ir_json_impl(const std::string& ir_json) 
   if (root.contains("graph")) exe->graph_name = py::cast<std::string>(root["graph"]);
   else exe->graph_name = "graph";
 
-  // values: map(str(id) -> {id,name,shape,dtype,device})
   if (!root.contains("values")) throw std::runtime_error("compile_ir_json: missing 'values'");
   py::dict values = py::cast<py::dict>(root["values"]);
 
-  // build id -> name and meta(name -> meta)
   int max_id = -1;
   for (auto it : values) {
     py::dict v = py::cast<py::dict>(it.second);
@@ -605,7 +612,6 @@ static std::shared_ptr<IRExec> compile_ir_json_impl(const std::string& ir_json) 
     id_valid[(size_t)vid] = true;
 
     ValMeta m;
-    // shape is list
     py::list shp = py::cast<py::list>(v["shape"]);
     for (auto s : shp) m.shape.push_back(py::cast<int64_t>(s));
     m.dtype = py::cast<std::string>(v["dtype"]);
@@ -613,17 +619,12 @@ static std::shared_ptr<IRExec> compile_ir_json_impl(const std::string& ir_json) 
     exe->meta.emplace(name, std::move(m));
   }
 
-  // nodes
   if (!root.contains("nodes")) throw std::runtime_error("compile_ir_json: missing 'nodes'");
   py::list nodes = py::cast<py::list>(root["nodes"]);
 
-  // For required_inputs analysis:
-  // - produced_names: any output of a lowered op
-  // - used_names: any input of a lowered op
   std::unordered_set<std::string> produced;
   std::unordered_set<std::string> used;
 
-  // build lowered ops
   for (auto nobj : nodes) {
     py::dict n = py::cast<py::dict>(nobj);
     std::string op = py::cast<std::string>(n["op"]);
@@ -664,10 +665,6 @@ static std::shared_ptr<IRExec> compile_ir_json_impl(const std::string& ir_json) 
     }
   }
 
-  // required inputs = used - produced
-  // (These must be provided via exe_bind; intermediates will still be alloc'ed lazily,
-  //  but if something is truly external and you didn't bind it, you'll silently get garbage.
-  //  So we surface them here.)
   {
     std::vector<std::string> req;
     req.reserve(used.size());
@@ -761,7 +758,6 @@ PYBIND11_MODULE(_C, m) {
 
     std::fprintf(stderr, "[aicf] capture_begin entered (dedicated stream)\n");
 
-    // clear trace at capture begin
     trace_reset_locked();
 
     g_graph.reset_full();
@@ -826,7 +822,7 @@ PYBIND11_MODULE(_C, m) {
   });
 
   // ============================================================
-  // IR-only executable API (NEW)
+  // IR-only executable API
   // ============================================================
 
   m.def("compile_ir_json", [](const std::string& ir_json) -> int {
@@ -879,7 +875,7 @@ PYBIND11_MODULE(_C, m) {
     d["ops"] = ops;
 
     py::list bound;
-    bound.attr("reserve")(exe.bind.size());
+    // NOTE: py::list has no reserve()
     for (const auto& kv : exe.bind) bound.append(kv.first);
     d["bound"] = bound;
 
@@ -908,14 +904,11 @@ PYBIND11_MODULE(_C, m) {
       exe = it->second;
     }
 
-    // reuse your capture lifecycle
     {
       std::lock_guard<std::mutex> lock(g_graph_mu);
-      // clear trace at capture begin
       trace_reset_locked();
     }
 
-    // begin capture
     {
       std::lock_guard<std::mutex> lock(g_graph_mu);
       std::fprintf(stderr, "[aicf] capture_begin entered (dedicated stream)\n");
@@ -941,10 +934,8 @@ PYBIND11_MODULE(_C, m) {
       g_graph.capturing = true;
     }
 
-    // record ops into the capture stream
     exe->run_once();
 
-    // end capture
     {
       std::lock_guard<std::mutex> lock(g_graph_mu);
 

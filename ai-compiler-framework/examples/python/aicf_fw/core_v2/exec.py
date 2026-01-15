@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
@@ -64,33 +64,35 @@ def _canon_name(s: str) -> str:
     return s
 
 
-def _build_name_maps(plan: BindingPlan) -> tuple[Dict[str, int], Dict[str, List[int]]]:
+def _build_name_maps(plan: BindingPlan) -> Tuple[Dict[str, List[int]], Dict[str, List[int]]]:
     """
     plan.specs (vid->spec)에서:
-      - exact name -> vid
+      - exact name -> [vid...]
       - canon name -> [vid...]
+    NOTE:
+      - name 충돌이 있을 수 있으므로 list로 보관한다.
     """
-    name_to_vid: Dict[str, int] = {}
+    name_to_vids: Dict[str, List[int]] = {}
     canon_to_vids: Dict[str, List[int]] = {}
 
     for vid, spec in plan.specs.items():
         n = str(spec.name)
-        name_to_vid[n] = int(vid)
+        name_to_vids.setdefault(n, []).append(int(vid))
 
         cn = _canon_name(n)
         canon_to_vids.setdefault(cn, []).append(int(vid))
 
-    return name_to_vid, canon_to_vids
+    return name_to_vids, canon_to_vids
 
 
-def _find_vid_for_key(
+def _collect_vid_candidates_for_key(
     *,
     key: str,
-    name_to_vid: Dict[str, int],
+    name_to_vids: Dict[str, List[int]],
     canon_to_vids: Dict[str, List[int]],
-) -> Optional[int]:
+) -> List[int]:
     """
-    사용자 입력 key(예: "2.W")로 plan에서 대응되는 vid를 찾는다.
+    사용자 입력 key(예: "2.W")로 plan에서 대응되는 vid 후보들을 찾는다.
     우선순위:
       1) exact match
       2) canon match (d_ prefix 제거)
@@ -98,24 +100,78 @@ def _find_vid_for_key(
       4) canon suffix match
     """
     k = str(key)
-    if k in name_to_vid:
-        return int(name_to_vid[k])
+
+    vids = name_to_vids.get(k)
+    if vids:
+        return list(vids)
 
     ck = _canon_name(k)
     vids = canon_to_vids.get(ck)
     if vids:
-        # 보통 1개여야 정상. 여러 개면 첫 번째로(확장 시 role 체크로 강화 가능)
-        return int(vids[0])
+        return list(vids)
 
     # suffix match: plan name endswith user key
-    for pn, vid in name_to_vid.items():
+    out: List[int] = []
+    for pn, vs in name_to_vids.items():
         if str(pn).endswith(k):
-            return int(vid)
+            out.extend(vs)
+    if out:
+        return out
 
     # canon suffix match
-    for pn, vid in name_to_vid.items():
+    out2: List[int] = []
+    for pn, vs in name_to_vids.items():
         if _canon_name(pn).endswith(ck):
-            return int(vid)
+            out2.extend(vs)
+    return out2
+
+
+def _spec_kind_matches(spec, kind: str) -> bool:
+    """
+    bind(inputs, "input") / bind(params, "param")에 대해 plan spec.role을 이용해 우선 필터링.
+    role이 없거나 예상 밖이면 완화적으로 True.
+    """
+    role = str(getattr(spec, "role", "") or "")
+    if not role:
+        return True
+    if kind == "input":
+        return ("input" in role) or (role == "in")
+    if kind == "param":
+        return ("param" in role) or ("weight" in role) or ("bias" in role)
+    return True
+
+
+def _choose_vid_for_tensor(
+    *,
+    candidates: List[int],
+    plan: BindingPlan,
+    t: torch.Tensor,
+    kind: str,
+    opts: ExecOptions,
+) -> Optional[int]:
+    """
+    중복 name이 있을 때 올바른 vid를 선택한다.
+    전략:
+      1) role(kind) 매칭 후보 우선
+      2) shape/dtype/device가 _assert_tensor_matches를 통과하는 첫 후보
+      3) 없으면 None
+    """
+    if not candidates:
+        return None
+
+    # 1) kind(role) 필터
+    filtered = [v for v in candidates if _spec_kind_matches(plan.specs[int(v)], kind)]
+    if not filtered:
+        filtered = list(candidates)
+
+    # 2) shape/dtype/device 검증 통과하는 후보 선택
+    for v in filtered:
+        spec = plan.specs[int(v)]
+        try:
+            _assert_tensor_matches(spec, t, opts)
+            return int(v)
+        except Exception:
+            pass
 
     return None
 
@@ -170,28 +226,39 @@ class PlannedExecutor:
         if (not reuse_static) or (not self.env):
             self.env = allocate_static_env(self.ir, self.plan, device=self.device)
 
-        # 2) robust name maps from plan
-        name_to_vid, canon_to_vids = _build_name_maps(self.plan)
+        # 2) robust name maps from plan (duplicate-name safe)
+        name_to_vids, canon_to_vids = _build_name_maps(self.plan)
 
         def bind(src: Dict[str, Any], kind: str):
             for name, obj in src.items():
-                vid = _find_vid_for_key(
-                    key=str(name),
-                    name_to_vid=name_to_vid,
-                    canon_to_vids=canon_to_vids,
-                )
-                if vid is None:
-                    # 보여주기용으로 known list는 짧게
-                    known = list(name_to_vid.keys())
-                    head = known[:24]
-                    tail_note = "" if len(known) <= 24 else f" ...(+{len(known)-24})"
-                    raise KeyError(f"[plan] unknown {kind} name='{name}'. known={head}{tail_note}")
-
-                spec = self.plan.specs[int(vid)]
                 t = _unwrap(obj)
                 if not isinstance(t, torch.Tensor):
                     raise TypeError(f"[plan] {kind} '{name}' must be torch.Tensor-like, got {type(obj)}")
 
+                cands = _collect_vid_candidates_for_key(
+                    key=str(name),
+                    name_to_vids=name_to_vids,
+                    canon_to_vids=canon_to_vids,
+                )
+                vid = _choose_vid_for_tensor(
+                    candidates=cands,
+                    plan=self.plan,
+                    t=t,
+                    kind=kind,
+                    opts=opts,
+                )
+                if vid is None:
+                    # 보여주기용으로 known list는 짧게
+                    known = list(name_to_vids.keys())
+                    head = known[:24]
+                    tail_note = "" if len(known) <= 24 else f" ...(+{len(known)-24})"
+                    raise KeyError(
+                        f"[plan] unknown or ambiguous {kind} name='{name}'. "
+                        f"candidates={cands}. known={head}{tail_note}"
+                    )
+
+                spec = self.plan.specs[int(vid)]
+                # 최종 검증(에러 메시지 정확히)
                 _assert_tensor_matches(spec, t, opts)
                 self.env[int(vid)] = t
 
@@ -217,7 +284,14 @@ class PlannedExecutor:
         """
         Execute lowered ops. Returns env.
         """
-        bk = self.backend or get_backend()
+        try:
+            bk = self.backend or get_backend()
+        except AssertionError as e:
+            raise AssertionError(
+                "Backend not set. core_v2 executor needs a backend.\n"
+                "Fix: call aicf_fw.backend.set_backend(AICFBackend()) before running PlannedExecutor."
+            ) from e
+
         self.build_env(inputs=inputs, params=params, reuse_static=reuse_static)
 
         dbg = self.opts.debug

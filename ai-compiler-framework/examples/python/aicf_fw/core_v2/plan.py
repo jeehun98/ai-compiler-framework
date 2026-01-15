@@ -14,7 +14,7 @@ from .ir import IRGraph
 # -----------------------------
 ROLE_INPUT = "input"
 ROLE_PARAM = "param"
-ROLE_STATIC = "static"  # runtime allocate (temps/intermediates/outputs by default)
+ROLE_STATIC = "static"  # runtime allocate (temps/intermediates/outputs/states)
 
 
 @dataclass
@@ -30,10 +30,9 @@ class BindSpec:
 @dataclass
 class BindingPlan:
     """
-    BindingPlan = "누가 외부에서 바인딩되고, 누가 런타임에서 allocate 되는지"를 고정.
-    - inputs: 외부 주입 (x,t 등)
-    - params: 외부 주입 (W,b 등)  <-- 진짜 파라미터만!
-    - statics: runtime allocate (intermediates, outputs, grads 등)
+    inputs : 외부 주입 (x,t 등)
+    params : 외부 주입 (모델 파라미터만: "0.W","0.b","2.W","2.b"...)
+    statics: 런타임 allocate (intermediates, outputs, grads, optimizer states 등)
     """
     name: str
     specs: Dict[int, BindSpec] = field(default_factory=dict)
@@ -50,33 +49,32 @@ class BindingPlan:
 @dataclass
 class PlanOptions:
     """
-    Stage3 기본 규칙(수정):
+    Stage3/6 규칙(최종):
       - input_names: {"x","t"} 는 input
-      - param name 규칙: "0.W", "0.b", "2.W", "2.b" 같은 layer 파라미터만 param
-      - "d_*", "grad*", "dY" 등은 절대 param이 아니고 static
+      - 모델 파라미터만 param: "숫자.(W|b)" 형태만
+      - optimizer state는 무조건 static: "opt.*"
+      - backward/grad는 무조건 static: "d_*", "grad*", "dY" 등
       - 나머지는 static
     """
     input_names: Set[str] = field(default_factory=lambda: {"x", "t"})
 
-    # "0.W" / "2.b" 형태만 param 인정 (이게 핵심)
+    # 모델 파라미터만 param 인정
     param_regex: str = r"^\d+\.(W|b)$"
 
-    # backward/grad 네이밍 prefix는 무조건 static으로
-    static_prefixes: Tuple[str, ...] = ("d_", "grad", "dY")
+    # 무조건 static 처리 prefix들
+    static_prefixes: Tuple[str, ...] = (
+        "d_", "grad", "dY",
+        "opt.",           # ★ 핵심: optimizer state는 외부 주입 X, executor가 allocate해서 들고감
+    )
 
 
-_PARAM_RE = re.compile(PlanOptions().param_regex)
+def _compile_param_re(opts: PlanOptions) -> re.Pattern:
+    return re.compile(opts.param_regex)
 
 
-def _is_param_name(nm: str, opts: PlanOptions) -> bool:
-    """
-    IMPORTANT:
-      - 이전처럼 '.W'로 끝나면 다 param 처리하면 "d_2.W" 같은 게 param으로 오염됨.
-      - 이제는 '숫자. W/b' 형태만 param.
-    """
-    if _PARAM_RE.match(nm) is not None:
-        return True
-    return False
+def _is_param_name(nm: str, opts: PlanOptions, param_re: re.Pattern) -> bool:
+    # "0.W" / "2.b" 같은 모델 파라미터만 param
+    return param_re.match(nm) is not None
 
 
 def _is_forced_static(nm: str, opts: PlanOptions) -> bool:
@@ -86,10 +84,10 @@ def _is_forced_static(nm: str, opts: PlanOptions) -> bool:
 def build_binding_plan(ir: IRGraph, *, opts: Optional[PlanOptions] = None) -> BindingPlan:
     if opts is None:
         opts = PlanOptions()
+    param_re = _compile_param_re(opts)
 
     plan = BindingPlan(name=f"{ir.name}:binding_plan")
 
-    # Stage3에서는 ir.values 전체를 분류 대상으로 삼는다.
     for vid, v in ir.values.items():
         vid = int(vid)
         nm = str(getattr(v, "name", f"v{vid}"))
@@ -98,12 +96,12 @@ def build_binding_plan(ir: IRGraph, *, opts: Optional[PlanOptions] = None) -> Bi
             role = ROLE_INPUT
         elif _is_forced_static(nm, opts):
             role = ROLE_STATIC
-        elif _is_param_name(nm, opts):
+        elif _is_param_name(nm, opts, param_re):
             role = ROLE_PARAM
         else:
             role = ROLE_STATIC
 
-        spec = BindSpec(
+        plan.specs[vid] = BindSpec(
             vid=vid,
             role=role,
             name=nm,
@@ -111,9 +109,8 @@ def build_binding_plan(ir: IRGraph, *, opts: Optional[PlanOptions] = None) -> Bi
             dtype=str(getattr(v, "dtype", "torch.float32")),
             device=str(getattr(v, "device", "cuda")),
         )
-        plan.specs[vid] = spec
 
-    # stable lists (sorted by vid)
+    # stable lists
     plan.inputs.clear()
     plan.params.clear()
     plan.statics.clear()
@@ -131,7 +128,7 @@ def build_binding_plan(ir: IRGraph, *, opts: Optional[PlanOptions] = None) -> Bi
 
 
 # -----------------------------
-# Optional helper: allocate statics
+# allocate statics (with zero-init for opt states)
 # -----------------------------
 def _dtype_from_string(dtype_s: str) -> torch.dtype:
     ds = str(dtype_s)
@@ -150,6 +147,23 @@ def _dtype_from_string(dtype_s: str) -> torch.dtype:
     return torch.float32
 
 
+def _should_zero_init_static(name: str) -> bool:
+    """
+    Optimizer state는 초기값이 의미 있음:
+      - opt.step: 0
+      - opt.m.*, opt.v.*: 0
+    나머지 statics(intermediates/grads)는 empty로 충분.
+    """
+    if name.startswith("opt.step"):
+        return True
+    if name.startswith("opt.m.") or name.startswith("opt.v."):
+        return True
+    # 필요하면 bc1/bc2도 여기서 제어 가능:
+    # if name.startswith("opt.bc1_inv") or name.startswith("opt.bc2_inv"):
+    #     return False
+    return False
+
+
 def allocate_static_env(
     ir: IRGraph,
     plan: BindingPlan,
@@ -157,8 +171,9 @@ def allocate_static_env(
     device: Optional[torch.device] = None,
 ) -> Dict[int, torch.Tensor]:
     """
-    plan.statics에 해당하는 vid들을 torch.empty로 allocate.
-    inputs/params는 외부 주입.
+    plan.statics에 해당하는 vid들을 allocate.
+    - opt.* state는 zero-init
+    - 나머지 static은 empty
     """
     env: Dict[int, torch.Tensor] = {}
 
@@ -175,7 +190,13 @@ def allocate_static_env(
 
     for vid in plan.statics:
         v = ir.values[int(vid)]
+        nm = str(getattr(v, "name", f"v{vid}"))
         dt = _dtype_from_string(getattr(v, "dtype", "torch.float32"))
-        env[int(vid)] = torch.empty(tuple(getattr(v, "shape", ())), device=device, dtype=dt)
+        shape = tuple(getattr(v, "shape", ()))
+
+        if _should_zero_init_static(nm):
+            env[int(vid)] = torch.zeros(shape, device=device, dtype=dt)
+        else:
+            env[int(vid)] = torch.empty(shape, device=device, dtype=dt)
 
     return env

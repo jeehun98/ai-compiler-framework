@@ -7,6 +7,11 @@
 //   * acc float, store half
 // - NOTE: TC path currently requires C contiguous row-major (Ccs==1, Crs==N)
 //         A/B may be strided logically (correct), perf may vary.
+//
+// PATCH v2:
+// - Robustly read transA/transB even if AttrPack uses different key names.
+// - Robustly read BOOL or I64 encoded bool.
+// - Optional debug dump of AttrPack (compile with -DAICF_GEMM_DUMP_ATTR=1).
 // ============================================================================
 
 #include <cuda_runtime.h>
@@ -37,36 +42,98 @@ using namespace nvcuda;
 // ============================================================================
 // Attr helpers
 // ============================================================================
-static inline bool attr_get_bool(const void* attr, const char* key, bool default_val) {
-  if (!attr) return default_val;
-  const auto* pack = static_cast<const aicf::cuda::AttrPack*>(attr);
-  if (!pack->items || pack->size <= 0) return default_val;
-
-  const std::string_view k(key);
+static inline bool attr_has_key_sv(const aicf::cuda::AttrPack* pack, std::string_view k, int* out_idx) {
+  if (!pack || !pack->items || pack->size <= 0) return false;
   for (int i = 0; i < pack->size; ++i) {
     const auto& kv = pack->items[i];
     if (!kv.key) continue;
     if (std::string_view(kv.key) == k) {
-      if (kv.val.tag == aicf::cuda::AttrTag::kBool) return kv.val.b32 != 0;
-      return default_val;
+      if (out_idx) *out_idx = i;
+      return true;
+    }
+  }
+  return false;
+}
+
+static inline bool attr_get_bool_i64_by_idx(const aicf::cuda::AttrPack* pack, int idx, bool* out) {
+  if (!pack || !out) return false;
+  if (idx < 0 || idx >= pack->size) return false;
+  const auto& kv = pack->items[idx];
+  // accept bool or i64
+  if (kv.val.tag == aicf::cuda::AttrTag::kBool) {
+    *out = (kv.val.b32 != 0);
+    return true;
+  }
+  if (kv.val.tag == aicf::cuda::AttrTag::kI64) {
+    *out = (kv.val.i64 != 0);
+    return true;
+  }
+  return false;
+}
+
+#if defined(AICF_GEMM_DUMP_ATTR) && AICF_GEMM_DUMP_ATTR
+static inline void attr_dump(const void* attr, const char* where) {
+  const auto* pack = static_cast<const aicf::cuda::AttrPack*>(attr);
+  if (!pack || !pack->items || pack->size <= 0) {
+    printf("[gemm][attrdump][%s] (empty)\n", where);
+    return;
+  }
+  printf("[gemm][attrdump][%s] size=%d\n", where, pack->size);
+  for (int i = 0; i < pack->size; ++i) {
+    const auto& kv = pack->items[i];
+    const char* k = kv.key ? kv.key : "(null)";
+    // tag print: you can extend this if enum changes
+    int tag = (int)kv.val.tag;
+    long long i64 = 0;
+    int b32 = 0;
+    float f32 = 0.f;
+    if (kv.val.tag == aicf::cuda::AttrTag::kI64) i64 = (long long)kv.val.i64;
+    if (kv.val.tag == aicf::cuda::AttrTag::kBool) b32 = (int)kv.val.b32;
+    if (kv.val.tag == aicf::cuda::AttrTag::kF32) f32 = kv.val.f32;
+    printf("  [%d] key=%s tag=%d (i64=%lld b32=%d f32=%f)\n", i, k, tag, i64, b32, f32);
+  }
+}
+#else
+static inline void attr_dump(const void*, const char*) {}
+#endif
+
+static inline bool attr_get_bool_or_i64_anykey(
+    const void* attr,
+    const char* const* keys, int nkeys,
+    bool default_val) {
+
+  const auto* pack = static_cast<const aicf::cuda::AttrPack*>(attr);
+  if (!pack || !pack->items || pack->size <= 0) return default_val;
+
+  for (int k = 0; k < nkeys; ++k) {
+    int idx = -1;
+    if (attr_has_key_sv(pack, std::string_view(keys[k]), &idx)) {
+      bool v = default_val;
+      if (attr_get_bool_i64_by_idx(pack, idx, &v)) return v;
+      return default_val; // key exists but wrong tag
     }
   }
   return default_val;
+}
+
+static inline bool read_transA(const void* attr) {
+  // cover common python-side naming variants
+  const char* keys[] = {"transA", "trans_a", "transposeA", "ta"};
+  return attr_get_bool_or_i64_anykey(attr, keys, (int)(sizeof(keys)/sizeof(keys[0])), false);
+}
+static inline bool read_transB(const void* attr) {
+  const char* keys[] = {"transB", "trans_b", "transposeB", "tb"};
+  return attr_get_bool_or_i64_anykey(attr, keys, (int)(sizeof(keys)/sizeof(keys[0])), false);
 }
 
 // ============================================================================
 // Tensor helpers
 // ============================================================================
 static inline bool is_2d(const TensorDesc& T) { return T.rank() == 2; }
-static inline bool is_f32_2d(const TensorDesc& T) { return (T.dtype == DType::kF32) && is_2d(T); }
-static inline bool is_f16_2d(const TensorDesc& T) { return (T.dtype == DType::kF16) && is_2d(T); }
-
-// stride is in ELEMENTS (torch-style), must be positive for our kernels.
 static inline bool stride_valid_2d(const TensorDesc& T) {
   if (!is_2d(T)) return false;
   return (T.stride[0] > 0 && T.stride[1] > 0);
 }
-
 static inline bool is_contig_rowmajor_2d(const TensorDesc& T) {
   if (!is_2d(T)) return false;
   if (!stride_valid_2d(T)) return false;
@@ -76,12 +143,10 @@ static inline bool is_contig_rowmajor_2d(const TensorDesc& T) {
 // Logical 2D view (in elements)
 struct MatView2D {
   const void* data{nullptr};
-  int64_t rows{0};   // logical rows
-  int64_t cols{0};   // logical cols
-  int64_t rs{0};     // row-stride
-  int64_t cs{0};     // col-stride
-  // NOTE: requires DType::kUnknown exist in your DType enum.
-  // If not, either add it or set a safe default (e.g., kF32) and override below.
+  int64_t rows{0};
+  int64_t cols{0};
+  int64_t rs{0};
+  int64_t cs{0};
   DType dtype{DType::kUnknown};
 };
 
@@ -90,14 +155,12 @@ static inline MatView2D make_view_2d(const TensorDesc& T, bool trans) {
   v.data  = T.data;
   v.dtype = T.dtype;
 
-  // physical (r,c) -> r*stride0 + c*stride1
   if (!trans) {
     v.rows = T.shape[0];
     v.cols = T.shape[1];
     v.rs   = T.stride[0];
     v.cs   = T.stride[1];
   } else {
-    // logical transpose: (r,c) maps to physical (c,r)
     v.rows = T.shape[1];
     v.cols = T.shape[0];
     v.rs   = T.stride[1];
@@ -106,7 +169,6 @@ static inline MatView2D make_view_2d(const TensorDesc& T, bool trans) {
   return v;
 }
 
-// Unified GEMM shape/stride check using logical views
 static inline bool gemm_check_2d(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs,
@@ -138,7 +200,6 @@ static inline bool gemm_check_2d(
   if (C.rows != M || C.cols != N) return false;
 
   if (A.rs<=0 || A.cs<=0 || B.rs<=0 || B.cs<=0 || C.rs<=0 || C.cs<=0) return false;
-
   return true;
 }
 
@@ -147,9 +208,6 @@ static inline bool gemm_check_2d(
 // ============================================================================
 namespace gemm_impl {
 
-// -------------------------
-// f32 naive: unified strided
-// -------------------------
 __global__ void gemm_f32_naive_strided_kernel(
     const float* __restrict__ A, int64_t Ars, int64_t Acs,
     const float* __restrict__ B, int64_t Brs, int64_t Bcs,
@@ -169,9 +227,7 @@ __global__ void gemm_f32_naive_strided_kernel(
   C[(int64_t)row * Crs + (int64_t)col * Ccs] = acc;
 }
 
-// -------------------------
-// WMMA helpers
-// -------------------------
+// WMMA helpers / pack / core 그대로 유지
 __device__ __forceinline__ int ceil16_i(int x) { return (x + 15) & ~15; }
 
 __device__ __forceinline__
@@ -183,16 +239,12 @@ __half load_h(const __half* base, int64_t rs, int64_t cs,
   return __float2half(0.0f);
 }
 
-// -------------------------
-// GLOBAL->SMEM packing (transpose-at-load)
-// -------------------------
 __device__ __forceinline__
 void pack_smemA_rowmajor_16x16(
     __half* smemA,
     const __half* A, int64_t Ars, int64_t Acs, int64_t Am, int64_t Ak,
     int m0, int k0, int lane)
 {
-  // smemA[i,j] = A[m0+i, k0+j] (row-major)
   for (int t = lane; t < 256; t += 32) {
     const int i = t / 16;
     const int j = t % 16;
@@ -206,10 +258,6 @@ void pack_smemB_colmajor_16x16(
     const __half* B, int64_t Brs, int64_t Bcs, int64_t Bk, int64_t Bn,
     int k0, int n0, int lane)
 {
-  // We want smemB stored in COL-MAJOR so that wmma::load_matrix_sync(..., col_major) works.
-  // col-major means element (row=i,col=j) stored at smemB[j*ld + i].
-  // Target: Btile[i,j] = B[k0+i, n0+j]
-  // Store:  smemB[j,i] = Btile[i,j]
   for (int t = lane; t < 256; t += 32) {
     const int i = t / 16;
     const int j = t % 16;
@@ -217,12 +265,6 @@ void pack_smemB_colmajor_16x16(
   }
 }
 
-// -------------------------
-// WMMA core (strided A/B, C stride-aware store)
-// - computes: C[M,N] = A[M,K] @ B[K,N]
-// - packs A row-major, packs B col-major (transpose-at-load)
-// - acc float, store half
-// -------------------------
 __device__ __forceinline__
 void wmma_core_out_f16_strided_packed(
     const __half* A, int64_t Ars, int64_t Acs, int64_t Am, int64_t Ak,
@@ -233,9 +275,9 @@ void wmma_core_out_f16_strided_packed(
   const int m0 = (int)blockIdx.y * 16;
   const int n0 = (int)blockIdx.x * 16;
 
-  __shared__ __half smemA[256]; // 16x16 row-major
-  __shared__ __half smemB[256]; // 16x16 col-major
-  __shared__ float  smemC[256]; // 16x16 row-major output
+  __shared__ __half smemA[256];
+  __shared__ __half smemB[256];
+  __shared__ float  smemC[256];
 
   wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc;
   wmma::fill_fragment(acc, 0.0f);
@@ -244,14 +286,12 @@ void wmma_core_out_f16_strided_packed(
   const int K16 = ceil16_i(K);
 
   for (int k0 = 0; k0 < K16; k0 += 16) {
-    // GLOBAL -> SMEM packing
     pack_smemA_rowmajor_16x16(smemA, A, Ars, Acs, Am, Ak, m0, k0, lane);
     pack_smemB_colmajor_16x16(smemB, B, Brs, Bcs, Bk, Bn, k0, n0, lane);
     __syncthreads();
 
     wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> a_frag;
     wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::col_major> b_frag;
-
     wmma::load_matrix_sync(a_frag, smemA, 16);
     wmma::load_matrix_sync(b_frag, smemB, 16);
     wmma::mma_sync(acc, a_frag, b_frag, acc);
@@ -261,7 +301,6 @@ void wmma_core_out_f16_strided_packed(
   wmma::store_matrix_sync(smemC, acc, 16, wmma::mem_row_major);
   __syncthreads();
 
-  // store out (stride-aware, though TC variant may restrict C to contiguous row-major)
   for (int t = lane; t < 256; t += 32) {
     const int i = t / 16;
     const int j = t % 16;
@@ -273,9 +312,6 @@ void wmma_core_out_f16_strided_packed(
   }
 }
 
-// -------------------------
-// WMMA kernel (strided)
-// -------------------------
 __global__ void gemm_f16_tc_wmma_out_f16_strided_kernel(
     const __half* __restrict__ A, int64_t Ars, int64_t Acs, int64_t Am, int64_t Ak,
     const __half* __restrict__ B, int64_t Brs, int64_t Bcs, int64_t Bk, int64_t Bn,
@@ -290,15 +326,15 @@ __global__ void gemm_f16_tc_wmma_out_f16_strided_kernel(
 } // namespace gemm_impl
 
 // ============================================================================
-// f32 variant: unified for transA/transB via view
+// f32 variant
 // ============================================================================
 static bool gemm_f32_variant_supported(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs,
     const void* attr) {
 
-  const bool transA = attr_get_bool(attr, "transA", false);
-  const bool transB = attr_get_bool(attr, "transB", false);
+  const bool transA = read_transA(attr);
+  const bool transB = read_transB(attr);
 
   return gemm_check_2d(inputs, num_inputs, outputs, num_outputs,
                        transA, transB, DType::kF32, DType::kF32, DType::kF32);
@@ -313,8 +349,10 @@ static aicf::Status gemm_f32_variant_launch(
     void*, size_t,
     cudaStream_t stream) {
 
-  const bool transA = attr_get_bool(attr, "transA", false);
-  const bool transB = attr_get_bool(attr, "transB", false);
+  attr_dump(attr, "gemm_f32_launch");
+
+  const bool transA = read_transA(attr);
+  const bool transB = read_transB(attr);
 
   if (!gemm_check_2d(inputs, num_inputs, outputs, num_outputs,
                      transA, transB, DType::kF32, DType::kF32, DType::kF32)) {
@@ -355,22 +393,21 @@ KernelVariant make_gemm_f32_naive_variant() {
 }
 
 // ============================================================================
-// TC out_f16 variant: unified for transA/transB via view
+// TC out_f16 variant
 // ============================================================================
 static bool gemm_tc_out_f16_supported(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs,
     const void* attr) {
 
-  const bool transA = attr_get_bool(attr, "transA", false);
-  const bool transB = attr_get_bool(attr, "transB", false);
+  const bool transA = read_transA(attr);
+  const bool transB = read_transB(attr);
 
   if (!gemm_check_2d(inputs, num_inputs, outputs, num_outputs,
                      transA, transB, DType::kF16, DType::kF16, DType::kF16)) {
     return false;
   }
 
-  // Practical constraint: require C contiguous row-major for now.
   const TensorDesc& C0 = outputs[0];
   if (!is_contig_rowmajor_2d(C0)) return false;
 
@@ -386,8 +423,10 @@ static aicf::Status gemm_tc_out_f16_launch(
     void*, size_t,
     cudaStream_t stream) {
 
-  const bool transA = attr_get_bool(attr, "transA", false);
-  const bool transB = attr_get_bool(attr, "transB", false);
+  attr_dump(attr, "gemm_tc_f16_launch");
+
+  const bool transA = read_transA(attr);
+  const bool transB = read_transB(attr);
 
   if (!gemm_check_2d(inputs, num_inputs, outputs, num_outputs,
                      transA, transB, DType::kF16, DType::kF16, DType::kF16)) {
@@ -397,12 +436,11 @@ static aicf::Status gemm_tc_out_f16_launch(
     return aicf::Status::InvalidArgument;
   }
 
-  MatView2D A = make_view_2d(inputs[0], transA);   // [M,K]
-  MatView2D B = make_view_2d(inputs[1], transB);   // [K,N]
-  MatView2D C = make_view_2d(outputs[0], false);   // [M,N]
+  MatView2D A = make_view_2d(inputs[0], transA);
+  MatView2D B = make_view_2d(inputs[1], transB);
+  MatView2D C = make_view_2d(outputs[0], false);
 
   const int M = (int)A.rows;
-  const int K = (int)A.cols;
   const int N = (int)B.cols;
 
   dim3 block(32, 1, 1);
