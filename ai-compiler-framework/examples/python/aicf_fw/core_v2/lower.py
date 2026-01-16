@@ -1,3 +1,4 @@
+# aicf_fw/core_v2/lower.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -20,7 +21,7 @@ def lower_to_backend_ops(ir: IRGraph, *, opts: LoweringOptions | None = None) ->
     def emit(op: str, inputs: List[int], outputs: List[int], attrs: Dict[str, Any] | None = None):
         lowered.append(
             {
-                "op": op,
+                "op": str(op),
                 "inputs": [int(x) for x in inputs],
                 "outputs": [int(y) for y in outputs],
                 "attrs": dict(attrs or {}),
@@ -38,12 +39,18 @@ def lower_to_backend_ops(ir: IRGraph, *, opts: LoweringOptions | None = None) ->
                 raise RuntimeError(f"lower(Linear): expected 2 or 3 inputs, got {len(n.inputs)}")
             if len(n.outputs) != 1:
                 raise RuntimeError("lower(Linear): expected 1 output")
+
             x_vid = int(n.inputs[0])
             W_vid = int(n.inputs[1])
             y_vid = int(n.outputs[0])
+
             emit("gemm", [x_vid, W_vid], [y_vid], {"transB": True})
-            has_bias = bool(n.attrs.get("bias", False)) and len(n.inputs) == 3
+
+            # FIX: bias 존재 판정
+            has_bias = bool(n.attrs.get("bias", False)) or (len(n.inputs) == 3)
             if has_bias:
+                if len(n.inputs) != 3:
+                    raise RuntimeError("lower(Linear): bias requested but no bias input")
                 b_vid = int(n.inputs[2])
                 emit("bias_add", [y_vid, b_vid], [y_vid], {})
             continue
@@ -73,20 +80,10 @@ def lower_to_backend_ops(ir: IRGraph, *, opts: LoweringOptions | None = None) ->
         # Backward
         # -------------------------
         if op == "LinearBwd":
-            # IR: LinearBwd(x, W, dY) -> (dX, dW, dB?)
             if len(n.inputs) != 3:
                 raise RuntimeError("lower(LinearBwd): expected 3 inputs (x,W,dY)")
             if len(n.outputs) not in (2, 3):
-                raise RuntimeError("lower(LinearBwd): expected 2 or 3 outputs (dx,dW,db?)")
-            
-            # LinearBwd: (X, W, dY) -> (dX, dW, db?)
-            # shapes:
-            #   X  : (B, IN)
-            #   W  : (OUT, IN)
-            #   dY : (B, OUT)
-            #   dX : (B, IN)
-            #   dW : (OUT, IN)
-            #   db : (OUT,)
+                raise RuntimeError("lower(LinearBwd): expected 2 or 3 outputs (dX,dW,dB?)")
 
             X_vid  = int(n.inputs[0])
             W_vid  = int(n.inputs[1])
@@ -134,7 +131,6 @@ def lower_to_backend_ops(ir: IRGraph, *, opts: LoweringOptions | None = None) ->
             continue
 
         if op == "AdamStep":
-            # IR: AdamStep(p,g,m,v,bc1,bc2)->(p,m,v) in-place
             if len(n.inputs) != 6 or len(n.outputs) != 3:
                 raise RuntimeError("lower(AdamStep): expected 6 in/3 out")
             emit(
