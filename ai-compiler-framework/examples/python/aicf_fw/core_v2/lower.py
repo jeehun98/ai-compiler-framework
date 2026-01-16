@@ -9,6 +9,7 @@ from .ir import IRGraph
 
 @dataclass
 class LoweringOptions:
+    # reserved (future)
     pass
 
 
@@ -46,7 +47,7 @@ def lower_to_backend_ops(ir: IRGraph, *, opts: LoweringOptions | None = None) ->
 
             emit("gemm", [x_vid, W_vid], [y_vid], {"transB": True})
 
-            # FIX: bias 존재 판정
+            # bias 존재 판정: attrs.bias 또는 3rd input
             has_bias = bool(n.attrs.get("bias", False)) or (len(n.inputs) == 3)
             if has_bias:
                 if len(n.inputs) != 3:
@@ -64,7 +65,9 @@ def lower_to_backend_ops(ir: IRGraph, *, opts: LoweringOptions | None = None) ->
         if op == "Save":
             if len(n.inputs) != 1 or len(n.outputs) != 1:
                 raise RuntimeError("lower(Save): expected 1 in/1 out")
-            emit("copy", [int(n.inputs[0])], [int(n.outputs[0])], {})
+            # ✅ 핵심: Save는 copy가 아니라 copy_saved로 내보낸다
+            # (C++에서 plain copy가 NotImplemented로 떨어지는 케이스 방지)
+            emit("copy_saved", [int(n.inputs[0])], [int(n.outputs[0])], {})
             continue
 
         if op == "MseGrad":

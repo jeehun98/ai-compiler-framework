@@ -1,46 +1,20 @@
+# aicf_fw/optim/base.py
 from __future__ import annotations
-
-from typing import Any, Dict, Iterable, List, Optional, Union
-
-from aicf_fw.core.autograd import Tensor
-from aicf_fw.core.module import Module
-
-ParamsLike = Union[Module, Iterable[Tensor]]
+import torch
 
 
 class Optimizer:
-    def __init__(self, params: ParamsLike):
-        if isinstance(params, Module):
-            self.model: Optional[Module] = params
-            self.params: List[Tensor] = list(params.parameters())
-        else:
-            self.model = None
-            self.params = list(params)
+    """
+    Base class for core_v2 engine optimizers.
 
-        for p in self.params:
-            if not isinstance(p, Tensor):
-                raise TypeError(f"Optimizer expects Tensor params, got {type(p)}")
+    Contract:
+      - named_state_tensors(): returns {name: torch.Tensor}
+        -> optimizer state + meta tensors to be bound as statics/params
+      - update_meta(): updates host-managed meta tensors (fill_)
+    """
 
-    def zero_grad(self, set_to_none: bool = False) -> None:
-        """
-        Capture-safe default: keep grad buffers, do NOT set to None.
-        We intentionally do NOT call self.model.zero_grad because it might set grad=None.
-        """
-        for p in self.params:
-            if not p.requires_grad:
-                continue
-            if set_to_none:
-                p.grad = None
-            else:
-                # keep buffer; do NOT torch.zero_ here (avoid default-stream ops inside capture)
-                # overwrite-mode backward will refresh grads each step.
-                pass
-
-    def step(self) -> None:
+    def named_state_tensors(self) -> dict[str, torch.Tensor]:
         raise NotImplementedError
 
-    def state_dict(self) -> Dict[str, Any]:
-        return {"param_count": len(self.params)}
-
-    def load_state_dict(self, state: Dict[str, Any]) -> None:
-        _ = state
+    def update_meta(self):
+        raise NotImplementedError

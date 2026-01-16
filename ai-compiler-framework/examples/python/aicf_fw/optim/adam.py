@@ -1,207 +1,54 @@
 from __future__ import annotations
-
-import os
 import torch
+from aicf_fw.optim.base import Optimizer
+from aicf_fw.fw.naming import opt_m_name, opt_v_name, BC1_NAME, BC2_NAME
 
-from aicf_fw.core.autograd import Tensor, TensorMeta
-from aicf_fw.nn.sequential import Sequential
-from aicf_fw.core import functional as F
-from aicf_fw.core.compile import is_tracing
-from aicf_fw.core.autograd import in_capture
-
-
-class Adam:
-    """
-    Capture-safe Adam (stateful) for AICF FW.
-
-    Key policy:
-      - During capture, every param MUST have a materialized (pointer-stable) grad buffer.
-      - If p.grad is None during capture, that's a bug (warmup missing / someone set grad=None).
-        We fail fast instead of silently skipping (which produces "no-op" training graphs).
-    """
-
+class Adam(Optimizer):
     def __init__(
         self,
-        model: Sequential,
+        model,
         lr: float = 1e-3,
         beta1: float = 0.9,
         beta2: float = 0.999,
         eps: float = 1e-8,
-        grad_clip=None,
+        device: str | torch.device | None = None,
+        dtype: torch.dtype = torch.float32,
     ):
-        self.model = model
         self.lr = float(lr)
         self.beta1 = float(beta1)
         self.beta2 = float(beta2)
         self.eps = float(eps)
-        self.grad_clip = grad_clip
 
-        self.params = [p for _, p in model.named_parameters()]
+        named_params = list(model.named_parameters())
+        assert len(named_params) > 0
 
-        self.m = {}   # param_index -> Tensor
-        self.v = {}   # param_index -> Tensor
+        dev = torch.device(device) if device is not None else named_params[0][1].device
 
-        self.step = None
-        self.bc1_inv = None
-        self.bc2_inv = None
+        # host-managed meta (pointer-stable scalars)
+        self.step_host = 0
+        self.bc1_inv = torch.ones((), device=dev, dtype=dtype)
+        self.bc2_inv = torch.ones((), device=dev, dtype=dtype)
 
-        self._init_state()
+        # state
+        self.m: dict[str, torch.Tensor] = {}
+        self.v: dict[str, torch.Tensor] = {}
+        for pname, p in named_params:
+            self.m[pname] = torch.zeros_like(p)
+            self.v[pname] = torch.zeros_like(p)
 
-    def _init_state(self):
-        assert len(self.params) > 0
-        dev = self.params[0].data.device
+    def update_meta(self):
+        self.step_host += 1
+        bc1 = 1.0 / (1.0 - (self.beta1 ** self.step_host))
+        bc2 = 1.0 / (1.0 - (self.beta2 ** self.step_host))
+        self.bc1_inv.fill_(float(bc1))
+        self.bc2_inv.fill_(float(bc2))
 
-        self.step = torch.zeros((), device=dev, dtype=torch.int32)
-        self.bc1_inv = torch.empty((), device=dev, dtype=torch.float32)
-        self.bc2_inv = torch.empty((), device=dev, dtype=torch.float32)
-
-        for i, p in enumerate(self.params):
-            self.m[i] = Tensor(torch.zeros_like(p.data), requires_grad=False)
-            self.v[i] = Tensor(torch.zeros_like(p.data), requires_grad=False)
-
-    # --------------------------------------------------------
-    # DEBUG HELPERS (AICF_ADAM_DEBUG=1)
-    # --------------------------------------------------------
-    def _dbg_on(self) -> bool:
-        return os.environ.get("AICF_ADAM_DEBUG", "0") == "1"
-
-
-    @staticmethod
-    def _tstat(tag: str, x) -> str:
-        t = x.data
-        # 캡처 중에는 item/mean/norm 같은 동기화 금지
-        if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
-            return f"{tag:6s} ptr={t.data_ptr():>12d} shape={tuple(t.shape)} dtype={t.dtype}"
-        t32 = t.float()
-        mean = float(t32.mean().item())
-        mx = float(t32.max().item())
-        nrm = float(t32.norm().item())
-        return f"{tag:6s} ptr={t.data_ptr():>12d} mean={mean:+.6e} max={mx:+.6e} norm={nrm:+.6e}"
-
-
-    def zero_grad(self):
-        # capture-safe grad reset (does NOT set grad=None)
-        for p in self.params:
-            if p.grad is None:
-                continue
-            F.grad_zero_(p.grad)
-
-    @torch.no_grad()
-    def step_update(self):
-        self.step_()
-
-    @torch.no_grad()
-    def step_(self):
-        """
-        One optimizer step (capture-safe).
-
-        TRACING:
-          - emit StepInc/BiasCorr/AdamStep nodes even if grads are symbolic.
-        RUNTIME:
-          - during capture, grad must exist (fail fast if None).
-        """
-        # --------------------------------------------------------
-        # TRACING PATH
-        # --------------------------------------------------------
-        if is_tracing():
-            F.step_inc_(self.step)
-            F.bias_corr_out(self.step, self.bc1_inv, self.bc2_inv, self.beta1, self.beta2)
-
-            for i, p in enumerate(self.params):
-                gmeta = TensorMeta(shape=p.shape, dtype=p.dtype, device=p.device)
-                gsym = Tensor(None, requires_grad=False, name=(p.name + ".grad") if p.name else "grad", meta=gmeta)
-
-                F.adam_step_(
-                    p=p,
-                    g=gsym,
-                    m=self.m[i],
-                    v=self.v[i],
-                    bc1_inv=self.bc1_inv,
-                    bc2_inv=self.bc2_inv,
-                    lr=self.lr,
-                    beta1=self.beta1,
-                    beta2=self.beta2,
-                    eps=self.eps,
-                )
-            return
-
-        # --------------------------------------------------------
-        # EXECUTION PATH
-        # --------------------------------------------------------
-        F.step_inc_(self.step)
-        F.bias_corr_out(self.step, self.bc1_inv, self.bc2_inv, self.beta1, self.beta2)
-
-        cap = in_capture()
-        cap_stream = torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
-
-        for i, p in enumerate(self.params):
-            g = p.grad
-
-            if g is None:
-                if cap:
-                    raise RuntimeError(
-                        "Adam.step_: p.grad is None during capture. "
-                        "Warmup must materialize ALL parameter.grad buffers and you must not set them to None. "
-                        f"(param_index={i}, param_name={getattr(p, 'name', '')})"
-                    )
-                continue
-
-            # optional grad clip (runtime-only)
-            # 캡처 중에는 norm().item() 같은 host read 금지
-            if (self.grad_clip is not None) and (not cap_stream) and (not cap):
-                gn = g.data.norm().item()
-                if gn > self.grad_clip:
-                    g.data.mul_(self.grad_clip / (gn + 1e-12))
-
-
-            # --- DEBUG DUMP (replay vs irexec 비교용) ---
-            if self._dbg_on():
-                # AICF의 캡처 플래그를 신뢰한다 (dedicated stream capture 대응)
-                if cap:
-                    print(f"[adam_debug] (capturing) i={i} name={getattr(p, 'name', '')}")
-
-                    def _meta(tag, x):
-                        t = x.data
-                        return f"{tag:6s} ptr={t.data_ptr():>12d} shape={tuple(t.shape)} dtype={t.dtype}"
-
-                    print("[adam_debug]", _meta("W", p))
-                    print("[adam_debug]", _meta("g", g))
-                    print("[adam_debug]", _meta("m", self.m[i]))
-                    print("[adam_debug]", _meta("v", self.v[i]))
-
-                    # (선택) torch의 current-stream capture 상태도 같이 참고로만
-                    try:
-                        cs = torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
-                        print(f"[adam_debug] (capturing) torch_is_current_stream_capturing={cs}")
-                    except Exception:
-                        pass
-
-                else:
-                    # 캡처가 아닐 때만 host read 허용
-                    step_val = int(self.step.item())
-                    bc1 = float(self.bc1_inv.item())
-                    bc2 = float(self.bc2_inv.item())
-
-                    print(f"[adam_debug] step={step_val} i={i} name={getattr(p, 'name', '')}")
-                    print("[adam_debug]", self._tstat("W", p))
-                    print("[adam_debug]", self._tstat("g", g))
-                    print("[adam_debug]", self._tstat("m", self.m[i]))
-                    print("[adam_debug]", self._tstat("v", self.v[i]))
-                    print(
-                        f"[adam_debug] bc1_inv={bc1:+.6e} bc2_inv={bc2:+.6e} "
-                        f"lr={self.lr} b1={self.beta1} b2={self.beta2} eps={self.eps}"
-                    )
-
-
-            F.adam_step_(
-                p=p,
-                g=g,
-                m=self.m[i],
-                v=self.v[i],
-                bc1_inv=self.bc1_inv,
-                bc2_inv=self.bc2_inv,
-                lr=self.lr,
-                beta1=self.beta1,
-                beta2=self.beta2,
-                eps=self.eps,
-            )
+    def named_state_tensors(self) -> dict[str, torch.Tensor]:
+        d: dict[str, torch.Tensor] = {
+            BC1_NAME: self.bc1_inv,
+            BC2_NAME: self.bc2_inv,
+        }
+        for pname in self.m:
+            d[opt_m_name(pname)] = self.m[pname]
+            d[opt_v_name(pname)] = self.v[pname]
+        return d

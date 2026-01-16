@@ -189,6 +189,8 @@ _OPNAME_TO_KIND: Dict[str, int] = {
     "relu_bwd": int(_C.OpKind.ReluBwd),
     "sgd_step": int(_C.OpKind.SgdStep),
     "copy": int(_C.OpKind.Copy),
+    "copy_saved": int(_C.OpKind.Copy),  # ✅ 추가
+    "copy_aux": int(_C.OpKind.Copy),    # ✅ 추가
     "grad_zero": int(_C.OpKind.GradZero),
     "adam_step": int(_C.OpKind.AdamStep),
     "step_inc": int(_C.OpKind.StepInc),
