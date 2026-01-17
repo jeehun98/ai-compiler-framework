@@ -1,13 +1,7 @@
 from __future__ import annotations
 from collections import OrderedDict
-from dataclasses import dataclass
 import torch
 from aicf_fw.fw.naming import param_name
-
-@dataclass
-class Parameter:
-    name: str
-    data: torch.Tensor
 
 class Module:
     def __init__(self):
@@ -15,18 +9,16 @@ class Module:
         self._params: OrderedDict[str, torch.Tensor] = OrderedDict()
         self._prefix: str = ""  # set by parent
 
-    # -------- registration --------
+    # ----- registration -----
     def add_module(self, name: str, m: "Module"):
         self._modules[name] = m
         m._prefix = name if self._prefix == "" else f"{self._prefix}.{name}"
 
     def register_parameter(self, local_name: str, t: torch.Tensor):
-        # stored as local (W/b); global name formed by prefix
         self._params[local_name] = t
 
-    # -------- query --------
+    # ----- query -----
     def named_parameters(self, prefix: str | None = None):
-        # external prefix override if provided; otherwise use internal _prefix
         pfx = self._prefix if prefix is None else prefix
 
         for local, t in self._params.items():
@@ -40,15 +32,15 @@ class Module:
         for _, p in self.named_parameters():
             yield p
 
-    # -------- device/dtype --------
+    # ----- device/dtype -----
     def to(self, device: str | torch.device, dtype: torch.dtype | None = None):
         dev = torch.device(device) if isinstance(device, str) else device
-        for k, t in self._params.items():
+        for k, t in list(self._params.items()):
             self._params[k] = t.to(device=dev, dtype=(dtype if dtype is not None else t.dtype))
         for _, m in self._modules.items():
             m.to(dev, dtype=dtype)
         return self
 
-    # -------- forward in IR --------
+    # ----- IR forward -----
     def forward_ir(self, x_sym, psym: dict[str, object]):
         raise NotImplementedError

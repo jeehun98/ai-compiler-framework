@@ -1,4 +1,5 @@
 from __future__ import annotations
+import os
 import torch
 from aicf_fw.optim.base import Optimizer
 from aicf_fw.fw.naming import opt_m_name, opt_v_name, BC1_NAME, BC2_NAME
@@ -11,7 +12,6 @@ class Adam(Optimizer):
         beta1: float = 0.9,
         beta2: float = 0.999,
         eps: float = 1e-8,
-        device: str | torch.device | None = None,
         dtype: torch.dtype = torch.float32,
     ):
         self.lr = float(lr)
@@ -21,15 +21,14 @@ class Adam(Optimizer):
 
         named_params = list(model.named_parameters())
         assert len(named_params) > 0
+        dev = named_params[0][1].device
 
-        dev = torch.device(device) if device is not None else named_params[0][1].device
-
-        # host-managed meta (pointer-stable scalars)
+        # host-managed meta (pointer-stable)
         self.step_host = 0
         self.bc1_inv = torch.ones((), device=dev, dtype=dtype)
         self.bc2_inv = torch.ones((), device=dev, dtype=dtype)
 
-        # state
+        # m/v state
         self.m: dict[str, torch.Tensor] = {}
         self.v: dict[str, torch.Tensor] = {}
         for pname, p in named_params:
@@ -44,10 +43,7 @@ class Adam(Optimizer):
         self.bc2_inv.fill_(float(bc2))
 
     def named_state_tensors(self) -> dict[str, torch.Tensor]:
-        d: dict[str, torch.Tensor] = {
-            BC1_NAME: self.bc1_inv,
-            BC2_NAME: self.bc2_inv,
-        }
+        d: dict[str, torch.Tensor] = {BC1_NAME: self.bc1_inv, BC2_NAME: self.bc2_inv}
         for pname in self.m:
             d[opt_m_name(pname)] = self.m[pname]
             d[opt_v_name(pname)] = self.v[pname]

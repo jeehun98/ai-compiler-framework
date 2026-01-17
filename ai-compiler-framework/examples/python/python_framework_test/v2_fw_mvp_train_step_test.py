@@ -5,7 +5,7 @@ from pathlib import Path
 import torch
 
 THIS = Path(__file__).resolve()
-EXAMPLES_PY = THIS.parents[1]  # .../examples/python
+EXAMPLES_PY = THIS.parents[1]
 if str(EXAMPLES_PY) not in sys.path:
     sys.path.insert(0, str(EXAMPLES_PY))
 
@@ -35,28 +35,26 @@ def main():
     dtype = torch.float32
     B, D = 64, 8
 
-    # inputs (runtime)
     x = torch.randn(B, D, device=device, dtype=dtype)
     t = torch.randn(B, D, device=device, dtype=dtype)
 
-    # --- user-facing model build ---
     model = Sequential(
         Linear(D, D, bias=True, device=device, dtype=dtype),
         ReLU(),
         Linear(D, D, bias=True, device=device, dtype=dtype),
     ).to(device)
 
-    # --- user-facing optimizer ---
-    opt = Adam(model, lr=1e-3, beta1=0.9, beta2=0.999, eps=1e-8)
+    opt = Adam(model, lr=1e-3)
 
-    # --- compile into core_v2 executor ---
-    compiled = compile_train_step(model, opt, B=B, D=D, device=device, dtype=dtype, name="fw_mvp_train_step")
-
-    # ============
-    # 1) eager step
-    # ============
-    pnames = [name for name, _ in model.named_parameters()]
-    assert "0.W" in pnames and "0.b" in pnames and "2.W" in pnames and "2.b" in pnames, f"param names unexpected: {pnames}"
+    # ✅ warmup_inputs 제공하면 compile 단계에서 자동 warmup
+    compiled = compile_train_step(
+        model, opt,
+        B=B, D=D, device=device, dtype=dtype,
+        name="fw_mvp_train_step",
+        warmup_runs=2,                      # 기본값도 2지만 명시 추천
+        warmup_inputs={"x": x, "t": t},      # <- 이게 핵심
+        warmup_required=True,
+    )
 
     W0 = dict(model.named_parameters())["0.W"]
     W0_before = W0.clone()
@@ -65,13 +63,8 @@ def main():
     dW0_1 = maxabs_delta(W0, W0_before)
     print("[eager] |ΔW0| =", dW0_1)
     if dW0_1 == 0.0:
-        raise RuntimeError("W0 did not update on eager train_step (expected non-zero)")
+        raise RuntimeError("W0 did not update on eager train_step")
 
-    print("OK (eager train_step updates params)")
-
-    # =================
-    # 2) capture/replay
-    # =================
     compiled.capture({"x": x, "t": t})
     print("OK (capture)")
 
@@ -80,46 +73,31 @@ def main():
     dW0_rep = maxabs_delta(W0, W0_cap0)
     print("[replay] n=3 |ΔW0| =", dW0_rep)
     if dW0_rep == 0.0:
-        raise RuntimeError("W0 did not update across replay(n=3) (expected non-zero)")
+        raise RuntimeError("W0 did not update across replay(n=3)")
 
-    print("OK (replay updates params)")
-
-    # ==========================================
-    # 3) meta mutation sanity (optional but useful)
-    # ==========================================
-    # Change optimizer meta scalars and confirm it affects update magnitude in replay.
-    # (This assumes your executor reads bc1/bc2 from the bound tensors each replay.)
+    # meta mutation sanity
     bc1 = opt.bc1_inv
     bc2 = opt.bc2_inv
-
-    # snapshot
     bc1_before = float(bc1.item())
     bc2_before = float(bc2.item())
 
     W0_m0 = W0.clone()
-    bc1.fill_(1.0)
-    bc2.fill_(1.0)
+    bc1.fill_(1.0); bc2.fill_(1.0)
     torch.cuda.synchronize()
     compiled.replay(n=1)
     d_mut = maxabs_delta(W0, W0_m0)
 
     W0_m1 = W0.clone()
-    bc1.fill_(bc1_before)
-    bc2.fill_(bc2_before)
+    bc1.fill_(bc1_before); bc2.fill_(bc2_before)
     torch.cuda.synchronize()
     compiled.replay(n=1)
     d_rest = maxabs_delta(W0, W0_m1)
 
     print("[meta] mutated |ΔW0| =", d_mut, " restored |ΔW0| =", d_rest)
     if abs(d_mut - d_rest) < 1e-12:
-        raise RuntimeError("meta mutation did not change replay behavior (unexpected)")
+        raise RuntimeError("meta mutation did not change replay behavior")
 
-    print("OK (meta affects replay updates)")
-
-    # reset graph (optional)
     compiled.reset()
-    print("OK (reset)")
-
     print("ALL OK (fw MVP user experience test)")
 
 

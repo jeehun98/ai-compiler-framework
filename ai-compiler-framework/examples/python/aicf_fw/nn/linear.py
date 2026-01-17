@@ -16,10 +16,10 @@ class Linear(Module):
         super().__init__()
         W = torch.randn(out_features, in_features, device=device, dtype=dtype) * 0.02
         self.register_parameter("W", W)
-        if bias:
+        self.bias = bool(bias)
+        if self.bias:
             b = torch.zeros(out_features, device=device, dtype=dtype)
             self.register_parameter("b", b)
-        self.bias = bias
 
     def forward_ir(self, x_sym, psym: dict[str, object]):
         pfx = self._prefix
