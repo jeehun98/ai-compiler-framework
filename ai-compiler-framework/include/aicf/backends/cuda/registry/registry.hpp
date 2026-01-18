@@ -1,13 +1,14 @@
 #pragma once
 #include <cstdint>
+#include <memory>
+#include <mutex>
 #include <vector>
 #include <cuda_runtime.h>
 
-#include "aicf/core/status.hpp"
+#include "aicf/backends/cuda/registry/status.hpp"
 #include "aicf/backends/cuda/registry/op_kind.hpp"
 #include "aicf/backends/cuda/registry/kernel_variant.hpp"
 #include "aicf/backends/cuda/registry/tensor_desc.hpp"
-#include "aicf/backends/cuda/registry/attr_pack.hpp"
 
 namespace aicf::cuda {
 
@@ -19,8 +20,8 @@ struct OpCall {
   TensorDesc* outputs = nullptr;
   int32_t num_outputs = 0;
 
-  // v0.1: nullptr or AttrPack*
-  const AttrPack* attrs = nullptr;
+  // nullptr or AttrBlob* (ABI-neutral)
+  const void* attrs = nullptr;
 
   cudaStream_t stream = nullptr;
 };
@@ -29,16 +30,25 @@ class KernelRegistry {
  public:
   static KernelRegistry& instance();
 
+  // Thread-safe
   void register_kernel(OpKind kind, KernelVariant v);
-  const std::vector<KernelVariant>& variants(OpKind kind) const;
+
+  // Snapshot pointers (stable) without holding registry lock during supported()/launch().
+  void variants_snapshot(OpKind kind, std::vector<const KernelVariant*>& out) const;
+
+  // Optional: ensure global registration (call_once)
+  static void ensure_registered();
 
  private:
   KernelRegistry() = default;
 
-  std::vector<KernelVariant> table_[static_cast<int>(OpKind::_Count)];
+  using Entry = std::unique_ptr<KernelVariant>;
+  std::vector<Entry> table_[static_cast<int>(OpKind::_Count)];
+
+  mutable std::mutex mu_;
 };
 
-// unified entrypoint (Plan A)
-aicf::Status Dispatch(const OpCall& call);
+// unified entrypoint
+Status Dispatch(const OpCall& call);
 
-}  // namespace aicf::cuda
+} // namespace aicf::cuda

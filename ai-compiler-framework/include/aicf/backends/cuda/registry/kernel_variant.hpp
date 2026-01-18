@@ -4,19 +4,25 @@
 #include <cstdint>
 #include <cuda_runtime.h>
 
-#include "aicf/core/status.hpp"
+#include "aicf/backends/cuda/registry/status.hpp"
 #include "aicf/backends/cuda/registry/tensor_desc.hpp"
 
 namespace aicf::cuda {
 
-// v0.2 KernelVariant contract:
+// flags (optional)
+enum KernelVariantFlags : uint32_t {
+  kKV_None        = 0,
+  kKV_CaptureSafe = 1u << 0,  // reserved
+};
+
+// v0.x KernelVariant contract:
 // - supported(): cheap feasibility check (shape/dtype/rank/attrs)
-// - query_workspace(): optional; if present may return >0 (future v0.3+)
-// - launch(): invoked with workspace ptr/bytes; v0.1 policy may still pass nullptr/0
+// - query_workspace(): optional; if present may return >0
+// - launch(): invoked with workspace ptr/bytes; v0.x policy may still pass nullptr/0
 //
-// Selection policy (suggested):
+// Selection policy:
 // - higher priority wins
-// - if equal priority, registry order is tie-breaker
+// - if equal priority, registry insertion order is tie-breaker (stable)
 struct KernelVariant {
   const char* name = nullptr;
 
@@ -26,7 +32,10 @@ struct KernelVariant {
   // reserved for future policies (arch/capture_safe/etc.)
   uint32_t flags = 0;
 
-  aicf::Status (*launch)(
+  // Optional: attr schema filtering (0 = accept any).
+  uint32_t expected_attr_schema_id = 0;
+
+  Status (*launch)(
       const TensorDesc* inputs, int num_inputs,
       TensorDesc* outputs, int num_outputs,
       const void* attr,

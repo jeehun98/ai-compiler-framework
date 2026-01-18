@@ -1,37 +1,32 @@
-// bindings.cpp  (Unified CUDA bindings; primitive op_call + CUDA Graph capture)
+// bindings.cpp (Unified CUDA bindings; primitive op_call + CUDA Graph capture; AttrBlob ABI)
 //
-// Goal of this version:
-//  1) Keep bindings small and stable as ops grow:
-//     - op_call is the only kernel-dispatch primitive
-//     - NO IRExec / JSON parsing / lowering here (move to Python)
-//  2) CUDA Graph capture is explicit and does NOT affect op_call implicitly:
-//     - graph_begin() returns a dedicated cudaStream_t handle (as uint64)
-//     - caller passes that stream into op_call(..., stream=...)
-//  3) py::list has NO reserve(): never call reserve() on py::list
-//
-// Notes:
-//  - AttrPack supports bool/int/float only (same as before)
-//  - Graph API is singleton-based (minimal); you can later convert to handles if needed.
+// core 없이 동작:
+//  - Status는 aicf::cuda::Status (registry/status.hpp)
+//  - attrs는 AttrBlob(schema_id + bytes + data)
+//  - graph capture는 bindings 내부에서만 관리
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <torch/extension.h>
 
-#include "common.hpp"
-
-#include <aicf/backends/cuda/registry/op_kind.hpp>
-#include <aicf/backends/cuda/registry/attr_pack.hpp>
-#include <aicf/backends/cuda/registry/dispatch.hpp>
-#include <aicf/backends/cuda/registry/register_all.hpp>
-
+#include <c10/cuda/CUDAStream.h>
 #include <cuda_runtime.h>
 
+#include <aicf/backends/cuda/registry/op_kind.hpp>
+#include <aicf/backends/cuda/registry/dispatch.hpp>
+#include <aicf/backends/cuda/registry/register_all.hpp>
+#include <aicf/backends/cuda/registry/attr_blob.hpp>
+#include <aicf/backends/cuda/registry/tensor_desc.hpp>
+#include <aicf/backends/cuda/registry/status.hpp>
+
 #include <algorithm>
-#include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <mutex>
+#include <sstream>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -49,6 +44,87 @@ static inline void cuda_check(cudaError_t e, const char* what) {
     throw std::runtime_error(std::string("[CUDA] ") + what + ": " + cudaGetErrorString(e));
   }
 }
+
+// ============================================================
+// Tensor helpers (common.hpp 대체)
+// ============================================================
+
+namespace aicf_py {
+
+inline const char* dtype_name(const torch::Tensor& t) {
+  switch (t.scalar_type()) {
+    case at::kHalf:  return "float16";
+    case at::kFloat: return "float32";
+    case at::kInt:   return "int32";
+    default:         return "other";
+  }
+}
+
+inline std::string tensor_brief(const torch::Tensor& t) {
+  std::ostringstream oss;
+  oss << "defined=" << (t.defined() ? "true" : "false");
+  if (!t.defined()) return oss.str();
+
+  oss << " device=" << (t.is_cuda() ? "cuda" : "cpu");
+  oss << " dtype=" << dtype_name(t);
+  oss << " contig=" << (t.is_contiguous() ? "true" : "false");
+  oss << " rank=" << t.dim();
+  oss << " shape=[";
+  for (int i = 0; i < t.dim(); ++i) {
+    oss << t.size(i);
+    if (i + 1 < t.dim()) oss << ",";
+  }
+  oss << "]";
+  return oss.str();
+}
+
+inline aicf::cuda::DType to_aicf_dtype_strict(const torch::Tensor& t) {
+  if (t.scalar_type() == at::kHalf)  return aicf::cuda::DType::kF16;
+  if (t.scalar_type() == at::kFloat) return aicf::cuda::DType::kF32;
+  if (t.scalar_type() == at::kInt)   return aicf::cuda::DType::kI32;
+  TORCH_CHECK(false, "unsupported dtype. got: ", tensor_brief(t));
+}
+
+inline void check_tensor_v0_3(const torch::Tensor& t, const char* what) {
+  TORCH_CHECK(t.defined(), what, ": undefined tensor");
+  TORCH_CHECK(t.is_cuda(), what, ": must be CUDA tensor. got: ", tensor_brief(t));
+
+  const auto st = t.scalar_type();
+  TORCH_CHECK(st == at::kHalf || st == at::kFloat || st == at::kInt,
+              what, ": dtype must be float16/float32/int32. got: ", tensor_brief(t));
+
+  const int64_t rank64 = t.dim();
+  TORCH_CHECK(rank64 >= 0 && rank64 <= aicf::cuda::kMaxRank,
+              what, ": rank out of range. got rank=", rank64,
+              " (kMaxRank=", aicf::cuda::kMaxRank, ")");
+}
+
+inline aicf::cuda::TensorDesc to_desc_v0_3(const torch::Tensor& t) {
+  check_tensor_v0_3(t, "to_desc_v0_3(t)");
+
+  aicf::cuda::TensorDesc d{};
+  d.data  = const_cast<void*>(t.data_ptr());
+  d.dtype = to_aicf_dtype_strict(t);
+
+  const int32_t r = static_cast<int32_t>(t.dim());
+  d.r.rank = r;
+
+  for (int i = 0; i < r; ++i) {
+    d.shape[i]  = t.size(i);
+    d.stride[i] = t.stride(i);
+  }
+
+  d.contiguous = t.is_contiguous();
+  d.alignment  = 0;
+  d.device     = 0;
+  return d;
+}
+
+inline cudaStream_t current_cuda_stream() {
+  return c10::cuda::getCurrentCUDAStream().stream();
+}
+
+} // namespace aicf_py
 
 // ============================================================
 // CUDA Graph state (singleton, minimal)
@@ -76,7 +152,6 @@ struct CudaGraphState {
     captured = false;
   }
 
-  // best-effort cleanup if something left capturing
   void reset_full() {
     if (aicf_stream) {
       cudaStreamCaptureStatus st = cudaStreamCaptureStatusNone;
@@ -145,69 +220,10 @@ static inline void trace_record_locked(aicf::cuda::OpKind kind) {
 static inline void trace_reset_locked() { g_trace_ops.clear(); }
 
 // ============================================================
-// AttrPack builder (v0.2) + desc builder
+// TensorDesc builder
 // ============================================================
 
-static void build_attr_pack_v0_2(
-    const py::dict& attrs,
-    std::vector<std::string>& key_storage,
-    std::vector<aicf::cuda::AttrKV>& kv_storage,
-    aicf::cuda::AttrPack& out_pack) {
-
-  key_storage.clear();
-  kv_storage.clear();
-
-  if (attrs.size() == 0) {
-    out_pack.items = nullptr;
-    out_pack.size  = 0;
-    return;
-  }
-
-  std::vector<std::pair<std::string, py::object>> items;
-  items.reserve((size_t)attrs.size());
-
-  for (auto it : attrs) {
-    std::string k = py::cast<std::string>(it.first);
-    py::object  v = py::reinterpret_borrow<py::object>(it.second);
-    items.emplace_back(std::move(k), std::move(v));
-  }
-
-  std::sort(items.begin(), items.end(),
-            [](const auto& a, const auto& b) { return a.first < b.first; });
-
-  key_storage.reserve(items.size());
-  kv_storage.reserve(items.size());
-
-  for (auto& kvp : items) {
-    key_storage.emplace_back(std::move(kvp.first));
-
-    aicf::cuda::AttrKV kv{};
-    kv.key = key_storage.back().c_str();
-
-    const py::object& v = kvp.second;
-
-    if (py::isinstance<py::bool_>(v)) {
-      kv.val.tag = aicf::cuda::AttrTag::kBool;
-      kv.val.b32 = py::cast<bool>(v) ? 1 : 0;
-    } else if (py::isinstance<py::int_>(v)) {
-      kv.val.tag = aicf::cuda::AttrTag::kI64;
-      kv.val.i64 = py::cast<int64_t>(v);
-    } else if (py::isinstance<py::float_>(v)) {
-      kv.val.tag = aicf::cuda::AttrTag::kF32;
-      kv.val.f32 = py::cast<float>(v);
-    } else {
-      throw std::runtime_error(
-        "aicf_cuda.op_call: attrs supports only bool/int/float (binding v0.2)");
-    }
-
-    kv_storage.emplace_back(kv);
-  }
-
-  out_pack.items = kv_storage.data();
-  out_pack.size  = static_cast<int32_t>(kv_storage.size());
-}
-
-static void build_descs_v0_2(
+static void build_descs_v0_3(
     const py::sequence& seq,
     std::vector<aicf::cuda::TensorDesc>& out,
     const char* what) {
@@ -222,47 +238,47 @@ static void build_descs_v0_2(
   }
 }
 
-static std::string op_fail_msg(aicf::cuda::OpKind kind, aicf::Status st) {
+static std::string op_fail_msg(aicf::cuda::OpKind kind, aicf::cuda::Status st) {
   return std::string("aicf_cuda.op_call failed: kind=")
        + std::to_string((int)kind)
        + " (" + std::string(opkind_to_name(kind)) + ")"
-       + " status=" + aicf::status_to_string(st);
+       + " status=" + std::string(aicf::cuda::status_to_string(st))
+       + " (" + std::to_string((int)st) + ")";
 }
 
 // ============================================================
-// op_call primitive (NO implicit stream policy)
+// op_call primitive (attrs: schema_id + bytes, no dict)
 // ============================================================
 
 static void op_call_impl(
     aicf::cuda::OpKind kind,
     const py::sequence& inputs,
     const py::sequence& outputs,
-    py::dict attrs,
+    uint32_t schema_id,
+    py::bytes attrs_bytes,
     uint64_t stream_u64 /* 0 => current stream */) {
 
   std::vector<aicf::cuda::TensorDesc> in_descs;
   std::vector<aicf::cuda::TensorDesc> out_descs;
-  build_descs_v0_2(inputs,  in_descs,  "inputs");
-  build_descs_v0_2(outputs, out_descs, "outputs");
+  build_descs_v0_3(inputs,  in_descs,  "inputs");
+  build_descs_v0_3(outputs, out_descs, "outputs");
 
-  aicf::cuda::AttrPack pack{};
-  std::vector<std::string> key_storage;
-  std::vector<aicf::cuda::AttrKV> kv_storage;
-  const void* attr_ptr = nullptr;
+  // bytes view (lifetime: attrs_bytes object lives throughout this call)
+  std::string buf = attrs_bytes;  // py::bytes -> std::string copy (simple + safe)
+  aicf::cuda::AttrBlob blob{};
+  blob.schema_id = schema_id;
+  blob.bytes = (uint32_t)buf.size();
+  blob.data  = (buf.empty() ? nullptr : (const void*)buf.data());
 
-  if (attrs.size() > 0) {
-    build_attr_pack_v0_2(attrs, key_storage, kv_storage, pack);
-    attr_ptr = &pack;
-  }
-
-  // record trace (no stream policy here)
+  // record trace
   {
     std::lock_guard<std::mutex> lock(g_graph_mu);
     trace_record_locked(kind);
 
     if (std::getenv("AICF_TRACE_STDERR")) {
-      std::fprintf(stderr, "[aicf][op_call] %s (kind=%d) stream=0x%llx\n",
+      std::fprintf(stderr, "[aicf][op_call] %s (kind=%d) schema=0x%08x bytes=%u stream=0x%llx\n",
                    opkind_to_name(kind), (int)kind,
+                   (unsigned)schema_id, (unsigned)blob.bytes,
                    (unsigned long long)stream_u64);
     }
   }
@@ -271,14 +287,15 @@ static void op_call_impl(
       ? reinterpret_cast<cudaStream_t>(stream_u64)
       : aicf_py::current_cuda_stream();
 
-  const aicf::Status st = aicf::cuda::dispatch_v0(
+  const aicf::cuda::Status st = aicf::cuda::dispatch_v0(
       kind,
-      in_descs.data(),  (int)in_descs.size(),
-      out_descs.data(), (int)out_descs.size(),
-      attr_ptr,
+      in_descs.data(),  (int32_t)in_descs.size(),
+      out_descs.data(), (int32_t)out_descs.size(),
+      (blob.bytes == 0 && blob.data == nullptr && blob.schema_id == 0) ? (const void*)nullptr
+                                                                      : (const void*)&blob,
       stream);
 
-  if (!aicf::ok(st)) {
+  if (!aicf::cuda::ok(st)) {
     throw std::runtime_error(op_fail_msg(kind, st));
   }
 }
@@ -288,7 +305,7 @@ static void op_call_impl(
 // ============================================================
 
 PYBIND11_MODULE(_C, m) {
-  m.doc() = "AICF CUDA unified bindings (primitive op_call + CUDA Graph capture)";
+  m.doc() = "AICF CUDA unified bindings (primitive op_call + CUDA Graph capture; AttrBlob ABI; core-free)";
 
   ensure_kernels_registered_once();
 
@@ -313,37 +330,39 @@ PYBIND11_MODULE(_C, m) {
       .export_values();
 
   // ---------------- op_call ----------------
-  // op_call(kind_enum, inputs, outputs, attrs={}, stream=0)
   m.def(
     "op_call",
     [](aicf::cuda::OpKind kind,
        const py::sequence& inputs,
        const py::sequence& outputs,
-       py::dict attrs,
+       uint32_t schema_id,
+       py::bytes attrs_bytes,
        uint64_t stream) {
-      op_call_impl(kind, inputs, outputs, attrs, stream);
+      op_call_impl(kind, inputs, outputs, schema_id, attrs_bytes, stream);
     },
     py::arg("kind"),
     py::arg("inputs"),
     py::arg("outputs"),
-    py::arg("attrs") = py::dict(),
+    py::arg("schema_id") = (uint32_t)0,
+    py::arg("attrs_bytes") = py::bytes(),
     py::arg("stream") = (uint64_t)0
   );
 
-  // op_call(kind_int, inputs, outputs, attrs={}, stream=0)
   m.def(
     "op_call",
     [](int kind,
        const py::sequence& inputs,
        const py::sequence& outputs,
-       py::dict attrs,
+       uint32_t schema_id,
+       py::bytes attrs_bytes,
        uint64_t stream) {
-      op_call_impl(static_cast<aicf::cuda::OpKind>(kind), inputs, outputs, attrs, stream);
+      op_call_impl(static_cast<aicf::cuda::OpKind>(kind), inputs, outputs, schema_id, attrs_bytes, stream);
     },
     py::arg("kind"),
     py::arg("inputs"),
     py::arg("outputs"),
-    py::arg("attrs") = py::dict(),
+    py::arg("schema_id") = (uint32_t)0,
+    py::arg("attrs_bytes") = py::bytes(),
     py::arg("stream") = (uint64_t)0
   );
 
@@ -360,12 +379,10 @@ PYBIND11_MODULE(_C, m) {
 
   m.def("trace_get", []() {
     std::lock_guard<std::mutex> lock(g_graph_mu);
-    return g_trace_ops; // copy
+    return g_trace_ops;
   });
 
   // ---------------- CUDA Graph control ----------------
-  // graph_begin() -> uint64 stream_handle
-  // Caller must pass returned stream_handle to op_call(..., stream=handle)
   m.def("graph_begin", []() -> uint64_t {
     std::lock_guard<std::mutex> lock(g_graph_mu);
 
@@ -378,7 +395,6 @@ PYBIND11_MODULE(_C, m) {
 
     const cudaStream_t s = g_graph.aicf_stream;
 
-    // defensive cleanup if stream is already capturing (shouldn't happen)
     cudaStreamCaptureStatus st = cudaStreamCaptureStatusNone;
     if (cudaStreamIsCapturing(s, &st) == cudaSuccess && st != cudaStreamCaptureStatusNone) {
       cudaGraph_t tmp = nullptr;
@@ -391,10 +407,8 @@ PYBIND11_MODULE(_C, m) {
 
     cuda_check(cudaStreamBeginCapture(s, cudaStreamCaptureModeGlobal),
                "cudaStreamBeginCapture");
-
     g_graph.capturing = true;
 
-    // return stream pointer as uint64_t
     return (uint64_t)(reinterpret_cast<uintptr_t>(s));
   });
 
@@ -437,7 +451,6 @@ PYBIND11_MODULE(_C, m) {
     trace_reset_locked();
   });
 
-  // Optional: expose the dedicated stream handle when captured (for debugging)
   m.def("graph_stream", []() -> uint64_t {
     std::lock_guard<std::mutex> lock(g_graph_mu);
     if (!g_graph.aicf_stream) return 0;
