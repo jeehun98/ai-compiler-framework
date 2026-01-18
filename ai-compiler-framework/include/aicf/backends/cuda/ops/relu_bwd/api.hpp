@@ -1,16 +1,10 @@
 #pragma once
 #include <cstdint>
 
-#include <aicf/core/status.hpp>
-#include <aicf/runtime/stream.hpp>
-
 namespace aicf::cuda {
 
-// dY = (Y > 0) ? dOut : 0
-aicf::Status relu_bwd_f32(const float* Y,
-                          const float* dOut,
-                          float* dY,
-                          int64_t numel,
-                          aicf::Stream stream);
+// (placeholder) public API kept for compatibility.
+// In v2 (registry-based), bindings use dispatch_v0, so this header is optional.
+// Keep it empty or add C++ direct-call APIs later.
 
 } // namespace aicf::cuda

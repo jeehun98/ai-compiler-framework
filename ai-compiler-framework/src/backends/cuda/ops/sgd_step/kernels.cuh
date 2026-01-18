@@ -5,7 +5,7 @@
 
 namespace aicf::cuda::sgd_step_impl {
 
-// out-of-place (param_out = param_in - lr * grad)
+// out-of-place: param_out = param_in - lr * grad
 __global__ void sgd_step_f32_kernel(const float* __restrict__ param_in,
                                    const float* __restrict__ grad,
                                    float* __restrict__ param_out,

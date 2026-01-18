@@ -1,12 +1,10 @@
 #pragma once
-#include <aicf/core/status.hpp>
-#include <aicf/runtime/stream.hpp>
+#include <cstdint>
 
 namespace aicf::cuda {
 
-aicf::Status relu_f32(const float* in, float* out, int N, aicf::Stream stream);
-
-// NEW (v0.2): f16
-aicf::Status relu_f16(const void* in, void* out, int N, aicf::Stream stream);
+// (placeholder) public API kept for compatibility.
+// In v2 (registry-based), bindings use dispatch_v0, so this header is optional.
+// Keep it empty or add C++ direct-call APIs later.
 
 } // namespace aicf::cuda

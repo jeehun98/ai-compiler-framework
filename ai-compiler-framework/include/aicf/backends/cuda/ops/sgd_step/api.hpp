@@ -1,16 +1,10 @@
 #pragma once
 #include <cstdint>
 
-#include <aicf/core/status.hpp>
-#include <aicf/runtime/stream.hpp>
-
 namespace aicf::cuda {
 
-// param = param - lr * grad
-aicf::Status sgd_step_f32(float* param,
-                          const float* grad,
-                          int64_t numel,
-                          float lr,
-                          aicf::Stream stream);
+// (placeholder) public API kept for compatibility.
+// In v2 (registry-based), bindings use dispatch_v0, so this header is optional.
+// Keep it empty or add C++ direct-call APIs later.
 
 } // namespace aicf::cuda

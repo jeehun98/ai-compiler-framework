@@ -1,55 +1,97 @@
 #include <cuda_runtime.h>
 #include <cstdint>
+#include <cstring>
 #include <cmath>
 
-#include <aicf/core/status.hpp>
-
-#include <aicf/backends/cuda/ops/biascorr/api.hpp>
+#include <aicf/backends/cuda/registry/status.hpp>
 #include <aicf/backends/cuda/registry/kernel_variant.hpp>
 #include <aicf/backends/cuda/registry/tensor_desc.hpp>
-#include <aicf/backends/cuda/registry/attr_pack.hpp>
+#include <aicf/backends/cuda/registry/attr_blob.hpp>
 
-#include "aicf/backends/cuda/ops/_common/shim/status.hpp"
+#include "kernels.cuh"
 
 namespace aicf::cuda {
 
-// ---- small attr helpers ----
-static inline bool attr_get_f32(const void* attr, const char* key, float& out) {
-  if (!attr) return false;
-  const AttrPack* p = (const AttrPack*)attr;
-  if (!p->items || p->size <= 0) return false;
-  for (int i = 0; i < p->size; ++i) {
-    const AttrKV& kv = p->items[i];
-    if (!kv.key) continue;
-    // exact match
-    const char* a = kv.key;
-    const char* b = key;
-    while (*a && *b && *a == *b) { ++a; ++b; }
-    if (*a == 0 && *b == 0) {
-      if (kv.val.tag != AttrTag::kF32) return false;
-      out = kv.val.f32;
-      return true;
-    }
-  }
+// -------------------------
+// cuda error -> Status (core-free)
+// -------------------------
+static inline Status cuda_to_status(cudaError_t e) {
+  return (e == cudaSuccess) ? Status::Ok : Status::Internal;
+}
+static inline Status cuda_last_status() {
+  return cuda_to_status(cudaGetLastError());
+}
+
+// -------------------------
+// AttrBlob schema: BiasCorr
+// payload: float32 beta1, float32 beta2  (little-endian)
+// schema_id: 'BCOR' = 0x524F4342
+// schema_id==0 allowed? -> 여기서는 "필수"로 둠(더 단순)
+// -------------------------
+static constexpr uint32_t kSchema_BCOR = 0x524F4342u;
+
+static inline float read_f32_le(const uint8_t* p) {
+  float v;
+  std::memcpy(&v, p, sizeof(float));
+  return v;
+}
+
+static inline bool get_betas_from_attr(const void* attr, float* beta1, float* beta2) {
+  if (!attr || !beta1 || !beta2) return false;
+  const AttrBlob& a = *static_cast<const AttrBlob*>(attr);
+  if (a.schema_id != kSchema_BCOR) return false;
+  if (!a.data || a.bytes < 8) return false;
+  const uint8_t* p = static_cast<const uint8_t*>(a.data);
+  *beta1 = read_f32_le(p + 0);
+  *beta2 = read_f32_le(p + 4);
+  // NaN 방지 (필수키 체크 느낌)
+  if (!(*beta1 == *beta1) || !(*beta2 == *beta2)) return false;
+  return true;
+}
+
+// -------------------------
+// helpers
+// -------------------------
+static inline bool is_scalar0d_or_1elem1d(const TensorDesc& d) {
+  if (d.rank() == 0) return true;
+  if (d.rank() == 1 && d.shape[0] == 1) return true;
   return false;
 }
 
+static inline bool is_i32_scalar_contig(const TensorDesc& d) {
+  if (d.dtype != DType::kI32) return false;
+  if (!is_scalar0d_or_1elem1d(d)) return false;
+  // rank==0일 때 contiguous가 false로 들어올 수 있으면 완화해도 되는데,
+  // 지금은 SgdStep/StepInc 쪽과 다르게 "단순 contig" 유지.
+  return d.contiguous;
+}
+
+static inline bool is_f32_scalar_contig(const TensorDesc& d) {
+  if (d.dtype != DType::kF32) return false;
+  if (!is_scalar0d_or_1elem1d(d)) return false;
+  return d.contiguous;
+}
+
+static size_t biascorr_workspace(const TensorDesc*, int, const void*) { return 0; }
+
+// -------------------------
+// kernel (definition)
+// -------------------------
+namespace biascorr_impl {
+
 __global__ void biascorr_kernel(const int32_t* step,
-                                float beta1, float beta2,
-                                float* bc1_inv, float* bc2_inv) {
+                               float beta1, float beta2,
+                               float* bc1_inv, float* bc2_inv) {
   if (blockIdx.x == 0 && threadIdx.x == 0) {
     int t = step[0];
-    if (t < 1) t = 1;  // safety
+    if (t < 1) t = 1;
 
-    // bc_inv = 1 / (1 - beta^t)
-    // use powf on device (fine for scalar)
     float b1t = powf(beta1, (float)t);
     float b2t = powf(beta2, (float)t);
 
     float d1 = 1.0f - b1t;
     float d2 = 1.0f - b2t;
 
-    // avoid div0 if beta==1 (shouldn't happen)
     if (fabsf(d1) < 1e-20f) d1 = 1e-20f;
     if (fabsf(d2) < 1e-20f) d2 = 1e-20f;
 
@@ -58,99 +100,82 @@ __global__ void biascorr_kernel(const int32_t* step,
   }
 }
 
-aicf::Status biascorr_v0(
+} // namespace biascorr_impl
+
+// -------------------------
+// Variant glue
+// Contract:
+// inputs[0] = step (i32 scalar)
+// outputs[0] = bc1_inv (f32 scalar)
+// outputs[1] = bc2_inv (f32 scalar)
+// attr: AttrBlob schema 'BCOR' with (beta1,beta2)
+// -------------------------
+static inline bool biascorr_check(
     const TensorDesc* inputs, int num_inputs,
-    TensorDesc* outputs, int num_outputs,
-    const void* attr,
-    void* /*workspace*/, size_t /*workspace_bytes*/,
-    cudaStream_t stream) {
-
-  if (!inputs || !outputs) return aicf::Status::InvalidArgument;
-  if (num_inputs != 1 || num_outputs != 2) return aicf::Status::InvalidArgument;
-
-  const TensorDesc& S = inputs[0];
-  TensorDesc& O1 = outputs[0];
-  TensorDesc& O2 = outputs[1];
-
-  // step: int32 scalar
-  if (S.dtype != DType::kI32) return aicf::Status::NotImplemented;
-  if (!S.contiguous) return aicf::Status::NotImplemented;
-
-  // outputs: f32 scalars
-  if (O1.dtype != DType::kF32 || O2.dtype != DType::kF32) return aicf::Status::NotImplemented;
-  if (!O1.contiguous || !O2.contiguous) return aicf::Status::NotImplemented;
-
-  // scalar shape check (rank=0 or rank=1 len=1 허용)
-  auto is_scalar = [](const TensorDesc& d) -> bool {
-    if (d.r.rank == 0) return true;
-    if (d.r.rank == 1 && d.shape[0] == 1) return true;
-    return false;
-  };
-  if (!is_scalar(S) || !is_scalar(O1) || !is_scalar(O2)) return aicf::Status::NotImplemented;
-
-  float beta1 = 0.0f, beta2 = 0.0f;
-  if (!attr_get_f32(attr, "beta1", beta1)) return aicf::Status::InvalidArgument;
-  if (!attr_get_f32(attr, "beta2", beta2)) return aicf::Status::InvalidArgument;
-
-  biascorr_kernel<<<1, 32, 0, stream>>>(
-      (const int32_t*)S.data,
-      beta1, beta2,
-      (float*)O1.data, (float*)O2.data);
-
-  return aicf::cuda::shim::cuda_last_error_to_status();
-}
-
-// -------------------------
-// KernelVariant glue
-// -------------------------
-static size_t ws_biascorr(const TensorDesc*, int, const void*) { return 0; }
-
-static bool supported_biascorr(
-    const TensorDesc* in, int ni,
-    const TensorDesc* out, int no,
+    const TensorDesc* outputs, int num_outputs,
     const void* attr) {
 
-  if (!in || !out) return false;
-  if (ni != 1 || no != 2) return false;
-  if (in[0].dtype != DType::kI32) return false;
-  if (!in[0].contiguous) return false;
+  if (!inputs || !outputs) return false;
+  if (num_inputs != 1 || num_outputs != 2) return false;
 
-  if (out[0].dtype != DType::kF32 || out[1].dtype != DType::kF32) return false;
-  if (!out[0].contiguous || !out[1].contiguous) return false;
+  const TensorDesc& S  = inputs[0];
+  const TensorDesc& O1 = outputs[0];
+  const TensorDesc& O2 = outputs[1];
 
-  auto is_scalar = [](const TensorDesc& d) -> bool {
-    if (d.r.rank == 0) return true;
-    if (d.r.rank == 1 && d.shape[0] == 1) return true;
-    return false;
-  };
-  if (!is_scalar(in[0]) || !is_scalar(out[0]) || !is_scalar(out[1])) return false;
+  if (!is_i32_scalar_contig(S)) return false;
+  if (!is_f32_scalar_contig(O1) || !is_f32_scalar_contig(O2)) return false;
 
-  // require attrs beta1/beta2
-  float tmp = 0.f;
-  if (!attr_get_f32(attr, "beta1", tmp)) return false;
-  if (!attr_get_f32(attr, "beta2", tmp)) return false;
-
+  float b1 = 0.f, b2 = 0.f;
+  if (!get_betas_from_attr(attr, &b1, &b2)) return false;
   return true;
 }
 
-static aicf::Status launch_biascorr(
+static bool biascorr_supported(
+    const TensorDesc* inputs, int num_inputs,
+    const TensorDesc* outputs, int num_outputs,
+    const void* attr) {
+  return biascorr_check(inputs, num_inputs, outputs, num_outputs, attr);
+}
+
+static Status biascorr_launch(
     const TensorDesc* inputs, int num_inputs,
     TensorDesc* outputs, int num_outputs,
     const void* attr,
-    void* workspace, size_t workspace_bytes,
+    void*, size_t,
     cudaStream_t stream) {
 
-  return biascorr_v0(inputs, num_inputs, outputs, num_outputs, attr, workspace, workspace_bytes, stream);
+  if (!biascorr_check(inputs, num_inputs, outputs, num_outputs, attr)) {
+    return Status::InvalidArgument;
+  }
+
+  const TensorDesc& S  = inputs[0];
+  TensorDesc& O1 = outputs[0];
+  TensorDesc& O2 = outputs[1];
+
+  float beta1 = 0.f, beta2 = 0.f;
+  (void)get_betas_from_attr(attr, &beta1, &beta2);
+
+  cudaGetLastError(); // clear
+  biascorr_impl::biascorr_kernel<<<1, 32, 0, stream>>>(
+      (const int32_t*)S.data,
+      beta1, beta2,
+      (float*)O1.data,
+      (float*)O2.data);
+
+  return cuda_last_status();
 }
 
+// IMPORTANT: register_all.cpp가 찾는 심볼
 KernelVariant make_biascorr_variant() {
-  KernelVariant kv{};
-  kv.name = "biascorr_f32_v0";
-  kv.priority = 0;
-  kv.query_workspace = ws_biascorr;
-  kv.supported = supported_biascorr;
-  kv.launch = launch_biascorr;
-  return kv;
+  KernelVariant v{};
+  v.name = "biascorr_f32_v0";
+  v.priority = 0;
+  v.flags = 0;
+  v.expected_attr_schema_id = kSchema_BCOR;
+  v.launch = biascorr_launch;
+  v.supported = biascorr_supported;
+  v.query_workspace = biascorr_workspace;
+  return v;
 }
 
 } // namespace aicf::cuda

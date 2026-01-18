@@ -208,6 +208,7 @@ static inline const char* opkind_to_name(aicf::cuda::OpKind k) {
     case aicf::cuda::OpKind::LayerNormBwd: return "layernorm_bwd";
     case aicf::cuda::OpKind::BatchNormFwd: return "batchnorm_fwd";
     case aicf::cuda::OpKind::BatchNormBwd: return "batchnorm_bwd";
+    
     default: return "unknown";
   }
 }

@@ -1,26 +1,33 @@
-// relu_bwd/launcher.cu (or whatever your file name is)
+// ============================================================================
+// src/backends/cuda/ops/relu_bwd/launcher.cu  (core-free / minimal)
+// Contract (framework):
+//   inputs[0] = dOut
+//   inputs[1] = Y
+//   outputs[0]= dY
+// - contig required, same shape, dtype per variant
+// - no attrs, no workspace
+// ============================================================================
+
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+
 #include <cstdint>
 
-#include <aicf/core/status.hpp>
-#include <aicf/runtime/stream.hpp>
-
-// public API
-#include <aicf/backends/cuda/ops/relu_bwd/api.hpp>
-
-// registry glue
+#include <aicf/backends/cuda/registry/status.hpp>
 #include <aicf/backends/cuda/registry/kernel_variant.hpp>
 #include <aicf/backends/cuda/registry/tensor_desc.hpp>
-
-// common shim
-#include "aicf/backends/cuda/ops/_common/shim/launch.hpp"
-#include "aicf/backends/cuda/ops/_common/shim/status.hpp"
-#include "aicf/backends/cuda/ops/_common/shim/validate.hpp"
 
 #include "kernels.cuh"
 
 namespace aicf::cuda {
+
+// ---- cuda error -> Status (core-free) ----
+static inline Status cuda_to_status(cudaError_t e) {
+  return (e == cudaSuccess) ? Status::Ok : Status::Internal;
+}
+static inline Status cuda_last_status() {
+  return cuda_to_status(cudaGetLastError());
+}
 
 // -------------------------
 // kernels
@@ -72,72 +79,11 @@ __global__ void relu_bwd_f16x2_kernel(const __half2* __restrict__ Y,
 } // namespace relu_bwd_impl
 
 // -------------------------
-// public API implementation
-// -------------------------
-// NOTE: Public API here is still (Y, dOut) for backward-compat if you already exported it.
-// The registry contract below is changed to (dOut, Y) to match Python framework call-site.
-aicf::Status relu_bwd_f32(const float* Y,
-                          const float* dOut,
-                          float* dY,
-                          int64_t numel,
-                          aicf::Stream stream) {
-  if (!Y || !dOut || !dY || numel <= 0) {
-    return aicf::Status::InvalidArgument;
-  }
-
-  cudaStream_t s = aicf::cuda::shim::to_cuda_stream(stream);
-
-  constexpr int kThreads = 256;
-  int blocks = (int)((numel + kThreads - 1) / kThreads);
-  if (blocks > 65535) blocks = 65535;
-
-  relu_bwd_impl::relu_bwd_f32_kernel<<<blocks, kThreads, 0, s>>>(Y, dOut, dY, numel);
-  return aicf::cuda::shim::cuda_last_error_to_status();
-}
-
-aicf::Status relu_bwd_f16(const void* Y,
-                          const void* dOut,
-                          void* dY,
-                          int64_t numel,
-                          aicf::Stream stream) {
-  if (!Y || !dOut || !dY || numel <= 0) {
-    return aicf::Status::InvalidArgument;
-  }
-
-  cudaStream_t s = aicf::cuda::shim::to_cuda_stream(stream);
-
-  constexpr int kThreads = 256;
-
-  const bool even = ((numel & 1) == 0);
-  const bool y_aligned = (((uintptr_t)Y & 0x3u) == 0);
-  const bool g_aligned = (((uintptr_t)dOut & 0x3u) == 0);
-  const bool o_aligned = (((uintptr_t)dY & 0x3u) == 0);
-
-  if (even && y_aligned && g_aligned && o_aligned) {
-    const int64_t numel2 = numel / 2;
-    int blocks = (int)((numel2 + kThreads - 1) / kThreads);
-    if (blocks > 65535) blocks = 65535;
-
-    relu_bwd_impl::relu_bwd_f16x2_kernel<<<blocks, kThreads, 0, s>>>(
-        (const __half2*)Y, (const __half2*)dOut, (__half2*)dY, numel2);
-  } else {
-    int blocks = (int)((numel + kThreads - 1) / kThreads);
-    if (blocks > 65535) blocks = 65535;
-
-    relu_bwd_impl::relu_bwd_f16_kernel<<<blocks, kThreads, 0, s>>>(
-        (const __half*)Y, (const __half*)dOut, (__half*)dY, numel);
-  }
-
-  return aicf::cuda::shim::cuda_last_error_to_status();
-}
-
-// -------------------------
 // helpers
 // -------------------------
 static inline bool is_f32_contig(const TensorDesc& T) {
   return (T.dtype == DType::kF32) && T.contiguous;
 }
-
 static inline bool is_f16_contig(const TensorDesc& T) {
   return (T.dtype == DType::kF16) && T.contiguous;
 }
@@ -166,13 +112,12 @@ static inline bool compute_numel(const TensorDesc& T, int64_t* out_numel) {
   return true;
 }
 
-// -------------------------
-// Contract (UPDATED to match framework call-site):
-// inputs[0] = dOut
-// inputs[1] = Y   (forward ReLU output or any tensor where y>0 indicates active)
-// outputs[0]= dY   (a.k.a. dX)
-// same shape, contig, dtype per variant
-// -------------------------
+static inline bool is_aligned_ptr(const void* p, size_t align) {
+  return (((uintptr_t)p) & (align - 1)) == 0;
+}
+
+// Contract:
+// inputs[0]=dOut, inputs[1]=Y, outputs[0]=dY
 static inline bool relu_bwd_check_dt(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs,
@@ -187,7 +132,6 @@ static inline bool relu_bwd_check_dt(
 
   if (!is_ok(Y) || !is_ok(dOut) || !is_ok(dY)) return false;
   if (Y.rank() < 1) return false;
-
   if (!same_shape(Y, dOut)) return false;
   if (!same_shape(Y, dY)) return false;
 
@@ -196,103 +140,6 @@ static inline bool relu_bwd_check_dt(
   return true;
 }
 
-static size_t relu_bwd_workspace(const TensorDesc*, int, const void*) { return 0; }
-
-// ---- F32 variant ----
-static bool relu_bwd_f32_supported(
-    const TensorDesc* inputs, int num_inputs,
-    const TensorDesc* outputs, int num_outputs,
-    const void* /*attr*/) {
-  return relu_bwd_check_dt(inputs, num_inputs, outputs, num_outputs, &is_f32_contig);
-}
-
-static aicf::Status relu_bwd_f32_launch(
-    const TensorDesc* inputs, int num_inputs,
-    TensorDesc* outputs, int num_outputs,
-    const void* /*attr*/,
-    void* /*workspace*/, size_t /*workspace_bytes*/,
-    cudaStream_t stream) {
-
-  if (!relu_bwd_check_dt(inputs, num_inputs, outputs, num_outputs, &is_f32_contig)) {
-    return aicf::Status::InvalidArgument;
-  }
-
-  const TensorDesc& dOut = inputs[0];
-  const TensorDesc& Y    = inputs[1];
-  TensorDesc& dY         = outputs[0];
-
-  int64_t numel = 0;
-  if (!compute_numel(Y, &numel)) return aicf::Status::InvalidArgument;
-
-  constexpr int kThreads = 256;
-  int blocks = (int)((numel + kThreads - 1) / kThreads);
-  if (blocks > 65535) blocks = 65535;
-
-  relu_bwd_impl::relu_bwd_f32_kernel<<<blocks, kThreads, 0, stream>>>(
-      (const float*)Y.data, (const float*)dOut.data, (float*)dY.data, numel);
-
-  return aicf::cuda::shim::cuda_last_error_to_status();
-}
-
-KernelVariant make_relu_bwd_f32_variant() {
-  KernelVariant v{};
-  v.name = "relu_bwd_f32";
-  v.priority = 0;
-  v.flags = 0;
-  v.launch = relu_bwd_f32_launch;
-  v.supported = relu_bwd_f32_supported;
-  v.query_workspace = relu_bwd_workspace;
-  return v;
-}
-
-// ---- F16 naive variant ----
-static bool relu_bwd_f16_supported(
-    const TensorDesc* inputs, int num_inputs,
-    const TensorDesc* outputs, int num_outputs,
-    const void* /*attr*/) {
-  return relu_bwd_check_dt(inputs, num_inputs, outputs, num_outputs, &is_f16_contig);
-}
-
-static aicf::Status relu_bwd_f16_launch(
-    const TensorDesc* inputs, int num_inputs,
-    TensorDesc* outputs, int num_outputs,
-    const void* /*attr*/,
-    void* /*workspace*/, size_t /*workspace_bytes*/,
-    cudaStream_t stream) {
-
-  if (!relu_bwd_check_dt(inputs, num_inputs, outputs, num_outputs, &is_f16_contig)) {
-    return aicf::Status::InvalidArgument;
-  }
-
-  const TensorDesc& dOut = inputs[0];
-  const TensorDesc& Y    = inputs[1];
-  TensorDesc& dY         = outputs[0];
-
-  int64_t numel = 0;
-  if (!compute_numel(Y, &numel)) return aicf::Status::InvalidArgument;
-
-  constexpr int kThreads = 256;
-  int blocks = (int)((numel + kThreads - 1) / kThreads);
-  if (blocks > 65535) blocks = 65535;
-
-  relu_bwd_impl::relu_bwd_f16_kernel<<<blocks, kThreads, 0, stream>>>(
-      (const __half*)Y.data, (const __half*)dOut.data, (__half*)dY.data, numel);
-
-  return aicf::cuda::shim::cuda_last_error_to_status();
-}
-
-KernelVariant make_relu_bwd_f16_variant() {
-  KernelVariant v{};
-  v.name = "relu_bwd_f16_naive";
-  v.priority = 0;
-  v.flags = 0;
-  v.launch = relu_bwd_f16_launch;
-  v.supported = relu_bwd_f16_supported;
-  v.query_workspace = relu_bwd_workspace;
-  return v;
-}
-
-// ---- F16 vec2 (half2) variant ----
 static inline bool relu_bwd_f16_vec2_check(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs) {
@@ -310,29 +157,33 @@ static inline bool relu_bwd_f16_vec2_check(
   if ((numel & 1) != 0) return false;
 
   constexpr size_t kAlign = 4;
-  if (!aicf::cuda::shim::is_aligned_data(Y, kAlign)) return false;
-  if (!aicf::cuda::shim::is_aligned_data(dOut, kAlign)) return false;
-  if (!aicf::cuda::shim::is_aligned_data(dY, kAlign)) return false;
-
+  if (!is_aligned_ptr(Y.data, kAlign)) return false;
+  if (!is_aligned_ptr(dOut.data, kAlign)) return false;
+  if (!is_aligned_ptr(dY.data, kAlign)) return false;
   return true;
 }
 
-static bool relu_bwd_f16_vec2_supported(
+static size_t relu_bwd_workspace(const TensorDesc*, int, const void*) { return 0; }
+
+// -------------------------
+// Variant: F32
+// -------------------------
+static bool relu_bwd_f32_supported(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs,
-    const void* /*attr*/) {
-  return relu_bwd_f16_vec2_check(inputs, num_inputs, outputs, num_outputs);
+    const void*) {
+  return relu_bwd_check_dt(inputs, num_inputs, outputs, num_outputs, &is_f32_contig);
 }
 
-static aicf::Status relu_bwd_f16_vec2_launch(
+static Status relu_bwd_f32_launch(
     const TensorDesc* inputs, int num_inputs,
     TensorDesc* outputs, int num_outputs,
-    const void* /*attr*/,
-    void* /*workspace*/, size_t /*workspace_bytes*/,
+    const void*,
+    void*, size_t,
     cudaStream_t stream) {
 
-  if (!relu_bwd_f16_vec2_check(inputs, num_inputs, outputs, num_outputs)) {
-    return aicf::Status::InvalidArgument;
+  if (!relu_bwd_check_dt(inputs, num_inputs, outputs, num_outputs, &is_f32_contig)) {
+    return Status::InvalidArgument;
   }
 
   const TensorDesc& dOut = inputs[0];
@@ -340,18 +191,127 @@ static aicf::Status relu_bwd_f16_vec2_launch(
   TensorDesc& dY         = outputs[0];
 
   int64_t numel = 0;
-  if (!compute_numel(Y, &numel)) return aicf::Status::InvalidArgument;
+  if (!compute_numel(Y, &numel)) return Status::InvalidArgument;
+
+  constexpr int kThreads = 256;
+  int64_t blocks64 = (numel + kThreads - 1) / kThreads;
+  if (blocks64 < 1) blocks64 = 1;
+  if (blocks64 > 65535) blocks64 = 65535;
+  const int blocks = (int)blocks64;
+
+  cudaGetLastError(); // clear
+  relu_bwd_impl::relu_bwd_f32_kernel<<<blocks, kThreads, 0, stream>>>(
+      (const float*)Y.data, (const float*)dOut.data, (float*)dY.data, numel);
+
+  return cuda_last_status();
+}
+
+KernelVariant make_relu_bwd_f32_variant() {
+  KernelVariant v{};
+  v.name = "relu_bwd_f32";
+  v.priority = 0;
+  v.flags = 0;
+  v.expected_attr_schema_id = 0;
+  v.launch = relu_bwd_f32_launch;
+  v.supported = relu_bwd_f32_supported;
+  v.query_workspace = relu_bwd_workspace;
+  return v;
+}
+
+// -------------------------
+// Variant: F16 naive
+// -------------------------
+static bool relu_bwd_f16_supported(
+    const TensorDesc* inputs, int num_inputs,
+    const TensorDesc* outputs, int num_outputs,
+    const void*) {
+  return relu_bwd_check_dt(inputs, num_inputs, outputs, num_outputs, &is_f16_contig);
+}
+
+static Status relu_bwd_f16_launch(
+    const TensorDesc* inputs, int num_inputs,
+    TensorDesc* outputs, int num_outputs,
+    const void*,
+    void*, size_t,
+    cudaStream_t stream) {
+
+  if (!relu_bwd_check_dt(inputs, num_inputs, outputs, num_outputs, &is_f16_contig)) {
+    return Status::InvalidArgument;
+  }
+
+  const TensorDesc& dOut = inputs[0];
+  const TensorDesc& Y    = inputs[1];
+  TensorDesc& dY         = outputs[0];
+
+  int64_t numel = 0;
+  if (!compute_numel(Y, &numel)) return Status::InvalidArgument;
+
+  constexpr int kThreads = 256;
+  int64_t blocks64 = (numel + kThreads - 1) / kThreads;
+  if (blocks64 < 1) blocks64 = 1;
+  if (blocks64 > 65535) blocks64 = 65535;
+  const int blocks = (int)blocks64;
+
+  cudaGetLastError(); // clear
+  relu_bwd_impl::relu_bwd_f16_kernel<<<blocks, kThreads, 0, stream>>>(
+      (const __half*)Y.data, (const __half*)dOut.data, (__half*)dY.data, numel);
+
+  return cuda_last_status();
+}
+
+KernelVariant make_relu_bwd_f16_variant() {
+  KernelVariant v{};
+  v.name = "relu_bwd_f16_naive";
+  v.priority = 0;
+  v.flags = 0;
+  v.expected_attr_schema_id = 0;
+  v.launch = relu_bwd_f16_launch;
+  v.supported = relu_bwd_f16_supported;
+  v.query_workspace = relu_bwd_workspace;
+  return v;
+}
+
+// -------------------------
+// Variant: F16 vec2 (half2)
+// -------------------------
+static bool relu_bwd_f16_vec2_supported(
+    const TensorDesc* inputs, int num_inputs,
+    const TensorDesc* outputs, int num_outputs,
+    const void*) {
+  return relu_bwd_f16_vec2_check(inputs, num_inputs, outputs, num_outputs);
+}
+
+static Status relu_bwd_f16_vec2_launch(
+    const TensorDesc* inputs, int num_inputs,
+    TensorDesc* outputs, int num_outputs,
+    const void*,
+    void*, size_t,
+    cudaStream_t stream) {
+
+  if (!relu_bwd_f16_vec2_check(inputs, num_inputs, outputs, num_outputs)) {
+    return Status::InvalidArgument;
+  }
+
+  const TensorDesc& dOut = inputs[0];
+  const TensorDesc& Y    = inputs[1];
+  TensorDesc& dY         = outputs[0];
+
+  int64_t numel = 0;
+  if (!compute_numel(Y, &numel)) return Status::InvalidArgument;
 
   const int64_t numel2 = numel / 2;
 
   constexpr int kThreads = 256;
-  int blocks = (int)((numel2 + kThreads - 1) / kThreads);
-  if (blocks > 65535) blocks = 65535;
+  int64_t blocks64 = (numel2 + kThreads - 1) / kThreads;
+  if (blocks64 < 1) blocks64 = 1;
+  if (blocks64 > 65535) blocks64 = 65535;
+  const int blocks = (int)blocks64;
 
+  cudaGetLastError(); // clear
   relu_bwd_impl::relu_bwd_f16x2_kernel<<<blocks, kThreads, 0, stream>>>(
       (const __half2*)Y.data, (const __half2*)dOut.data, (__half2*)dY.data, numel2);
 
-  return aicf::cuda::shim::cuda_last_error_to_status();
+  return cuda_last_status();
 }
 
 KernelVariant make_relu_bwd_f16_vec2_variant() {
@@ -359,6 +319,7 @@ KernelVariant make_relu_bwd_f16_vec2_variant() {
   v.name = "relu_bwd_f16_vec2_half2";
   v.priority = 10;
   v.flags = 0;
+  v.expected_attr_schema_id = 0;
   v.launch = relu_bwd_f16_vec2_launch;
   v.supported = relu_bwd_f16_vec2_supported;
   v.query_workspace = relu_bwd_workspace;

@@ -1,30 +1,43 @@
+// ============================================================================
+// src/backends/cuda/ops/add/launcher.cu  (core-free / AttrBlob ABI-friendly)
+// - no attrs needed (attr ignored)
+// - supports ND contiguous tensors by flattening numel()
+// - f32 naive, f16 naive, f16 half2 fastpath (numel even + 4B aligned)
+// ============================================================================
+
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 
 #include <cstddef>
 #include <cstdint>
+#include <cinttypes> // uintptr_t
 
-#include <aicf/core/status.hpp>
-#include <aicf/runtime/stream.hpp>
-
-// public API
+// public API (optional)
 #include <aicf/backends/cuda/ops/add/api.hpp>
 
 // registry glue
+#include <aicf/backends/cuda/registry/status.hpp>
 #include <aicf/backends/cuda/registry/kernel_variant.hpp>
 #include <aicf/backends/cuda/registry/tensor_desc.hpp>
-
-// common shim
-#include "aicf/backends/cuda/ops/_common/shim/launch.hpp"
-#include "aicf/backends/cuda/ops/_common/shim/status.hpp"
-#include "aicf/backends/cuda/ops/_common/shim/validate.hpp"
+#include <aicf/backends/cuda/registry/attr_blob.hpp>
 
 #include "kernels.cuh"
 
 namespace aicf::cuda {
 
+// ---- cuda error -> Status (core-free) ----
+static inline Status cuda_to_status(cudaError_t e) {
+  return (e == cudaSuccess) ? Status::Ok : Status::Internal;
+}
+static inline Status cuda_last_status() {
+  return cuda_to_status(cudaGetLastError());
+}
+static inline bool is_aligned_ptr(const void* p, size_t align) {
+  return ((uintptr_t)p % (uintptr_t)align) == 0;
+}
+
 // -------------------------
-// kernels
+// kernels (definitions live here)
 // -------------------------
 namespace add_impl {
 
@@ -73,74 +86,7 @@ static inline bool same_shape(const TensorDesc& a, const TensorDesc& b) {
 
 static inline bool is_contig(const TensorDesc& d) { return d.contiguous; }
 
-// -------------------------
-// public API implementation
-// -------------------------
-aicf::Status add_f32(const float* a,
-                     const float* b,
-                     float* out,
-                     int N,
-                     aicf::Stream stream) {
-  if (!a || !b || !out || N <= 0) return aicf::Status::InvalidArgument;
-
-  cudaStream_t s = aicf::cuda::shim::to_cuda_stream(stream);
-
-  constexpr int kThreads = 256;
-  const int blocks = (N + kThreads - 1) / kThreads;
-
-  add_impl::add_f32_kernel<<<blocks, kThreads, 0, s>>>(a, b, out, N);
-  return aicf::cuda::shim::cuda_last_error_to_status();
-}
-
-// v0.2: keep header free from cuda_fp16 by using void* API
-// v0.2+: add half2 fastpath when (N even) && (ptr 4B aligned)
-aicf::Status add_f16(const void* a,
-                     const void* b,
-                     void* out,
-                     int N,
-                     aicf::Stream stream) {
-  if (!a || !b || !out || N <= 0) return aicf::Status::InvalidArgument;
-
-  cudaStream_t s = aicf::cuda::shim::to_cuda_stream(stream);
-
-  constexpr int kThreads = 256;
-
-  const bool even = ((N & 1) == 0);
-  const bool a_aligned = (((uintptr_t)a & 0x3u) == 0);
-  const bool b_aligned = (((uintptr_t)b & 0x3u) == 0);
-  const bool o_aligned = (((uintptr_t)out & 0x3u) == 0);
-
-  if (even && a_aligned && b_aligned && o_aligned) {
-    const int N2 = N / 2;
-    const int blocks = (N2 + kThreads - 1) / kThreads;
-
-    add_impl::add_f16x2_kernel<<<blocks, kThreads, 0, s>>>(
-        (const __half2*)a, (const __half2*)b, (__half2*)out, N2);
-  } else {
-    const int blocks = (N + kThreads - 1) / kThreads;
-
-    add_impl::add_f16_kernel<<<blocks, kThreads, 0, s>>>(
-        (const __half*)a, (const __half*)b, (__half*)out, N);
-  }
-
-  return aicf::cuda::shim::cuda_last_error_to_status();
-}
-
-// -------------------------
-// Registry Variants - v0.2 Plan A (no workspace, no attr semantics yet)
-//
-// Contract (updated):
-//   inputs[0]=A [*], inputs[1]=B [*], outputs[0]=O [*]
-//   - contiguous required
-//   - shapes must match (same rank + dims)
-//   - supports ND by flattening to numel()
-//   - out may alias inputs (in-place) by design
-// -------------------------
-
-static size_t add_variant_workspace(const TensorDesc*, int, const void*) {
-  return 0;
-}
-
+// dtype-generic common check
 static inline bool add_nd_common_check(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs,
@@ -162,8 +108,12 @@ static inline bool add_nd_common_check(
   return (numel(O) > 0);
 }
 
-// ---- F32 variant ----
-static bool add_f32_variant_supported(
+static size_t add_workspace(const TensorDesc*, int, const void*) { return 0; }
+
+// -------------------------
+// Variant: F32
+// -------------------------
+static bool add_f32_supported(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs,
     const void* /*attr*/) {
@@ -171,15 +121,15 @@ static bool add_f32_variant_supported(
   return add_nd_common_check(inputs, num_inputs, outputs, num_outputs, DType::kF32);
 }
 
-static aicf::Status add_f32_variant_launch(
+static Status add_f32_launch(
     const TensorDesc* inputs, int num_inputs,
     TensorDesc* outputs, int num_outputs,
     const void* /*attr*/,
-    void* /*workspace*/, size_t /*workspace_bytes*/,
+    void*, size_t,
     cudaStream_t stream) {
 
   if (!add_nd_common_check(inputs, num_inputs, outputs, num_outputs, DType::kF32)) {
-    return aicf::Status::InvalidArgument;
+    return Status::InvalidArgument;
   }
 
   const TensorDesc& A = inputs[0];
@@ -192,13 +142,11 @@ static aicf::Status add_f32_variant_launch(
   constexpr int kThreads = 256;
   const int blocks = (int)((N64 + kThreads - 1) / kThreads);
 
+  cudaGetLastError(); // clear
   add_impl::add_f32_kernel<<<blocks, kThreads, 0, stream>>>(
-      (const float*)A.data,
-      (const float*)B.data,
-      (float*)O.data,
-      N);
+      (const float*)A.data, (const float*)B.data, (float*)O.data, N);
 
-  return aicf::cuda::shim::cuda_last_error_to_status();
+  return cuda_last_status();
 }
 
 KernelVariant make_add_f32_variant() {
@@ -206,14 +154,17 @@ KernelVariant make_add_f32_variant() {
   v.name = "add_f32_naive";
   v.priority = 0;
   v.flags = 0;
-  v.launch = add_f32_variant_launch;
-  v.supported = add_f32_variant_supported;
-  v.query_workspace = add_variant_workspace;
+  v.expected_attr_schema_id = 0;
+  v.launch = add_f32_launch;
+  v.supported = add_f32_supported;
+  v.query_workspace = add_workspace;
   return v;
 }
 
-// ---- F16 naive variant ----
-static bool add_f16_variant_supported(
+// -------------------------
+// Variant: F16 naive
+// -------------------------
+static bool add_f16_supported(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs,
     const void* /*attr*/) {
@@ -221,15 +172,15 @@ static bool add_f16_variant_supported(
   return add_nd_common_check(inputs, num_inputs, outputs, num_outputs, DType::kF16);
 }
 
-static aicf::Status add_f16_variant_launch(
+static Status add_f16_launch(
     const TensorDesc* inputs, int num_inputs,
     TensorDesc* outputs, int num_outputs,
     const void* /*attr*/,
-    void* /*workspace*/, size_t /*workspace_bytes*/,
+    void*, size_t,
     cudaStream_t stream) {
 
   if (!add_nd_common_check(inputs, num_inputs, outputs, num_outputs, DType::kF16)) {
-    return aicf::Status::InvalidArgument;
+    return Status::InvalidArgument;
   }
 
   const TensorDesc& A = inputs[0];
@@ -242,13 +193,11 @@ static aicf::Status add_f16_variant_launch(
   constexpr int kThreads = 256;
   const int blocks = (int)((N64 + kThreads - 1) / kThreads);
 
+  cudaGetLastError(); // clear
   add_impl::add_f16_kernel<<<blocks, kThreads, 0, stream>>>(
-      (const __half*)A.data,
-      (const __half*)B.data,
-      (__half*)O.data,
-      N);
+      (const __half*)A.data, (const __half*)B.data, (__half*)O.data, N);
 
-  return aicf::cuda::shim::cuda_last_error_to_status();
+  return cuda_last_status();
 }
 
 KernelVariant make_add_f16_variant() {
@@ -256,13 +205,16 @@ KernelVariant make_add_f16_variant() {
   v.name = "add_f16_naive";
   v.priority = 0;
   v.flags = 0;
-  v.launch = add_f16_variant_launch;
-  v.supported = add_f16_variant_supported;
-  v.query_workspace = add_variant_workspace;
+  v.expected_attr_schema_id = 0;
+  v.launch = add_f16_launch;
+  v.supported = add_f16_supported;
+  v.query_workspace = add_workspace;
   return v;
 }
 
-// ---- F16 vec2 (half2) variant ----
+// -------------------------
+// Variant: F16 half2 (vec2)
+// -------------------------
 static inline bool add_f16_vec2_check(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs) {
@@ -271,22 +223,20 @@ static inline bool add_f16_vec2_check(
     return false;
   }
 
-  const TensorDesc& A = inputs[0];
-  const TensorDesc& B = inputs[1];
   const TensorDesc& O = outputs[0];
-
   const int64_t N = numel(O);
   if ((N & 1) != 0) return false;
 
-  constexpr size_t kHalf2Align = 4;
-  if (!aicf::cuda::shim::is_aligned_data(A, kHalf2Align)) return false;
-  if (!aicf::cuda::shim::is_aligned_data(B, kHalf2Align)) return false;
-  if (!aicf::cuda::shim::is_aligned_data(O, kHalf2Align)) return false;
+  // 4B align
+  constexpr size_t kAlign = 4;
+  if (!is_aligned_ptr(inputs[0].data, kAlign)) return false;
+  if (!is_aligned_ptr(inputs[1].data, kAlign)) return false;
+  if (!is_aligned_ptr(outputs[0].data, kAlign)) return false;
 
   return true;
 }
 
-static bool add_f16_vec2_variant_supported(
+static bool add_f16_vec2_supported(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs,
     const void* /*attr*/) {
@@ -294,15 +244,15 @@ static bool add_f16_vec2_variant_supported(
   return add_f16_vec2_check(inputs, num_inputs, outputs, num_outputs);
 }
 
-static aicf::Status add_f16_vec2_variant_launch(
+static Status add_f16_vec2_launch(
     const TensorDesc* inputs, int num_inputs,
     TensorDesc* outputs, int num_outputs,
     const void* /*attr*/,
-    void* /*workspace*/, size_t /*workspace_bytes*/,
+    void*, size_t,
     cudaStream_t stream) {
 
   if (!add_f16_vec2_check(inputs, num_inputs, outputs, num_outputs)) {
-    return aicf::Status::InvalidArgument;
+    return Status::InvalidArgument;
   }
 
   const TensorDesc& A = inputs[0];
@@ -315,13 +265,11 @@ static aicf::Status add_f16_vec2_variant_launch(
   constexpr int kThreads = 256;
   const int blocks = (int)((N2 + kThreads - 1) / kThreads);
 
+  cudaGetLastError(); // clear
   add_impl::add_f16x2_kernel<<<blocks, kThreads, 0, stream>>>(
-      (const __half2*)A.data,
-      (const __half2*)B.data,
-      (__half2*)O.data,
-      N2);
+      (const __half2*)A.data, (const __half2*)B.data, (__half2*)O.data, N2);
 
-  return aicf::cuda::shim::cuda_last_error_to_status();
+  return cuda_last_status();
 }
 
 KernelVariant make_add_f16_vec2_variant() {
@@ -329,10 +277,11 @@ KernelVariant make_add_f16_vec2_variant() {
   v.name = "add_f16_vec2_half2";
   v.priority = 10;
   v.flags = 0;
-  v.launch = add_f16_vec2_variant_launch;
-  v.supported = add_f16_vec2_variant_supported;
-  v.query_workspace = add_variant_workspace;
+  v.expected_attr_schema_id = 0;
+  v.launch = add_f16_vec2_launch;
+  v.supported = add_f16_vec2_supported;
+  v.query_workspace = add_workspace;
   return v;
 }
 
-}  // namespace aicf::cuda
+} // namespace aicf::cuda

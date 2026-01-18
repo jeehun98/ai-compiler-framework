@@ -4,7 +4,7 @@
 
 namespace aicf::cuda::step_inc_impl {
 
-// step: int32 scalar (or tiny tensor) in-place increment
+// step[i] += 1 (numel>=1). scalar(0d) is treated as numel=1 in launcher.
 __global__ void step_inc_i32_kernel(int32_t* __restrict__ step, int64_t numel);
 
 } // namespace aicf::cuda::step_inc_impl
