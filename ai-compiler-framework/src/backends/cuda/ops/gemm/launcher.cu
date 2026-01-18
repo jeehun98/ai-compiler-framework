@@ -1,37 +1,22 @@
 // ============================================================================
-// src/backends/cuda/ops/gemm/launcher.cu
-// - KEEP "kernel definitions inside launcher.cu" structure
-// - Unify transA/transB by stride-swapped logical views (MatView2D)
-// - f32: single strided naive kernel (covers NN/TN/NT/TT via view)
-// - f16 TC: WMMA kernel uses GLOBAL->SMEM packing (transpose-at-load) helpers
-//   * acc float, store half
-// - NOTE: TC path currently requires C contiguous row-major (Ccs==1, Crs==N)
-//         A/B may be strided logically (correct), perf may vary.
-//
-// PATCH v2:
-// - Robustly read transA/transB even if AttrPack uses different key names.
-// - Robustly read BOOL or I64 encoded bool.
-// - Optional debug dump of AttrPack (compile with -DAICF_GEMM_DUMP_ATTR=1).
+// src/backends/cuda/ops/gemm/launcher.cu  (core-free / AttrBlob)
+// - kernel definitions live here (keep structure)
+// - attrs are AttrBlob(schema_id + raw bytes)
+// - supports f32 naive strided + f16 WMMA out_f16 (C must be contiguous row-major)
 // ============================================================================
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <mma.h>
+
 #include <cstdint>
-#include <string_view>
+#include <cstring>   // memcpy
+#include <algorithm>
 
-#include <aicf/core/status.hpp>
-#include <aicf/runtime/stream.hpp>
-
-#include <aicf/backends/cuda/ops/gemm/api.hpp>
-
+#include <aicf/backends/cuda/registry/status.hpp>
 #include <aicf/backends/cuda/registry/kernel_variant.hpp>
 #include <aicf/backends/cuda/registry/tensor_desc.hpp>
-#include <aicf/backends/cuda/registry/attr_pack.hpp>
-
-#include "aicf/backends/cuda/ops/_common/shim/launch.hpp"
-#include "aicf/backends/cuda/ops/_common/shim/status.hpp"
-#include "aicf/backends/cuda/ops/_common/shim/validate.hpp"
+#include <aicf/backends/cuda/registry/attr_blob.hpp>
 
 #include "kernels.cuh"
 
@@ -39,101 +24,61 @@ namespace aicf::cuda {
 
 using namespace nvcuda;
 
+// ---- cuda error -> Status (core-free) ----
+static inline Status cuda_to_status(cudaError_t e) {
+  return (e == cudaSuccess) ? Status::Ok : Status::Internal;
+}
+static inline Status cuda_last_status() {
+  return cuda_to_status(cudaGetLastError());
+}
+
 // ============================================================================
-// Attr helpers
+// AttrBlob schema (GEMM)
+// - schema_id == 0 => default transA=0, transB=0
+// - schema_id == kAttrSchema_Gemm => parse GemmAttrV0 from bytes
+// Python pack: struct.pack("<ii", trans_a, trans_b)
 // ============================================================================
-static inline bool attr_has_key_sv(const aicf::cuda::AttrPack* pack, std::string_view k, int* out_idx) {
-  if (!pack || !pack->items || pack->size <= 0) return false;
-  for (int i = 0; i < pack->size; ++i) {
-    const auto& kv = pack->items[i];
-    if (!kv.key) continue;
-    if (std::string_view(kv.key) == k) {
-      if (out_idx) *out_idx = i;
-      return true;
-    }
-  }
-  return false;
-}
+static constexpr uint32_t kAttrSchema_Gemm = 0x47454D4Du; // 'GEMM'
 
-static inline bool attr_get_bool_i64_by_idx(const aicf::cuda::AttrPack* pack, int idx, bool* out) {
-  if (!pack || !out) return false;
-  if (idx < 0 || idx >= pack->size) return false;
-  const auto& kv = pack->items[idx];
-  // accept bool or i64
-  if (kv.val.tag == aicf::cuda::AttrTag::kBool) {
-    *out = (kv.val.b32 != 0);
-    return true;
-  }
-  if (kv.val.tag == aicf::cuda::AttrTag::kI64) {
-    *out = (kv.val.i64 != 0);
-    return true;
-  }
-  return false;
-}
+struct GemmAttrV0 {
+  int32_t transA;
+  int32_t transB;
+};
 
-#if defined(AICF_GEMM_DUMP_ATTR) && AICF_GEMM_DUMP_ATTR
-static inline void attr_dump(const void* attr, const char* where) {
-  const auto* pack = static_cast<const aicf::cuda::AttrPack*>(attr);
-  if (!pack || !pack->items || pack->size <= 0) {
-    printf("[gemm][attrdump][%s] (empty)\n", where);
-    return;
+static inline void read_gemm_attr(const void* attr, bool* out_ta, bool* out_tb) {
+  bool ta = false, tb = false;
+
+  const AttrBlob* ab = static_cast<const AttrBlob*>(attr);
+  if (!ab) { *out_ta = ta; *out_tb = tb; return; }
+
+  // accept schema_id==0 as "no attrs, defaults"
+  if (ab->schema_id != 0 && ab->schema_id != kAttrSchema_Gemm) {
+    *out_ta = ta; *out_tb = tb; return;
   }
-  printf("[gemm][attrdump][%s] size=%d\n", where, pack->size);
-  for (int i = 0; i < pack->size; ++i) {
-    const auto& kv = pack->items[i];
-    const char* k = kv.key ? kv.key : "(null)";
-    // tag print: you can extend this if enum changes
-    int tag = (int)kv.val.tag;
-    long long i64 = 0;
-    int b32 = 0;
-    float f32 = 0.f;
-    if (kv.val.tag == aicf::cuda::AttrTag::kI64) i64 = (long long)kv.val.i64;
-    if (kv.val.tag == aicf::cuda::AttrTag::kBool) b32 = (int)kv.val.b32;
-    if (kv.val.tag == aicf::cuda::AttrTag::kF32) f32 = kv.val.f32;
-    printf("  [%d] key=%s tag=%d (i64=%lld b32=%d f32=%f)\n", i, k, tag, i64, b32, f32);
+
+  if (!ab->data || ab->bytes < (uint32_t)sizeof(GemmAttrV0)) {
+    *out_ta = ta; *out_tb = tb; return;
   }
-}
-#else
-static inline void attr_dump(const void*, const char*) {}
-#endif
 
-static inline bool attr_get_bool_or_i64_anykey(
-    const void* attr,
-    const char* const* keys, int nkeys,
-    bool default_val) {
+  GemmAttrV0 a{};
+  std::memcpy(&a, ab->data, sizeof(GemmAttrV0));
+  ta = (a.transA != 0);
+  tb = (a.transB != 0);
 
-  const auto* pack = static_cast<const aicf::cuda::AttrPack*>(attr);
-  if (!pack || !pack->items || pack->size <= 0) return default_val;
-
-  for (int k = 0; k < nkeys; ++k) {
-    int idx = -1;
-    if (attr_has_key_sv(pack, std::string_view(keys[k]), &idx)) {
-      bool v = default_val;
-      if (attr_get_bool_i64_by_idx(pack, idx, &v)) return v;
-      return default_val; // key exists but wrong tag
-    }
-  }
-  return default_val;
-}
-
-static inline bool read_transA(const void* attr) {
-  // cover common python-side naming variants
-  const char* keys[] = {"transA", "trans_a", "transposeA", "ta"};
-  return attr_get_bool_or_i64_anykey(attr, keys, (int)(sizeof(keys)/sizeof(keys[0])), false);
-}
-static inline bool read_transB(const void* attr) {
-  const char* keys[] = {"transB", "trans_b", "transposeB", "tb"};
-  return attr_get_bool_or_i64_anykey(attr, keys, (int)(sizeof(keys)/sizeof(keys[0])), false);
+  *out_ta = ta;
+  *out_tb = tb;
 }
 
 // ============================================================================
 // Tensor helpers
 // ============================================================================
 static inline bool is_2d(const TensorDesc& T) { return T.rank() == 2; }
+
 static inline bool stride_valid_2d(const TensorDesc& T) {
   if (!is_2d(T)) return false;
   return (T.stride[0] > 0 && T.stride[1] > 0);
 }
+
 static inline bool is_contig_rowmajor_2d(const TensorDesc& T) {
   if (!is_2d(T)) return false;
   if (!stride_valid_2d(T)) return false;
@@ -154,7 +99,6 @@ static inline MatView2D make_view_2d(const TensorDesc& T, bool trans) {
   MatView2D v{};
   v.data  = T.data;
   v.dtype = T.dtype;
-
   if (!trans) {
     v.rows = T.shape[0];
     v.cols = T.shape[1];
@@ -187,9 +131,9 @@ static inline bool gemm_check_2d(
 
   if (!stride_valid_2d(A0) || !stride_valid_2d(B0) || !stride_valid_2d(C0)) return false;
 
-  MatView2D A = make_view_2d(A0, transA);  // [M,K]
-  MatView2D B = make_view_2d(B0, transB);  // [K,N]
-  MatView2D C = make_view_2d(C0, false);   // [M,N]
+  MatView2D A = make_view_2d(A0, transA); // [M,K]
+  MatView2D B = make_view_2d(B0, transB); // [K,N]
+  MatView2D C = make_view_2d(C0, false);  // [M,N]
 
   const int64_t M = A.rows;
   const int64_t K = A.cols;
@@ -227,7 +171,7 @@ __global__ void gemm_f32_naive_strided_kernel(
   C[(int64_t)row * Crs + (int64_t)col * Ccs] = acc;
 }
 
-// WMMA helpers / pack / core 그대로 유지
+// ---- WMMA helpers / pack / core ----
 __device__ __forceinline__ int ceil16_i(int x) { return (x + 15) & ~15; }
 
 __device__ __forceinline__
@@ -328,40 +272,38 @@ __global__ void gemm_f16_tc_wmma_out_f16_strided_kernel(
 // ============================================================================
 // f32 variant
 // ============================================================================
-static bool gemm_f32_variant_supported(
+static bool gemm_f32_supported(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs,
     const void* attr) {
 
-  const bool transA = read_transA(attr);
-  const bool transB = read_transB(attr);
+  bool ta=false, tb=false;
+  read_gemm_attr(attr, &ta, &tb);
 
   return gemm_check_2d(inputs, num_inputs, outputs, num_outputs,
-                       transA, transB, DType::kF32, DType::kF32, DType::kF32);
+                       ta, tb, DType::kF32, DType::kF32, DType::kF32);
 }
 
-static size_t gemm_f32_variant_workspace(const TensorDesc*, int, const void*) { return 0; }
+static size_t gemm_f32_workspace(const TensorDesc*, int, const void*) { return 0; }
 
-static aicf::Status gemm_f32_variant_launch(
+static Status gemm_f32_launch(
     const TensorDesc* inputs, int num_inputs,
     TensorDesc* outputs, int num_outputs,
     const void* attr,
     void*, size_t,
     cudaStream_t stream) {
 
-  attr_dump(attr, "gemm_f32_launch");
-
-  const bool transA = read_transA(attr);
-  const bool transB = read_transB(attr);
+  bool ta=false, tb=false;
+  read_gemm_attr(attr, &ta, &tb);
 
   if (!gemm_check_2d(inputs, num_inputs, outputs, num_outputs,
-                     transA, transB, DType::kF32, DType::kF32, DType::kF32)) {
-    return aicf::Status::InvalidArgument;
+                     ta, tb, DType::kF32, DType::kF32, DType::kF32)) {
+    return Status::InvalidArgument;
   }
 
-  MatView2D A = make_view_2d(inputs[0], transA);  // [M,K]
-  MatView2D B = make_view_2d(inputs[1], transB);  // [K,N]
-  MatView2D C = make_view_2d(outputs[0], false);  // [M,N]
+  MatView2D A = make_view_2d(inputs[0], ta);
+  MatView2D B = make_view_2d(inputs[1], tb);
+  MatView2D C = make_view_2d(outputs[0], false);
 
   const int M = (int)A.rows;
   const int K = (int)A.cols;
@@ -372,13 +314,14 @@ static aicf::Status gemm_f32_variant_launch(
             (M + block.y - 1) / block.y,
             1);
 
+  cudaGetLastError(); // clear
   gemm_impl::gemm_f32_naive_strided_kernel<<<grid, block, 0, stream>>>(
       (const float*)A.data, A.rs, A.cs,
       (const float*)B.data, B.rs, B.cs,
       (float*)C.data, C.rs, C.cs,
       M, N, K);
 
-  return aicf::cuda::shim::cuda_last_error_to_status();
+  return cuda_last_status();
 }
 
 KernelVariant make_gemm_f32_naive_variant() {
@@ -386,58 +329,57 @@ KernelVariant make_gemm_f32_naive_variant() {
   v.name = "gemm_f32_naive_strided";
   v.priority = 0;
   v.flags = 0;
-  v.launch = gemm_f32_variant_launch;
-  v.supported = gemm_f32_variant_supported;
-  v.query_workspace = gemm_f32_variant_workspace;
+  v.expected_attr_schema_id = 0; // accept schema 0 or GEMM (we parse both)
+  v.launch = gemm_f32_launch;
+  v.supported = gemm_f32_supported;
+  v.query_workspace = gemm_f32_workspace;
   return v;
 }
 
 // ============================================================================
-// TC out_f16 variant
+// f16 TC out_f16 variant
 // ============================================================================
-static bool gemm_tc_out_f16_supported(
+static bool gemm_f16_tc_out_f16_supported(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs,
     const void* attr) {
 
-  const bool transA = read_transA(attr);
-  const bool transB = read_transB(attr);
+  bool ta=false, tb=false;
+  read_gemm_attr(attr, &ta, &tb);
 
   if (!gemm_check_2d(inputs, num_inputs, outputs, num_outputs,
-                     transA, transB, DType::kF16, DType::kF16, DType::kF16)) {
+                     ta, tb, DType::kF16, DType::kF16, DType::kF16)) {
     return false;
   }
 
-  const TensorDesc& C0 = outputs[0];
-  if (!is_contig_rowmajor_2d(C0)) return false;
+  // TC path requires C contiguous row-major (as you noted)
+  if (!is_contig_rowmajor_2d(outputs[0])) return false;
 
   return true;
 }
 
-static size_t gemm_tc_out_f16_workspace(const TensorDesc*, int, const void*) { return 0; }
+static size_t gemm_f16_tc_out_f16_workspace(const TensorDesc*, int, const void*) { return 0; }
 
-static aicf::Status gemm_tc_out_f16_launch(
+static Status gemm_f16_tc_out_f16_launch(
     const TensorDesc* inputs, int num_inputs,
     TensorDesc* outputs, int num_outputs,
     const void* attr,
     void*, size_t,
     cudaStream_t stream) {
 
-  attr_dump(attr, "gemm_tc_f16_launch");
-
-  const bool transA = read_transA(attr);
-  const bool transB = read_transB(attr);
+  bool ta=false, tb=false;
+  read_gemm_attr(attr, &ta, &tb);
 
   if (!gemm_check_2d(inputs, num_inputs, outputs, num_outputs,
-                     transA, transB, DType::kF16, DType::kF16, DType::kF16)) {
-    return aicf::Status::InvalidArgument;
+                     ta, tb, DType::kF16, DType::kF16, DType::kF16)) {
+    return Status::InvalidArgument;
   }
   if (!is_contig_rowmajor_2d(outputs[0])) {
-    return aicf::Status::InvalidArgument;
+    return Status::InvalidArgument;
   }
 
-  MatView2D A = make_view_2d(inputs[0], transA);
-  MatView2D B = make_view_2d(inputs[1], transB);
+  MatView2D A = make_view_2d(inputs[0], ta);
+  MatView2D B = make_view_2d(inputs[1], tb);
   MatView2D C = make_view_2d(outputs[0], false);
 
   const int M = (int)A.rows;
@@ -446,12 +388,13 @@ static aicf::Status gemm_tc_out_f16_launch(
   dim3 block(32, 1, 1);
   dim3 grid((N + 15) / 16, (M + 15) / 16, 1);
 
+  cudaGetLastError(); // clear
   gemm_impl::gemm_f16_tc_wmma_out_f16_strided_kernel<<<grid, block, 0, stream>>>(
       (const __half*)A.data, A.rs, A.cs, A.rows, A.cols,
       (const __half*)B.data, B.rs, B.cs, B.rows, B.cols,
       (__half*)C.data, C.rs, C.cs, C.rows, C.cols);
 
-  return aicf::cuda::shim::cuda_last_error_to_status();
+  return cuda_last_status();
 }
 
 KernelVariant make_gemm_f16_tc_wmma_out_f16_variant() {
@@ -459,9 +402,10 @@ KernelVariant make_gemm_f16_tc_wmma_out_f16_variant() {
   v.name = "gemm_f16_tc_wmma_out_f16_strided";
   v.priority = 20;
   v.flags = 0;
-  v.launch = gemm_tc_out_f16_launch;
-  v.supported = gemm_tc_out_f16_supported;
-  v.query_workspace = gemm_tc_out_f16_workspace;
+  v.expected_attr_schema_id = 0;
+  v.launch = gemm_f16_tc_out_f16_launch;
+  v.supported = gemm_f16_tc_out_f16_supported;
+  v.query_workspace = gemm_f16_tc_out_f16_workspace;
   return v;
 }
 
