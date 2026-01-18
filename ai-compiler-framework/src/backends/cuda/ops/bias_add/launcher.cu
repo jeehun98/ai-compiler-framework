@@ -1,32 +1,35 @@
+// ============================================================================
+// src/backends/cuda/ops/bias_add/launcher.cu  (core-free / AttrBlob ABI)
+// - attrs: AttrBlob(schema_id + raw bytes)
+//   * schema_id == 0 => default axis=-1 (last dim)
+//   * schema_id == 'BADD' => payload: int64 axis
+// - supports:
+//   * f32 contiguous, rank>=2
+//   * f16 contiguous, rank>=2
+//   * f16 half2 fastpath (last dim even + 4B aligned pointers)
+// - axis: only last-dim allowed (-1 or rank-1)
+// ============================================================================
+
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+
 #include <cstdint>
+#include <cstring>   // memcpy
+#include <cinttypes> // uintptr_t
 
-#include <aicf/core/status.hpp>
-#include <aicf/runtime/stream.hpp>
+#include <aicf/backends/cuda/ops/bias_add/api.hpp> // keep if you expose this op API
 
-// public API
-#include <aicf/backends/cuda/ops/bias_add/api.hpp>
-
-// registry glue
+#include <aicf/backends/cuda/registry/status.hpp>
 #include <aicf/backends/cuda/registry/kernel_variant.hpp>
 #include <aicf/backends/cuda/registry/tensor_desc.hpp>
-#include <aicf/backends/cuda/registry/attr_pack.hpp>
-
-// common shim
-#include "aicf/backends/cuda/ops/_common/shim/launch.hpp"
-#include "aicf/backends/cuda/ops/_common/shim/status.hpp"
-#include "aicf/backends/cuda/ops/_common/shim/validate.hpp"
+#include <aicf/backends/cuda/registry/attr_blob.hpp>
 
 #include "kernels.cuh"
-
-#include <string_view>
 
 namespace aicf::cuda {
 
 // -------------------------
 // kernels (definitions live here)
-//  - grid-stride 1D로 바꿔서 M,N이 커져도 grid.y 제한 안 걸리게.
 // -------------------------
 namespace bias_add_impl {
 
@@ -58,8 +61,6 @@ __global__ void bias_add_f16_kernel(const __half* __restrict__ Y,
   }
 }
 
-// half2: last-dim(N)이 짝수이며, ptr들이 4B align일 때 사용
-// 데이터는 [M, N] (row-major). half2로 보면 [M, N2] where N2=N/2.
 __global__ void bias_add_f16x2_kernel(const __half2* __restrict__ Y,
                                       const __half2* __restrict__ bias,
                                       __half2* __restrict__ Out,
@@ -76,72 +77,61 @@ __global__ void bias_add_f16x2_kernel(const __half2* __restrict__ Y,
 
 } // namespace bias_add_impl
 
-// -------------------------
-// public API implementation
-// -------------------------
-aicf::Status bias_add_f32(const float* Y,
-                          const float* bias,
-                          float* Out,
-                          int M, int N,
-                          aicf::Stream stream) {
-  if (!Y || !bias || !Out || M <= 0 || N <= 0) {
-    return aicf::Status::InvalidArgument;
-  }
 
-  cudaStream_t s = aicf::cuda::shim::to_cuda_stream(stream);
-
-  constexpr int kThreads = 256;
-  // grid는 너무 크게 잡을 필요 없음. 통상 SM*몇 배 정도.
-  // 여기선 단순하게 blocks = ceil(total/threads) 상한을 둠.
-  const int64_t total = (int64_t)M * (int64_t)N;
-  int blocks = (int)((total + kThreads - 1) / kThreads);
-  if (blocks > 65535) blocks = 65535;
-
-  bias_add_impl::bias_add_f32_kernel<<<blocks, kThreads, 0, s>>>(Y, bias, Out, M, N);
-  return aicf::cuda::shim::cuda_last_error_to_status();
+// ---- cuda error -> Status (core-free) ----
+static inline Status cuda_to_status(cudaError_t e) {
+  return (e == cudaSuccess) ? Status::Ok : Status::Internal;
+}
+static inline Status cuda_last_status() {
+  return cuda_to_status(cudaGetLastError());
+}
+static inline bool is_aligned_ptr(const void* p, size_t align) {
+  return ((uintptr_t)p % (uintptr_t)align) == 0;
 }
 
-// -------------------------
-// Attr helpers (local, minimal)
-// -------------------------
-static inline bool attr_get_i64(const void* attr, const char* key, int64_t* out_val) {
-  if (!attr) return false;
-  const auto* pack = static_cast<const aicf::cuda::AttrPack*>(attr);
-  if (!pack->items || pack->size <= 0) return false;
+// ============================================================================
+// AttrBlob schema: 'BADD'
+// - Python packs: struct.pack("<q", axis)  (int64)
+// ============================================================================
+static constexpr uint32_t kAttrSchema_BiasAdd = 0x44444142u; // 'BADD'
 
-  const std::string_view k(key);
-  for (int i = 0; i < pack->size; ++i) {
-    const auto& kv = pack->items[i];
-    if (!kv.key) continue;
-    if (std::string_view(kv.key) == k) {
-      if (kv.val.tag == aicf::cuda::AttrTag::kI64) {
-        *out_val = kv.val.i64;
-        return true;
-      }
-      return false;
-    }
+struct BiasAddAttrV0 {
+  int64_t axis;
+};
+
+static inline int64_t read_axis_default_lastdim(const void* attr) {
+  // default: last dim (-1)
+  int64_t axis = -1;
+
+  const AttrBlob* ab = static_cast<const AttrBlob*>(attr);
+  if (!ab) return axis;
+
+  // accept schema_id==0 as "no attrs"
+  if (ab->schema_id != 0 && ab->schema_id != kAttrSchema_BiasAdd) {
+    return axis;
   }
-  return false;
+
+  if (!ab->data || ab->bytes < (uint32_t)sizeof(BiasAddAttrV0)) {
+    return axis;
+  }
+
+  BiasAddAttrV0 a{};
+  std::memcpy(&a, ab->data, sizeof(BiasAddAttrV0));
+  return a.axis;
 }
 
-// -------------------------
+// ============================================================================
 // last-dim-only helpers (safe)
-// -------------------------
-static inline bool is_f32_contig_rank_ge2(const TensorDesc& T) {
-  return (T.dtype == DType::kF32) && T.contiguous && (T.rank() >= 2);
-}
-
-static inline bool is_f16_contig_rank_ge2(const TensorDesc& T) {
-  return (T.dtype == DType::kF16) && T.contiguous && (T.rank() >= 2);
+// ============================================================================
+static inline bool is_contig_rank_ge2(const TensorDesc& T, DType dt) {
+  return (T.dtype == dt) && T.contiguous && (T.rank() >= 2);
 }
 
 static inline bool axis_is_last_dim_only(const TensorDesc& Y, int64_t axis_raw) {
   const int64_t r = Y.rank();
   if (r < 2) return false;
   const int64_t last = r - 1;
-  if (axis_raw == -1) return true;
-  if (axis_raw == last) return true;
-  return false;
+  return (axis_raw == -1) || (axis_raw == last);
 }
 
 static inline bool compute_MN_last_dim(const TensorDesc& Y, int64_t* out_M, int64_t* out_N) {
@@ -157,19 +147,18 @@ static inline bool compute_MN_last_dim(const TensorDesc& Y, int64_t* out_M, int6
     if (d <= 0) return false;
     M *= d;
   }
-
   if (M <= 0) return false;
+
   *out_M = M;
   *out_N = N;
   return true;
 }
 
-// dtype-generic check: dt check 함수 포인터로 중복 제거
 static inline bool bias_add_check(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs,
     int64_t axis_raw,
-    bool (*is_YO_ok)(const TensorDesc&)) {
+    DType dt) {
 
   if (!inputs || !outputs) return false;
   if (num_inputs != 2 || num_outputs != 1) return false;
@@ -178,11 +167,11 @@ static inline bool bias_add_check(
   const TensorDesc& B = inputs[1];
   const TensorDesc& O = outputs[0];
 
-  if (!is_YO_ok(Y)) return false;
-  if (!is_YO_ok(O)) return false;
+  if (!is_contig_rank_ge2(Y, dt)) return false;
+  if (!is_contig_rank_ge2(O, dt)) return false;
 
   // bias: same dtype, contig 1D
-  if (!(B.contiguous && B.rank() == 1 && B.dtype == Y.dtype)) return false;
+  if (!(B.contiguous && B.rank() == 1 && B.dtype == dt)) return false;
 
   if (!axis_is_last_dim_only(Y, axis_raw)) return false;
 
@@ -201,33 +190,29 @@ static inline bool bias_add_check(
 
 static size_t bias_add_workspace(const TensorDesc*, int, const void*) { return 0; }
 
-// -------------------------
+// ============================================================================
 // Variant: F32
-// -------------------------
+// ============================================================================
 static bool bias_add_f32_supported(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs,
     const void* attr) {
 
-  int64_t axis = -1;
-  (void)attr_get_i64(attr, "axis", &axis);
-  return bias_add_check(inputs, num_inputs, outputs, num_outputs, axis,
-                        &is_f32_contig_rank_ge2);
+  const int64_t axis = read_axis_default_lastdim(attr);
+  return bias_add_check(inputs, num_inputs, outputs, num_outputs, axis, DType::kF32);
 }
 
-static aicf::Status bias_add_f32_launch(
+static Status bias_add_f32_launch(
     const TensorDesc* inputs, int num_inputs,
     TensorDesc* outputs, int num_outputs,
     const void* attr,
-    void* /*workspace*/, size_t /*workspace_bytes*/,
+    void*, size_t,
     cudaStream_t stream) {
 
-  int64_t axis = -1;
-  (void)attr_get_i64(attr, "axis", &axis);
+  const int64_t axis = read_axis_default_lastdim(attr);
 
-  if (!bias_add_check(inputs, num_inputs, outputs, num_outputs, axis,
-                      &is_f32_contig_rank_ge2)) {
-    return aicf::Status::InvalidArgument;
+  if (!bias_add_check(inputs, num_inputs, outputs, num_outputs, axis, DType::kF32)) {
+    return Status::InvalidArgument;
   }
 
   const TensorDesc& Y = inputs[0];
@@ -235,7 +220,7 @@ static aicf::Status bias_add_f32_launch(
   TensorDesc& O = outputs[0];
 
   int64_t M64 = 0, N64 = 0;
-  if (!compute_MN_last_dim(Y, &M64, &N64)) return aicf::Status::InvalidArgument;
+  if (!compute_MN_last_dim(Y, &M64, &N64)) return Status::InvalidArgument;
 
   const int M = (int)M64;
   const int N = (int)N64;
@@ -245,10 +230,11 @@ static aicf::Status bias_add_f32_launch(
   int blocks = (int)((total + kThreads - 1) / kThreads);
   if (blocks > 65535) blocks = 65535;
 
+  cudaGetLastError(); // clear
   bias_add_impl::bias_add_f32_kernel<<<blocks, kThreads, 0, stream>>>(
       (const float*)Y.data, (const float*)B.data, (float*)O.data, M, N);
 
-  return aicf::cuda::shim::cuda_last_error_to_status();
+  return cuda_last_status();
 }
 
 KernelVariant make_bias_add_f32_variant() {
@@ -256,39 +242,36 @@ KernelVariant make_bias_add_f32_variant() {
   v.name = "bias_add_f32";
   v.priority = 0;
   v.flags = 0;
+  v.expected_attr_schema_id = 0; // accept schema 0 or BADD (we parse both)
   v.launch = bias_add_f32_launch;
   v.supported = bias_add_f32_supported;
   v.query_workspace = bias_add_workspace;
   return v;
 }
 
-// -------------------------
+// ============================================================================
 // Variant: F16 naive
-// -------------------------
+// ============================================================================
 static bool bias_add_f16_supported(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs,
     const void* attr) {
 
-  int64_t axis = -1;
-  (void)attr_get_i64(attr, "axis", &axis);
-  return bias_add_check(inputs, num_inputs, outputs, num_outputs, axis,
-                        &is_f16_contig_rank_ge2);
+  const int64_t axis = read_axis_default_lastdim(attr);
+  return bias_add_check(inputs, num_inputs, outputs, num_outputs, axis, DType::kF16);
 }
 
-static aicf::Status bias_add_f16_launch(
+static Status bias_add_f16_launch(
     const TensorDesc* inputs, int num_inputs,
     TensorDesc* outputs, int num_outputs,
     const void* attr,
-    void* /*workspace*/, size_t /*workspace_bytes*/,
+    void*, size_t,
     cudaStream_t stream) {
 
-  int64_t axis = -1;
-  (void)attr_get_i64(attr, "axis", &axis);
+  const int64_t axis = read_axis_default_lastdim(attr);
 
-  if (!bias_add_check(inputs, num_inputs, outputs, num_outputs, axis,
-                      &is_f16_contig_rank_ge2)) {
-    return aicf::Status::InvalidArgument;
+  if (!bias_add_check(inputs, num_inputs, outputs, num_outputs, axis, DType::kF16)) {
+    return Status::InvalidArgument;
   }
 
   const TensorDesc& Y = inputs[0];
@@ -296,7 +279,7 @@ static aicf::Status bias_add_f16_launch(
   TensorDesc& O = outputs[0];
 
   int64_t M64 = 0, N64 = 0;
-  if (!compute_MN_last_dim(Y, &M64, &N64)) return aicf::Status::InvalidArgument;
+  if (!compute_MN_last_dim(Y, &M64, &N64)) return Status::InvalidArgument;
 
   const int M = (int)M64;
   const int N = (int)N64;
@@ -306,10 +289,11 @@ static aicf::Status bias_add_f16_launch(
   int blocks = (int)((total + kThreads - 1) / kThreads);
   if (blocks > 65535) blocks = 65535;
 
+  cudaGetLastError(); // clear
   bias_add_impl::bias_add_f16_kernel<<<blocks, kThreads, 0, stream>>>(
       (const __half*)Y.data, (const __half*)B.data, (__half*)O.data, M, N);
 
-  return aicf::cuda::shim::cuda_last_error_to_status();
+  return cuda_last_status();
 }
 
 KernelVariant make_bias_add_f16_variant() {
@@ -317,22 +301,22 @@ KernelVariant make_bias_add_f16_variant() {
   v.name = "bias_add_f16_naive";
   v.priority = 0;
   v.flags = 0;
+  v.expected_attr_schema_id = 0;
   v.launch = bias_add_f16_launch;
   v.supported = bias_add_f16_supported;
   v.query_workspace = bias_add_workspace;
   return v;
 }
 
-// -------------------------
+// ============================================================================
 // Variant: F16 half2 (vec2)
-// -------------------------
+// ============================================================================
 static inline bool bias_add_f16_vec2_check(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs,
     int64_t axis_raw) {
 
-  if (!bias_add_check(inputs, num_inputs, outputs, num_outputs, axis_raw,
-                      &is_f16_contig_rank_ge2)) {
+  if (!bias_add_check(inputs, num_inputs, outputs, num_outputs, axis_raw, DType::kF16)) {
     return false;
   }
 
@@ -347,9 +331,9 @@ static inline bool bias_add_f16_vec2_check(
 
   // 4B align
   constexpr size_t kAlign = 4;
-  if (!aicf::cuda::shim::is_aligned_data(Y, kAlign)) return false;
-  if (!aicf::cuda::shim::is_aligned_data(B, kAlign)) return false;
-  if (!aicf::cuda::shim::is_aligned_data(O, kAlign)) return false;
+  if (!is_aligned_ptr(Y.data, kAlign)) return false;
+  if (!is_aligned_ptr(B.data, kAlign)) return false;
+  if (!is_aligned_ptr(O.data, kAlign)) return false;
 
   return true;
 }
@@ -359,23 +343,21 @@ static bool bias_add_f16_vec2_supported(
     const TensorDesc* outputs, int num_outputs,
     const void* attr) {
 
-  int64_t axis = -1;
-  (void)attr_get_i64(attr, "axis", &axis);
+  const int64_t axis = read_axis_default_lastdim(attr);
   return bias_add_f16_vec2_check(inputs, num_inputs, outputs, num_outputs, axis);
 }
 
-static aicf::Status bias_add_f16_vec2_launch(
+static Status bias_add_f16_vec2_launch(
     const TensorDesc* inputs, int num_inputs,
     TensorDesc* outputs, int num_outputs,
     const void* attr,
-    void* /*workspace*/, size_t /*workspace_bytes*/,
+    void*, size_t,
     cudaStream_t stream) {
 
-  int64_t axis = -1;
-  (void)attr_get_i64(attr, "axis", &axis);
+  const int64_t axis = read_axis_default_lastdim(attr);
 
   if (!bias_add_f16_vec2_check(inputs, num_inputs, outputs, num_outputs, axis)) {
-    return aicf::Status::InvalidArgument;
+    return Status::InvalidArgument;
   }
 
   const TensorDesc& Y = inputs[0];
@@ -383,7 +365,7 @@ static aicf::Status bias_add_f16_vec2_launch(
   TensorDesc& O = outputs[0];
 
   int64_t M64 = 0, N64 = 0;
-  if (!compute_MN_last_dim(Y, &M64, &N64)) return aicf::Status::InvalidArgument;
+  if (!compute_MN_last_dim(Y, &M64, &N64)) return Status::InvalidArgument;
 
   const int M = (int)M64;
   const int N = (int)N64;
@@ -394,10 +376,11 @@ static aicf::Status bias_add_f16_vec2_launch(
   int blocks = (int)((total2 + kThreads - 1) / kThreads);
   if (blocks > 65535) blocks = 65535;
 
+  cudaGetLastError(); // clear
   bias_add_impl::bias_add_f16x2_kernel<<<blocks, kThreads, 0, stream>>>(
       (const __half2*)Y.data, (const __half2*)B.data, (__half2*)O.data, M, N2);
 
-  return aicf::cuda::shim::cuda_last_error_to_status();
+  return cuda_last_status();
 }
 
 KernelVariant make_bias_add_f16_vec2_variant() {
@@ -405,6 +388,7 @@ KernelVariant make_bias_add_f16_vec2_variant() {
   v.name = "bias_add_f16_vec2_half2";
   v.priority = 10;
   v.flags = 0;
+  v.expected_attr_schema_id = 0;
   v.launch = bias_add_f16_vec2_launch;
   v.supported = bias_add_f16_vec2_supported;
   v.query_workspace = bias_add_workspace;

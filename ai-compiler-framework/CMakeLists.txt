@@ -21,11 +21,13 @@ add_library(aicf
   # ops
   src/backends/cuda/ops/reduce_sum/launcher.cu
   src/backends/cuda/ops/gemm/launcher.cu
-  
+  src/backends/cuda/ops/bias_add/launcher.cu
+
+
   #src/backends/cuda/ops/add/launcher.cu
   #src/backends/cuda/ops/relu/launcher.cu
   
-  #src/backends/cuda/ops/bias_add/launcher.cu
+
   #src/backends/cuda/ops/mse_grad/launcher.cu
   #src/backends/cuda/ops/relu_bwd/launcher.cu
   #src/backends/cuda/ops/sgd_step/launcher.cu

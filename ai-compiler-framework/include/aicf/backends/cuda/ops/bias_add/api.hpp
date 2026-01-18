@@ -1,15 +1,10 @@
 #pragma once
-
-#include <aicf/core/status.hpp>
-#include <aicf/runtime/stream.hpp>
+#include <cstdint>
 
 namespace aicf::cuda {
 
-// Y[M,N] + bias[N] -> Out[M,N]
-aicf::Status bias_add_f32(const float* Y,
-                          const float* bias,
-                          float* Out,
-                          int M, int N,
-                          aicf::Stream stream);
+// (placeholder) public API kept for compatibility.
+// In v2 (registry-based), bindings use dispatch_v0, so this header is optional.
+// Keep it empty or add C++ direct-call APIs later.
 
 } // namespace aicf::cuda
