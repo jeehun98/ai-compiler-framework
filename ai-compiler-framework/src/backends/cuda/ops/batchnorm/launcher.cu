@@ -6,79 +6,84 @@
 // - Forward:
 //    inference: y only (use running_mean/var)
 //    training : y + save_mean(C) + save_rstd(C) (batch stats)
-//      * capture-safe: save_mean used for sum->mean, save_rstd used for sumsq->var then in-place var->rstd
+//      save_mean used as sum->mean
+//      save_rstd used as sumsq->var then in-place var->rstd
 // - Backward (training):
 //    affine=True : outputs dx + dgamma(f32) + dbeta(f32)
-//    affine=False: NotImplemented (needs scratch floats, keep capture-safe policy)
+//    affine=False: NotImplemented
 // - Correctness-first: atomic reductions
-// - Debug prints included (stderr).
-//
-// NOTE (FIX):
-//  - bwd now matches PyTorch definitions exactly:
-//      dbeta[c]  = sum(dy)
-//      dgamma[c] = sum(dy * xhat)
-//      dx        = (gamma * rstd / NHW) * (NHW*dy - sum(dy) - xhat*sum(dy*xhat))
-//    So we do:
-//      pass A: compute dbeta=sum_dy and dgamma=sum_dy_xhat (atomic, using dy only)
-//      pass B: compute dx using those sums (and gamma factor applied in dx kernel)
-//    (No "dy_hat = dy*gamma" sums, and no redundant overwrite pass.)
 // ============================================================================
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdint>
-#include <string_view>
+#include <cstring>
 #include <cmath>
 #include <cstdio>
 
-#include <aicf/core/status.hpp>
-
+#include <aicf/backends/cuda/registry/status.hpp>
 #include <aicf/backends/cuda/registry/kernel_variant.hpp>
 #include <aicf/backends/cuda/registry/tensor_desc.hpp>
-#include <aicf/backends/cuda/registry/attr_pack.hpp>
-
-#include "aicf/backends/cuda/ops/_common/shim/status.hpp"
-
-#include "kernels.cuh"
+#include <aicf/backends/cuda/registry/attr_blob.hpp>
 
 namespace aicf::cuda {
 
-// ---------------- attr helpers ----------------
-
-static inline float attr_get_f32(const void* attr, const char* key, float defv) {
-  if (!attr) return defv;
-  const auto* pack = static_cast<const aicf::cuda::AttrPack*>(attr);
-  if (!pack->items || pack->size <= 0) return defv;
-  const std::string_view k(key);
-  for (int i = 0; i < pack->size; ++i) {
-    const auto& kv = pack->items[i];
-    if (!kv.key) continue;
-    if (std::string_view(kv.key) == k) {
-      if (kv.val.tag == aicf::cuda::AttrTag::kF32) return kv.val.f32;
-      return defv;
-    }
-  }
-  return defv;
+// -------------------------
+// cuda error -> Status (core-free)
+// -------------------------
+static inline Status cuda_to_status(cudaError_t e) {
+  return (e == cudaSuccess) ? Status::Ok : Status::Internal;
+}
+static inline Status cuda_last_status() {
+  return cuda_to_status(cudaGetLastError());
 }
 
-static inline bool attr_get_bool(const void* attr, const char* key, bool defv) {
-  if (!attr) return defv;
-  const auto* pack = static_cast<const aicf::cuda::AttrPack*>(attr);
-  if (!pack->items || pack->size <= 0) return defv;
-  const std::string_view k(key);
-  for (int i = 0; i < pack->size; ++i) {
-    const auto& kv = pack->items[i];
-    if (!kv.key) continue;
-    if (std::string_view(kv.key) == k) {
-      if (kv.val.tag == aicf::cuda::AttrTag::kBool) return kv.val.b32 != 0;
-      return defv;
-    }
-  }
-  return defv;
+// -------------------------
+// AttrBlob schema: BatchNorm
+// schema_id: 'BNEP' (0x50454E42)  // BatchNorm Eps + flags
+// payload (bytes):
+//   f32 eps
+//   u32 flags  (bit0=use_running_stats)
+// NOTE:
+// - update_running reserved, ignored
+// - if schema_id==0 => default eps=1e-5, use_running_stats=true
+// -------------------------
+static constexpr uint32_t kSchema_BNEP = 0x50454E42u;
+
+static inline float read_f32_le(const uint8_t* p) {
+  float v;
+  std::memcpy(&v, p, sizeof(float));
+  return v;
+}
+static inline uint32_t read_u32_le(const uint8_t* p) {
+  uint32_t v;
+  std::memcpy(&v, p, sizeof(uint32_t));
+  return v;
+}
+
+struct BNAttr {
+  float eps;
+  bool use_running_stats;
+};
+
+static inline BNAttr get_bn_attr(const AttrBlob* ab) {
+  BNAttr a{};
+  a.eps = 1e-5f;
+  a.use_running_stats = true;
+
+  if (!ab) return a;
+  if (ab->schema_id == 0) return a;
+  if (ab->schema_id != kSchema_BNEP) return a;
+  if (!ab->data || ab->bytes < 8) return a;
+
+  const auto* p = static_cast<const uint8_t*>(ab->data);
+  a.eps = read_f32_le(p + 0);
+  const uint32_t flags = read_u32_le(p + 4);
+  a.use_running_stats = (flags & 1u) != 0;
+  return a;
 }
 
 // ---------------- tensor helpers ----------------
-
 static inline bool is_4d(const TensorDesc& T) { return T.rank() == 4; }
 static inline bool stride_valid_4d(const TensorDesc& T) {
   if (!is_4d(T)) return false;
@@ -86,8 +91,9 @@ static inline bool stride_valid_4d(const TensorDesc& T) {
 }
 static inline bool is_contig_nchw_4d(const TensorDesc& T) {
   if (!is_4d(T) || !stride_valid_4d(T)) return false;
-  const int64_t N = T.shape[0], C = T.shape[1], H = T.shape[2], W = T.shape[3];
-  (void)N;
+  const int64_t C = T.shape[1];
+  const int64_t H = T.shape[2];
+  const int64_t W = T.shape[3];
   return (T.stride[3] == 1) &&
          (T.stride[2] == W) &&
          (T.stride[1] == H * W) &&
@@ -150,7 +156,6 @@ __global__ void bn_var_to_rstd_inplace(
 }
 
 // apply: y = ((x - mean) * rstd) * gamma + beta
-// mean: float[C], rstd: float[C]
 __global__ void bn_fwd_apply_f16(
     const __half* __restrict__ x,
     const __half* __restrict__ gamma, // nullable
@@ -158,12 +163,7 @@ __global__ void bn_fwd_apply_f16(
     const float* __restrict__ mean,   // [C]
     const float* __restrict__ rstd,   // [C]
     __half* __restrict__ y,
-    float* __restrict__ save_mean,    // nullable [C] (unused in this launcher version)
-    float* __restrict__ save_rstd,    // nullable [C] (unused in this launcher version)
-    int N, int C, int HW,
-    float /*eps*/) {
-
-  (void)save_mean; (void)save_rstd;
+    int N, int C, int HW) {
 
   const int64_t total = (int64_t)N * (int64_t)C * (int64_t)HW;
   for (int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
@@ -218,19 +218,16 @@ __global__ void bn_infer_apply_f16(
   }
 }
 
-// --------------------------------------------------------------------------
-// BWD FIXED: compute per-channel sums for PyTorch-defined gradients
-//   dbeta[c]  = sum(dy)
-//   dgamma[c] = sum(dy * xhat)
-// where xhat = (x - mean) * rstd
-// --------------------------------------------------------------------------
+// ---- BWD sums (PyTorch) ----
+// dbeta[c]  = sum(dy)
+// dgamma[c] = sum(dy * xhat)
 __global__ void bn_bwd_sums_f16_atomic(
     const __half* __restrict__ x,
     const __half* __restrict__ dy,
     const float* __restrict__ mean,   // [C]
     const float* __restrict__ rstd,   // [C]
-    float* __restrict__ sum_dy,       // [C]  -> dbeta
-    float* __restrict__ sum_dy_xhat,  // [C]  -> dgamma
+    float* __restrict__ sum_dy,       // [C] -> dbeta
+    float* __restrict__ sum_dy_xhat,  // [C] -> dgamma
     int N, int C, int HW) {
 
   const int64_t total = (int64_t)N * (int64_t)C * (int64_t)HW;
@@ -246,18 +243,16 @@ __global__ void bn_bwd_sums_f16_atomic(
     const float xhat = (xv - mu) * rs;
 
     const float dyv = __half2float(dy[i]);
-
     atomicAdd(&sum_dy[c], dyv);
     atomicAdd(&sum_dy_xhat[c], dyv * xhat);
   }
 }
 
-// bwd: dx (PyTorch definition)
-//   dx = (gamma * rstd / NHW) * ( NHW*dy - sum(dy) - xhat*sum(dy*xhat) )
+// dx = (gamma * rstd / NHW) * ( NHW*dy - sum(dy) - xhat*sum(dy*xhat) )
 __global__ void bn_bwd_dx_f16(
     const __half* __restrict__ x,
     const __half* __restrict__ dy,
-    const __half* __restrict__ gamma, // non-null for affine path
+    const __half* __restrict__ gamma, // non-null
     const float* __restrict__ mean,
     const float* __restrict__ rstd,
     const float* __restrict__ sum_dy,       // [C]
@@ -284,10 +279,8 @@ __global__ void bn_bwd_dx_f16(
 
     const float s1 = sum_dy[c];
     const float s2 = sum_dy_xhat[c];
+    const float g  = __half2float(gamma[c]);
 
-    const float g  = __half2float(gamma[c]); // affine only
-
-    // dx = (gamma * rstd / NHW) * (NHW*dy - sum(dy) - xhat*sum(dy*xhat))
     const float v = (NHWf * dyv - s1 - xhat * s2) * (g * rs * invNHW);
     dx[i] = __float2half_rn(v);
   }
@@ -296,11 +289,7 @@ __global__ void bn_bwd_dx_f16(
 } // namespace bn_impl
 
 // ============================================================================
-// Variant: BatchNorm FWD f16 (NCHW)
-// attr:
-//   eps (f32, default=1e-5)
-//   use_running_stats (bool, default=true)  // inference path
-//   update_running    (bool, default=false) // reserved (not implemented)
+// Supported checks
 // ============================================================================
 
 static bool bn_fwd_f16_supported(
@@ -316,7 +305,6 @@ static bool bn_fwd_f16_supported(
   // training:
   //  affine: inputs 3 => x,g,b       ; outputs 3 => y,save_mean,save_rstd
   //  noaff : inputs 1 => x           ; outputs 3 => y,save_mean,save_rstd
-
   const bool inf_aff  = (num_inputs == 5 && num_outputs == 1);
   const bool inf_no   = (num_inputs == 3 && num_outputs == 1);
   const bool tr_aff   = (num_inputs == 3 && num_outputs == 3);
@@ -345,7 +333,6 @@ static bool bn_fwd_f16_supported(
     if (!is_f32_1d(RM) || !is_f32_1d(RV)) return false;
     if (RM.shape[0] != C || RV.shape[0] != C) return false;
   } else {
-    // training outputs save_mean/save_rstd
     const auto& SM = outputs[1];
     const auto& SR = outputs[2];
     if (!is_f32_1d(SM) || !is_f32_1d(SR)) return false;
@@ -357,28 +344,29 @@ static bool bn_fwd_f16_supported(
 
 static size_t bn_fwd_f16_workspace(const TensorDesc*, int, const void*) { return 0; }
 
-static aicf::Status bn_fwd_f16_launch(
+static Status bn_fwd_f16_launch(
     const TensorDesc* inputs, int num_inputs,
     TensorDesc* outputs, int num_outputs,
     const void* attr,
     void*, size_t,
     cudaStream_t stream) {
 
-  if (!bn_fwd_f16_supported(inputs, num_inputs, outputs, num_outputs, attr)) {
-    return aicf::Status::InvalidArgument;
+  if (!bn_fwd_f16_supported(inputs, num_inputs, outputs, num_outputs, nullptr)) {
+    return Status::InvalidArgument;
   }
 
-  const float eps = attr_get_f32(attr, "eps", 1e-5f);
-  const bool use_running = attr_get_bool(attr, "use_running_stats", true);
+  const AttrBlob* ab = attr ? static_cast<const AttrBlob*>(attr) : nullptr;
+  const BNAttr A = get_bn_attr(ab);
 
-  const bool inf_aff  = (num_inputs == 5 && num_outputs == 1);
-  const bool inf_no   = (num_inputs == 3 && num_outputs == 1);
   const bool training = (num_outputs == 3);
 
-  if (use_running && training) {
-    // training signature but forced running stats => ambiguous, keep strict.
-    return aicf::Status::InvalidArgument;
+  // strict: if training signature used, attrs must not force running stats
+  if (training && A.use_running_stats) {
+    return Status::InvalidArgument;
   }
+
+  const bool inf_aff = (num_inputs == 5 && num_outputs == 1);
+  const bool inf_no  = (num_inputs == 3 && num_outputs == 1);
 
   const auto& X = inputs[0];
   auto& Y = outputs[0];
@@ -419,12 +407,12 @@ static aicf::Status bn_fwd_f16_launch(
   }
 
   std::fprintf(stderr,
-    "[BN fwd f16] num_in=%d num_out=%d training=%d X=%p G=%p B=%p RM=%p RV=%p | Y=%p SM=%p SR=%p | N=%d C=%d H=%d W=%d eps=%g use_running=%d\n",
+    "[BN fwd f16] in=%d out=%d training=%d X=%p G=%p B=%p RM=%p RV=%p | Y=%p SM=%p SR=%p | N=%d C=%d H=%d W=%d eps=%g use_running=%d\n",
     num_inputs, num_outputs, training ? 1 : 0,
     (const void*)x, (const void*)gamma, (const void*)beta,
     (const void*)running_mean, (const void*)running_var,
     (void*)y, (void*)save_mean, (void*)save_rstd,
-    N, C, H, W, (double)eps, use_running ? 1 : 0);
+    N, C, H, W, (double)A.eps, A.use_running_stats ? 1 : 0);
 
   const int threads = 256;
 
@@ -434,36 +422,34 @@ static aicf::Status bn_fwd_f16_launch(
     float* sumsq = save_rstd; // [C] -> var -> rstd
 
     cudaError_t e0 = cudaMemsetAsync(sum,   0, (size_t)C * sizeof(float), stream);
-    if (e0 != cudaSuccess) return aicf::cuda::shim::cuda_last_error_to_status();
+    if (e0 != cudaSuccess) return cuda_last_status();
     cudaError_t e1 = cudaMemsetAsync(sumsq, 0, (size_t)C * sizeof(float), stream);
-    if (e1 != cudaSuccess) return aicf::cuda::shim::cuda_last_error_to_status();
+    if (e1 != cudaSuccess) return cuda_last_status();
 
     int blocks = (int)(((int64_t)N * C * HW + threads - 1) / threads);
     if (blocks > 4096) blocks = 4096;
 
+    cudaGetLastError();
     bn_impl::bn_fwd_stats_f16_atomic<<<blocks, threads, 0, stream>>>(x, sum, sumsq, N, C, HW);
-    auto st0 = aicf::cuda::shim::cuda_last_error_to_status();
-    if (!aicf::ok(st0)) return st0;
+    auto st0 = cuda_last_status();
+    if (st0 != Status::Ok) return st0;
 
     const int blocksC = (C + threads - 1) / threads;
+    cudaGetLastError();
     bn_impl::bn_finalize_mean_var<<<blocksC, threads, 0, stream>>>(
         sum, sumsq, C, 1.0f / (float)(N * HW));
-    auto st1 = aicf::cuda::shim::cuda_last_error_to_status();
-    if (!aicf::ok(st1)) return st1;
+    auto st1 = cuda_last_status();
+    if (st1 != Status::Ok) return st1;
 
-    bn_impl::bn_var_to_rstd_inplace<<<blocksC, threads, 0, stream>>>(sumsq, C, eps);
-    auto st2 = aicf::cuda::shim::cuda_last_error_to_status();
-    if (!aicf::ok(st2)) return st2;
+    cudaGetLastError();
+    bn_impl::bn_var_to_rstd_inplace<<<blocksC, threads, 0, stream>>>(sumsq, C, A.eps);
+    auto st2 = cuda_last_status();
+    if (st2 != Status::Ok) return st2;
 
-    blocks = (int)(((int64_t)N * C * HW + threads - 1) / threads);
-    if (blocks > 4096) blocks = 4096;
-
+    cudaGetLastError();
     bn_impl::bn_fwd_apply_f16<<<blocks, threads, 0, stream>>>(
-        x, gamma, beta, sum, sumsq, y,
-        /*save_mean=*/nullptr, /*save_rstd=*/nullptr,
-        N, C, HW, eps);
-
-    return aicf::cuda::shim::cuda_last_error_to_status();
+        x, gamma, beta, sum, sumsq, y, N, C, HW);
+    return cuda_last_status();
   }
 
   // ---------------- inference path ----------------
@@ -471,10 +457,10 @@ static aicf::Status bn_fwd_f16_launch(
     int blocks = (int)(((int64_t)N * C * HW + threads - 1) / threads);
     if (blocks > 4096) blocks = 4096;
 
+    cudaGetLastError();
     bn_impl::bn_infer_apply_f16<<<blocks, threads, 0, stream>>>(
-        x, gamma, beta, running_mean, running_var, y, N, C, HW, eps);
-
-    return aicf::cuda::shim::cuda_last_error_to_status();
+        x, gamma, beta, running_mean, running_var, y, N, C, HW, A.eps);
+    return cuda_last_status();
   }
 }
 
@@ -483,6 +469,7 @@ KernelVariant make_batchnorm_fwd_f16_variant() {
   v.name = "batchnorm_fwd_f16_nchw";
   v.priority = 10;
   v.flags = 0;
+  v.expected_attr_schema_id = kSchema_BNEP;
   v.launch = bn_fwd_f16_launch;
   v.supported = bn_fwd_f16_supported;
   v.query_workspace = bn_fwd_f16_workspace;
@@ -490,7 +477,7 @@ KernelVariant make_batchnorm_fwd_f16_variant() {
 }
 
 // ============================================================================
-// Variant: BatchNorm BWD f16 (training only)
+// BWD
 // ============================================================================
 
 static bool bn_bwd_f16_supported(
@@ -500,8 +487,8 @@ static bool bn_bwd_f16_supported(
 
   if (!inputs || !outputs) return false;
 
-  // affine: 5 inputs -> 3 outputs
-  // noaff : 4 inputs -> 1 output (launch returns NotImplemented)
+  // affine: inputs 5 => x,dy,gamma,save_mean,save_rstd ; outputs 3 => dx,dgamma,dbeta
+  // noaff : inputs 4 => x,dy,save_mean,save_rstd       ; outputs 1 => dx (NotImplemented)
   const bool affine = (num_inputs == 5 && num_outputs == 3);
   const bool noaff  = (num_inputs == 4 && num_outputs == 1);
   if (!(affine || noaff)) return false;
@@ -538,7 +525,7 @@ static bool bn_bwd_f16_supported(
 
 static size_t bn_bwd_f16_workspace(const TensorDesc*, int, const void*) { return 0; }
 
-static aicf::Status bn_bwd_f16_launch(
+static Status bn_bwd_f16_launch(
     const TensorDesc* inputs, int num_inputs,
     TensorDesc* outputs, int num_outputs,
     const void*,
@@ -546,11 +533,11 @@ static aicf::Status bn_bwd_f16_launch(
     cudaStream_t stream) {
 
   if (!bn_bwd_f16_supported(inputs, num_inputs, outputs, num_outputs, nullptr)) {
-    return aicf::Status::InvalidArgument;
+    return Status::InvalidArgument;
   }
 
   const bool affine = (num_inputs == 5);
-  if (!affine) return aicf::Status::NotImplemented;
+  if (!affine) return Status::NotImplemented;
 
   const auto& X  = inputs[0];
   const auto& dY = inputs[1];
@@ -563,8 +550,8 @@ static aicf::Status bn_bwd_f16_launch(
   const float* rstd = (const float*)inputs[4].data;
 
   __half* dx = (__half*)outputs[0].data;
-  float* dgamma = (float*)outputs[1].data; // will store sum(dy*xhat)
-  float* dbeta  = (float*)outputs[2].data; // will store sum(dy)
+  float* dgamma = (float*)outputs[1].data; // sum(dy*xhat)
+  float* dbeta  = (float*)outputs[2].data; // sum(dy)
 
   const int N  = (int)X.shape[0];
   const int C  = (int)X.shape[1];
@@ -583,22 +570,23 @@ static aicf::Status bn_bwd_f16_launch(
   int blocks = (int)(((int64_t)N * C * HW + threads - 1) / threads);
   if (blocks > 4096) blocks = 4096;
 
-  // Pass A: compute dbeta=sum(dy) and dgamma=sum(dy*xhat)
+  // Pass A: dbeta=sum(dy) and dgamma=sum(dy*xhat)
   cudaError_t e0 = cudaMemsetAsync(dgamma, 0, (size_t)C * sizeof(float), stream);
-  if (e0 != cudaSuccess) return aicf::cuda::shim::cuda_last_error_to_status();
+  if (e0 != cudaSuccess) return cuda_last_status();
   cudaError_t e1 = cudaMemsetAsync(dbeta,  0, (size_t)C * sizeof(float), stream);
-  if (e1 != cudaSuccess) return aicf::cuda::shim::cuda_last_error_to_status();
+  if (e1 != cudaSuccess) return cuda_last_status();
 
+  cudaGetLastError();
   bn_impl::bn_bwd_sums_f16_atomic<<<blocks, threads, 0, stream>>>(
       x, dy, mean, rstd, /*sum_dy=*/dbeta, /*sum_dy_xhat=*/dgamma, N, C, HW);
-  auto st0 = aicf::cuda::shim::cuda_last_error_to_status();
-  if (!aicf::ok(st0)) return st0;
+  auto st0 = cuda_last_status();
+  if (st0 != Status::Ok) return st0;
 
-  // Pass B: dx uses dbeta/dgamma as sum buffers + applies gamma factor inside
+  // Pass B: dx uses sums + gamma
+  cudaGetLastError();
   bn_impl::bn_bwd_dx_f16<<<blocks, threads, 0, stream>>>(
       x, dy, gamma, mean, rstd, /*sum_dy=*/dbeta, /*sum_dy_xhat=*/dgamma, dx, N, C, HW);
-
-  return aicf::cuda::shim::cuda_last_error_to_status();
+  return cuda_last_status();
 }
 
 KernelVariant make_batchnorm_bwd_f16_variant() {
@@ -606,6 +594,7 @@ KernelVariant make_batchnorm_bwd_f16_variant() {
   v.name = "batchnorm_bwd_f16_nchw_affine";
   v.priority = 10;
   v.flags = 0;
+  v.expected_attr_schema_id = 0; // no attrs
   v.launch = bn_bwd_f16_launch;
   v.supported = bn_bwd_f16_supported;
   v.query_workspace = bn_bwd_f16_workspace;

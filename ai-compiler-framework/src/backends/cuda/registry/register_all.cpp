@@ -63,6 +63,19 @@ KernelVariant make_step_inc_variant();
 
 // BiasCorr
 KernelVariant make_biascorr_variant();
+
+// LayerNormFwd
+KernelVariant make_layernorm_fwd_f32_variant();
+KernelVariant make_layernorm_fwd_f16_variant();
+
+// LayerNormBwd
+KernelVariant make_layernorm_bwd_f32_variant();
+KernelVariant make_layernorm_bwd_f16_variant();
+
+// BatchNorm
+KernelVariant make_batchnorm_fwd_f16_variant();
+KernelVariant make_batchnorm_bwd_f16_variant();
+
 }  // namespace aicf::cuda
 
 extern "C" void aicf_cuda_register_all_kernels() {
@@ -152,6 +165,28 @@ extern "C" void aicf_cuda_register_all_kernels() {
   // BiasCorr
   {
     R.register_kernel(OpKind::BiasCorr, setp(make_biascorr_variant(), 0));
+  }
+
+  // LayerNormFwd
+  {
+    R.register_kernel(OpKind::LayerNormFwd, setp(make_layernorm_fwd_f16_variant(), 10));
+    R.register_kernel(OpKind::LayerNormFwd, setp(make_layernorm_fwd_f32_variant(), 0));
+  }
+
+  // LayerNormBwd
+  {
+    R.register_kernel(OpKind::LayerNormBwd, setp(make_layernorm_bwd_f16_variant(), 10));
+    R.register_kernel(OpKind::LayerNormBwd, setp(make_layernorm_bwd_f32_variant(), 0));
+  }
+
+  // BatchNormFwd
+  {
+    R.register_kernel(OpKind::BatchNormFwd, setp(make_batchnorm_fwd_f16_variant(), 10));
+  }
+
+  // BatchNormBwd
+  {
+    R.register_kernel(OpKind::BatchNormBwd, setp(make_batchnorm_bwd_f16_variant(), 10));
   }
 
 }
