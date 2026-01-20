@@ -1,9 +1,13 @@
-// bindings.cpp (Unified CUDA bindings; primitive op_call + CUDA Graph capture; AttrBlob ABI)
+// bindings.cpp (Unified CUDA bindings; primitive op_call + launch_by_id + CUDA Graph capture; AttrBlob ABI)
 //
 // core 없이 동작:
 //  - Status는 aicf::cuda::Status (registry/status.hpp)
 //  - attrs는 AttrBlob(schema_id + bytes + data)
 //  - graph capture는 bindings 내부에서만 관리
+//
+// NEW:
+//  - launch_by_id(kernel_id, kind, ...): decision-applied execution path (no runtime selection)
+//    (OpKind prefix 추론 제거: bias_add 같은 multi-token prefix가 깨지기 때문)
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -208,7 +212,6 @@ static inline const char* opkind_to_name(aicf::cuda::OpKind k) {
     case aicf::cuda::OpKind::LayerNormBwd: return "layernorm_bwd";
     case aicf::cuda::OpKind::BatchNormFwd: return "batchnorm_fwd";
     case aicf::cuda::OpKind::BatchNormBwd: return "batchnorm_bwd";
-    
     default: return "unknown";
   }
 }
@@ -216,6 +219,11 @@ static inline const char* opkind_to_name(aicf::cuda::OpKind k) {
 static inline void trace_record_locked(aicf::cuda::OpKind kind) {
   if (!g_trace_enabled) return;
   g_trace_ops.emplace_back(opkind_to_name(kind));
+}
+
+static inline void trace_record_kernel_id_locked(const std::string& kernel_id, aicf::cuda::OpKind kind) {
+  if (!g_trace_enabled) return;
+  g_trace_ops.emplace_back(std::string("kid:") + kernel_id + " kind:" + opkind_to_name(kind));
 }
 
 static inline void trace_reset_locked() { g_trace_ops.clear(); }
@@ -240,7 +248,7 @@ static void build_descs_v0_3(
 }
 
 static std::string op_fail_msg(aicf::cuda::OpKind kind, aicf::cuda::Status st) {
-  return std::string("aicf_cuda.op_call failed: kind=")
+  return std::string("aicf_cuda call failed: kind=")
        + std::to_string((int)kind)
        + " (" + std::string(opkind_to_name(kind)) + ")"
        + " status=" + std::string(aicf::cuda::status_to_string(st))
@@ -264,14 +272,12 @@ static void op_call_impl(
   build_descs_v0_3(inputs,  in_descs,  "inputs");
   build_descs_v0_3(outputs, out_descs, "outputs");
 
-  // bytes view (lifetime: attrs_bytes object lives throughout this call)
-  std::string buf = attrs_bytes;  // py::bytes -> std::string copy (simple + safe)
+  std::string buf = attrs_bytes;  // py::bytes -> std::string copy
   aicf::cuda::AttrBlob blob{};
   blob.schema_id = schema_id;
   blob.bytes = (uint32_t)buf.size();
   blob.data  = (buf.empty() ? nullptr : (const void*)buf.data());
 
-  // record trace
   {
     std::lock_guard<std::mutex> lock(g_graph_mu);
     trace_record_locked(kind);
@@ -302,11 +308,67 @@ static void op_call_impl(
 }
 
 // ============================================================
+// launch_by_id (decision-applied path)  ✅ kind을 Python에서 받는다
+// ============================================================
+
+static void launch_by_id_impl(
+    const std::string& kernel_id,
+    aicf::cuda::OpKind kind,
+    const py::sequence& inputs,
+    const py::sequence& outputs,
+    uint32_t schema_id,
+    py::bytes attrs_bytes,
+    uint64_t stream_u64 /* 0 => current stream */) {
+
+  std::vector<aicf::cuda::TensorDesc> in_descs;
+  std::vector<aicf::cuda::TensorDesc> out_descs;
+  build_descs_v0_3(inputs,  in_descs,  "inputs");
+  build_descs_v0_3(outputs, out_descs, "outputs");
+
+  std::string buf = attrs_bytes;
+  aicf::cuda::AttrBlob blob{};
+  blob.schema_id = schema_id;
+  blob.bytes = (uint32_t)buf.size();
+  blob.data  = (buf.empty() ? nullptr : (const void*)buf.data());
+
+  {
+    std::lock_guard<std::mutex> lock(g_graph_mu);
+    trace_record_kernel_id_locked(kernel_id, kind);
+
+    if (std::getenv("AICF_TRACE_STDERR")) {
+      std::fprintf(stderr, "[aicf][launch_by_id] kernel_id=%s kind=%s schema=0x%08x bytes=%u stream=0x%llx\n",
+                   kernel_id.c_str(),
+                   opkind_to_name(kind),
+                   (unsigned)schema_id,
+                   (unsigned)blob.bytes,
+                   (unsigned long long)stream_u64);
+    }
+  }
+
+  cudaStream_t stream = stream_u64
+      ? reinterpret_cast<cudaStream_t>(stream_u64)
+      : aicf_py::current_cuda_stream();
+
+  const aicf::cuda::Status st = aicf::cuda::dispatch_by_id_v0(
+      kind,
+      kernel_id.c_str(),
+      in_descs.data(),  (int32_t)in_descs.size(),
+      out_descs.data(), (int32_t)out_descs.size(),
+      (blob.bytes == 0 && blob.data == nullptr && blob.schema_id == 0) ? (const void*)nullptr
+                                                                      : (const void*)&blob,
+      stream);
+
+  if (!aicf::cuda::ok(st)) {
+    throw std::runtime_error(op_fail_msg(kind, st) + " kernel_id=" + kernel_id);
+  }
+}
+
+// ============================================================
 // PYBIND module
 // ============================================================
 
 PYBIND11_MODULE(_C, m) {
-  m.doc() = "AICF CUDA unified bindings (primitive op_call + CUDA Graph capture; AttrBlob ABI; core-free)";
+  m.doc() = "AICF CUDA unified bindings (op_call + launch_by_id + CUDA Graph capture; AttrBlob ABI; core-free)";
 
   ensure_kernels_registered_once();
 
@@ -330,7 +392,7 @@ PYBIND11_MODULE(_C, m) {
       .value("BatchNormBwd", aicf::cuda::OpKind::BatchNormBwd)
       .export_values();
 
-  // ---------------- op_call ----------------
+  // ---------------- op_call (legacy) ----------------
   m.def(
     "op_call",
     [](aicf::cuda::OpKind kind,
@@ -359,6 +421,28 @@ PYBIND11_MODULE(_C, m) {
        uint64_t stream) {
       op_call_impl(static_cast<aicf::cuda::OpKind>(kind), inputs, outputs, schema_id, attrs_bytes, stream);
     },
+    py::arg("kind"),
+    py::arg("inputs"),
+    py::arg("outputs"),
+    py::arg("schema_id") = (uint32_t)0,
+    py::arg("attrs_bytes") = py::bytes(),
+    py::arg("stream") = (uint64_t)0
+  );
+
+  // ---------------- launch_by_id (NEW) ----------------
+  // ✅ OpKind을 prefix로 추론하지 않고 Python에서 받는다.
+  m.def(
+    "launch_by_id",
+    [](const std::string& kernel_id,
+       aicf::cuda::OpKind kind,
+       const py::sequence& inputs,
+       const py::sequence& outputs,
+       uint32_t schema_id,
+       py::bytes attrs_bytes,
+       uint64_t stream) {
+      launch_by_id_impl(kernel_id, kind, inputs, outputs, schema_id, attrs_bytes, stream);
+    },
+    py::arg("kernel_id"),
     py::arg("kind"),
     py::arg("inputs"),
     py::arg("outputs"),

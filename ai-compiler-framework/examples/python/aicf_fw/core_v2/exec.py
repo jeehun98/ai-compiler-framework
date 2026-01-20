@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import os
 import sys
 from pathlib import Path
+import struct
 
 import torch
 
@@ -14,13 +15,7 @@ from .ir import IRGraph
 from .plan import BindingPlan, allocate_static_env
 
 
-# -------------------------
-# bootstrap: make aicf_cuda importable (build/python)
-# -------------------------
-
 def _bootstrap_aicf_cuda():
-    # exec.py: .../examples/python/aicf_fw/core_v2/exec.py
-    # repo_root: .../ai-compiler-framework
     repo_root = Path(__file__).resolve().parents[4]
     pymod_dir = repo_root / "build" / "python"
     pkg_dir = pymod_dir / "aicf_cuda"
@@ -36,13 +31,8 @@ def _bootstrap_aicf_cuda():
 
 
 _bootstrap_aicf_cuda()
-
 from aicf_cuda import _C  # noqa: E402
 
-
-# -------------------------
-# Options / helpers
-# -------------------------
 
 @dataclass
 class ExecOptions:
@@ -51,6 +41,15 @@ class ExecOptions:
     check_shapes: bool = True
     check_device: bool = True
     check_dtype: bool = True
+
+    # ✅ “컴파일 산출물(결정 박제)” 강제 옵션
+    #
+    # - False(기본): lowered에 kernel_id가 있으면 그걸 우선 사용하고,
+    #   없으면 기존 _C.op_call(...)로 fallback(=런타임 dispatch 허용)
+    #
+    # - True: lowered의 모든 op가 kernel_id를 가져야 함.
+    #   kernel_id가 없으면 즉시 실패 -> 런타임 dispatch 경로를 구조적으로 차단.
+    require_kernel_id: bool = False
 
 
 def _tmeta(t: torch.Tensor) -> str:
@@ -175,10 +174,6 @@ def _choose_vid_for_tensor(
     return None
 
 
-# -------------------------
-# OpKind mapping (string op -> _C.OpKind int)
-# -------------------------
-
 _OPNAME_TO_KIND: Dict[str, int] = {
     "add": int(_C.OpKind.EltwiseAdd),
     "relu": int(_C.OpKind.EltwiseRelu),
@@ -189,8 +184,8 @@ _OPNAME_TO_KIND: Dict[str, int] = {
     "relu_bwd": int(_C.OpKind.ReluBwd),
     "sgd_step": int(_C.OpKind.SgdStep),
     "copy": int(_C.OpKind.Copy),
-    "copy_saved": int(_C.OpKind.Copy),  # ✅ 추가
-    "copy_aux": int(_C.OpKind.Copy),    # ✅ 추가
+    "copy_saved": int(_C.OpKind.Copy),
+    "copy_aux": int(_C.OpKind.Copy),
     "grad_zero": int(_C.OpKind.GradZero),
     "adam_step": int(_C.OpKind.AdamStep),
     "step_inc": int(_C.OpKind.StepInc),
@@ -209,17 +204,60 @@ def _opkind_from_name(op: str) -> int:
     return _OPNAME_TO_KIND[k]
 
 
-# -------------------------
-# Executor
-# -------------------------
+def _schema_id_ADAM() -> int:
+    return int.from_bytes(b"ADAM", "little", signed=False)
+
+
+def _pack_gemm(attrs: Dict[str, Any]) -> bytes:
+    ta = 1 if bool(attrs.get("transA", False)) else 0
+    tb = 1 if bool(attrs.get("transB", False)) else 0
+    return struct.pack("<ii", int(ta), int(tb))
+
+
+def _pack_adam(attrs: Dict[str, Any]) -> bytes:
+    lr = float(attrs.get("lr", 1e-3))
+    beta1 = float(attrs.get("beta1", 0.9))
+    beta2 = float(attrs.get("beta2", 0.999))
+    eps = float(attrs.get("eps", 1e-8))
+    return struct.pack("<ffff", lr, beta1, beta2, eps)
+
+
+def _pack_attrs(op: str, attrs: Dict[str, Any]) -> Tuple[int, bytes]:
+    op = str(op).strip().lower()
+    attrs = dict(attrs or {})
+
+    if op == "gemm":
+        return 0, _pack_gemm(attrs)
+
+    if op == "adam_step":
+        return _schema_id_ADAM(), _pack_adam(attrs)
+
+    return 0, b""
+
+
+# ============================
+# ✅ Decision-applied execution
+# ============================
+
+def _get_kernel_id(it: Dict[str, Any]) -> Optional[str]:
+    if it.get("kernel_id", None) is not None:
+        return str(it["kernel_id"])
+    k = it.get("kernel", None)
+    if isinstance(k, str):
+        return str(k)
+    if isinstance(k, dict):
+        if k.get("id", None) is not None:
+            return str(k["id"])
+        if k.get("kernel_id", None) is not None:
+            return str(k["kernel_id"])
+    return None
+
+
+def _has_launch_by_id() -> bool:
+    return getattr(_C, "launch_by_id", None) is not None
+
 
 class PlannedExecutor:
-    """
-    plan 기반 실행기 (direct aicf_cuda._C)
-      - lowered를 _C.op_call(kind, ins, outs, attrs)로 실행
-      - graph capture/replay는 _C.graph_* 기반
-    """
-
     def __init__(
         self,
         *,
@@ -238,7 +276,6 @@ class PlannedExecutor:
         self.env: Dict[int, torch.Tensor] = {}
         self._captured: bool = False
 
-    # ---- trace passthrough (optional) ----
     def trace_enable(self, flag: bool = True) -> None:
         fn = getattr(_C, "trace_enable", None)
         if fn is not None:
@@ -255,7 +292,6 @@ class PlannedExecutor:
             return []
         return list(fn())
 
-    # ---- env binding ----
     def build_env(
         self,
         *,
@@ -311,7 +347,69 @@ class PlannedExecutor:
 
         return self.env
 
-    # ---- run ----
+    @torch.no_grad()
+    def _execute_lowered(self, *, stream: int) -> None:
+        dbg = self.opts.debug
+        limit = int(self.opts.debug_limit)
+        warmup = os.getenv("AICF_WARMUP", "0") == "1"
+
+        use_by_id = _has_launch_by_id()
+
+        for i, it in enumerate(self.lowered):
+            op = str(it["op"])
+            kernel_id = _get_kernel_id(it)
+
+            # fallback용 (kernel_id 경로에서도 디버그 출력에 사용 가능)
+            kind = _opkind_from_name(op)
+
+            in_vids = [int(x) for x in it.get("inputs", [])]
+            out_vids = [int(y) for y in it.get("outputs", [])]
+            attrs = dict(it.get("attrs", {}) or {})
+
+            ins_t = [self.env[v] for v in in_vids]
+            outs_t = [self.env[v] for v in out_vids]
+
+            if dbg and i < limit:
+                ins_s = ", ".join([f"v{v:03d}:{_tmeta(self.env[v])}" for v in in_vids])
+                outs_s = ", ".join([f"v{v:03d}:{_tmeta(self.env[v])}" for v in out_vids])
+                kid = "" if not kernel_id else f" kernel_id={kernel_id}"
+                print(f"[exec][#{i:03d}] {op} kind={kind}{kid} attrs={attrs}")
+                print(f"  in : {ins_s}")
+                print(f"  out: {outs_s}")
+
+            # warmup hack (기존 동작 유지)
+            if warmup and op == "step_inc":
+                outs_t[0].copy_(ins_t[0])
+                for v, t in zip(out_vids, outs_t):
+                    self.env[int(v)] = t
+                continue
+
+            if warmup and op == "adam_step":
+                attrs = dict(attrs)
+                attrs["lr"] = 0.0
+
+            schema_id, attrs_bytes = _pack_attrs(op, attrs)
+
+            if kernel_id is not None:
+                if not use_by_id:
+                    raise RuntimeError(
+                        "[exec] lowered has kernel_id but backend binding lacks _C.launch_by_id(). "
+                        "Add C++/pybind API first."
+                    )
+                # ✅ enum으로 캐스팅해서 넘겨야 함
+                _C.launch_by_id(str(kernel_id), _C.OpKind(kind), ins_t, outs_t, int(schema_id), attrs_bytes, int(stream))
+
+            else:
+                if self.opts.require_kernel_id:
+                    raise RuntimeError(
+                        f"[exec] require_kernel_id=True but lowered op #{i} '{op}' has no kernel_id. "
+                        "This means decisions are still happening at runtime (op_call/dispatch)."
+                    )
+                _C.op_call(int(kind), ins_t, outs_t, int(schema_id), attrs_bytes, int(stream))
+
+            for v, t in zip(out_vids, outs_t):
+                self.env[int(v)] = t
+
     @torch.no_grad()
     def run(
         self,
@@ -321,51 +419,9 @@ class PlannedExecutor:
         reuse_static: bool = True,
     ) -> Dict[int, torch.Tensor]:
         self.build_env(inputs=inputs, params=params, reuse_static=reuse_static)
-
-        dbg = self.opts.debug
-        limit = int(self.opts.debug_limit)
-
-        warmup = os.getenv("AICF_WARMUP", "0") == "1"
-
-        for i, it in enumerate(self.lowered):
-            op = str(it["op"])
-            kind = _opkind_from_name(op)
-
-            in_vids = [int(x) for x in it.get("inputs", [])]
-            out_vids = [int(y) for y in it.get("outputs", [])]
-            attrs = dict(it.get("attrs", {}) or {})
-
-            ins_t = [self.env[v] for v in in_vids]
-            outs_t = [self.env[v] for v in out_vids]
-
-            if dbg and i < limit:
-                ins_s = ", ".join([f"v{v:03d}:{_tmeta(self.env[v])}" for v in in_vids])
-                outs_s = ", ".join([f"v{v:03d}:{_tmeta(self.env[v])}" for v in out_vids])
-                print(f"[exec][#{i:03d}] {op} kind={kind} attrs={attrs}")
-                print(f"  in : {ins_s}")
-                print(f"  out: {outs_s}")
-
-            # ✅ warmup (for correctness comparisons):
-            # - do not mutate step
-            # - do not update params during capture/replay tests
-            if warmup and op == "step_inc":
-                if len(ins_t) != 1 or len(outs_t) != 1:
-                    raise RuntimeError(f"[exec] step_inc expects 1 in / 1 out, got {len(ins_t)} / {len(outs_t)}")
-                outs_t[0].copy_(ins_t[0])
-                continue
-
-            if warmup and op == "adam_step":
-                attrs = dict(attrs)
-                attrs["lr"] = 0.0
-
-            _C.op_call(int(kind), ins_t, outs_t, attrs)
-
-            for v, t in zip(out_vids, outs_t):
-                self.env[int(v)] = t
-
+        self._execute_lowered(stream=0)
         return self.env
 
-    # ---- CUDA Graph ----
     @torch.no_grad()
     def capture(
         self,
@@ -374,58 +430,16 @@ class PlannedExecutor:
         params: Dict[str, Any],
         reuse_static: bool = True,
     ) -> Dict[int, torch.Tensor]:
-        """
-        Capture lowered execution into CUDA Graph.
-        Uses _C.graph_* API (dedicated stream).
-        """
         self.build_env(inputs=inputs, params=params, reuse_static=reuse_static)
 
-        s = int(_C.graph_begin())  # returns dedicated cudaStream_t handle (int)
+        s = int(_C.graph_begin())
         try:
-            # run on dedicated stream while capture is active
-            self._run_with_stream(stream=s, reuse_static=True)
+            self._execute_lowered(stream=s)
         finally:
             _C.graph_end()
 
         self._captured = True
         return self.env
-
-    @torch.no_grad()
-    def _run_with_stream(self, *, stream: int, reuse_static: bool) -> None:
-        dbg = self.opts.debug
-        limit = int(self.opts.debug_limit)
-        warmup = os.getenv("AICF_WARMUP", "0") == "1"
-
-        for i, it in enumerate(self.lowered):
-            op = str(it["op"])
-            kind = _opkind_from_name(op)
-
-            in_vids = [int(x) for x in it.get("inputs", [])]
-            out_vids = [int(y) for y in it.get("outputs", [])]
-            attrs = dict(it.get("attrs", {}) or {})
-
-            ins_t = [self.env[v] for v in in_vids]
-            outs_t = [self.env[v] for v in out_vids]
-
-            if dbg and i < limit:
-                ins_s = ", ".join([f"v{v:03d}:{_tmeta(self.env[v])}" for v in in_vids])
-                outs_s = ", ".join([f"v{v:03d}:{_tmeta(self.env[v])}" for v in out_vids])
-                print(f"[exec][#{i:03d}] {op} kind={kind} attrs={attrs}")
-                print(f"  in : {ins_s}")
-                print(f"  out: {outs_s}")
-
-            if warmup and op == "step_inc":
-                outs_t[0].copy_(ins_t[0])
-                continue
-
-            if warmup and op == "adam_step":
-                attrs = dict(attrs)
-                attrs["lr"] = 0.0
-
-            _C.op_call(int(kind), ins_t, outs_t, attrs, int(stream))
-
-            for v, t in zip(out_vids, outs_t):
-                self.env[int(v)] = t
 
     @torch.no_grad()
     def replay(self, n: int = 1) -> None:

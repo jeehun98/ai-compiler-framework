@@ -3,6 +3,8 @@
 #include <memory>
 #include <mutex>
 #include <vector>
+#include <unordered_map>
+#include <string>
 #include <cuda_runtime.h>
 
 #include "aicf/backends/cuda/registry/status.hpp"
@@ -36,6 +38,9 @@ class KernelRegistry {
   // Snapshot pointers (stable) without holding registry lock during supported()/launch().
   void variants_snapshot(OpKind kind, std::vector<const KernelVariant*>& out) const;
 
+  // ✅ kernel_id lookup (decision-applied path)
+  const KernelVariant* find_by_id(OpKind kind, const char* kernel_id) const;
+
   // Optional: ensure global registration (call_once)
   static void ensure_registered();
 
@@ -43,12 +48,17 @@ class KernelRegistry {
   KernelRegistry() = default;
 
   using Entry = std::unique_ptr<KernelVariant>;
+
   std::vector<Entry> table_[static_cast<int>(OpKind::_Count)];
+
+  // ✅ by-id index: per OpKind map(kernel_id -> KernelVariant*)
+  // Pointers refer to objects owned by table_[]
+  std::unordered_map<std::string, const KernelVariant*> by_id_[static_cast<int>(OpKind::_Count)];
 
   mutable std::mutex mu_;
 };
 
-// unified entrypoint
+// unified entrypoint (legacy runtime dispatch)
 Status Dispatch(const OpCall& call);
 
 } // namespace aicf::cuda

@@ -1,154 +1,208 @@
-# aicf_fw/core_v2/lower.py
+# examples/python/aicf_fw/core_v2/lower.py
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from .ir import IRGraph
 
 
-@dataclass
-class LoweringOptions:
-    # reserved (future)
-    pass
+def _dtype_str(v) -> str:
+    dt = getattr(v, "dtype", "torch.float32")
+    return str(dt)
 
 
-def lower_to_backend_ops(ir: IRGraph, *, opts: LoweringOptions | None = None) -> List[Dict[str, Any]]:
-    if opts is None:
-        opts = LoweringOptions()
+def _pick_kernel_id(op: str, in_dtypes: List[str], out_dtypes: List[str], attrs: Dict[str, Any]) -> Optional[str]:
+    op = str(op).strip().lower()
+    in0 = in_dtypes[0] if in_dtypes else ""
+    out0 = out_dtypes[0] if out_dtypes else ""
 
+    def is_f16(s: str) -> bool:
+        return ("float16" in s) or ("torch.float16" in s) or ("Half" in s)
+
+    def is_f32(s: str) -> bool:
+        return ("float32" in s) or ("torch.float32" in s) or ("Float" in s)
+
+    if op == "gemm":
+        if is_f16(in0) or is_f16(out0):
+            return "gemm_f16_tc_wmma_out_f16_v0"
+        return "gemm_f32_naive_v0"
+
+    if op == "bias_add":
+        if is_f16(in0) or is_f16(out0):
+            return "bias_add_f16_v0"
+        return "bias_add_f32_v0"
+
+    if op == "add":
+        if is_f16(in0) or is_f16(out0):
+            return "add_f16_v0"
+        return "add_f32_v0"
+
+    if op == "relu":
+        if is_f16(in0) or is_f16(out0):
+            return "relu_f16_v0"
+        return "relu_f32_v0"
+
+    if op == "mse_grad":
+        if is_f16(in0) or is_f16(out0):
+            return "mse_grad_f16_v0"
+        return "mse_grad_f32_v0"
+
+    if op == "relu_bwd":
+        if is_f16(in0) or is_f16(out0):
+            return "relu_bwd_f16_v0"
+        return "relu_bwd_f32_v0"
+
+    if op == "reduce_sum":
+        # 결정 박제 기준: "출력 dtype"이 무엇인지가 핵심
+        # - out f16  => reduce_sum_lastdim_f16_v0
+        # - out f32  => (in f16) reduce_sum_lastdim_f16_to_f32_v0 / (in f32) reduce_sum_lastdim_f32_v0
+
+        if is_f16(out0):
+            # (현재 네 그래프 v013/v017이 여기로 와야 함)
+            return "reduce_sum_lastdim_f16_v0"
+
+        # out is f32 (or default)
+        if is_f16(in0):
+            return "reduce_sum_lastdim_f16_to_f32_v0"
+        return "reduce_sum_lastdim_f32_v0"
+
+    if op == "sgd_step":
+        if is_f16(in0) or is_f16(out0):
+            return "sgd_step_f16_v0"
+        return "sgd_step_f32_v0"
+
+    if op in ("copy", "copy_saved", "copy_aux"):
+        if is_f16(in0) or is_f16(out0):
+            return "copy_f16_v0"
+        return "copy_f32_v0"
+
+    if op == "grad_zero":
+        return "grad_zero_v0"
+
+    if op == "adam_step":
+        return "adam_step_f32_v0"
+
+    if op == "step_inc":
+        return "step_inc_v0"
+
+    if op in ("bias_corr", "biascorr"):
+        return "bias_corr_v0"
+
+    if op == "layernorm_fwd":
+        if is_f16(in0) or is_f16(out0):
+            return "layernorm_fwd_f16_v0"
+        return "layernorm_fwd_f32_v0"
+
+    if op == "layernorm_bwd":
+        if is_f16(in0) or is_f16(out0):
+            return "layernorm_bwd_f16_v0"
+        return "layernorm_bwd_f32_v0"
+
+    if op == "batchnorm_fwd":
+        return "batchnorm_fwd_f16_v0"
+
+    if op == "batchnorm_bwd":
+        return "batchnorm_bwd_f16_v0"
+
+    return None
+
+
+def _add_item(lowered: List[Dict[str, Any]], ir: IRGraph, item: Dict[str, Any]) -> None:
+    op = str(item["op"]).strip().lower()
+    in_vids = [int(x) for x in item.get("inputs", [])]
+    out_vids = [int(y) for y in item.get("outputs", [])]
+    attrs = dict(item.get("attrs", {}) or {})
+
+    in_dtypes = [_dtype_str(ir.values[int(v)]) for v in in_vids]
+    out_dtypes = [_dtype_str(ir.values[int(v)]) for v in out_vids]
+
+    kid = _pick_kernel_id(op, in_dtypes, out_dtypes, attrs)
+    if kid is not None:
+        item["kernel_id"] = kid
+    lowered.append(item)
+
+
+def lower_to_backend_ops(ir: IRGraph) -> List[Dict[str, Any]]:
+    """
+    IR(core_v2) -> backend lowered ops (primitive ops only).
+    Produces ops compatible with exec.py (_OPNAME_TO_KIND) AND attaches kernel_id (Stage A).
+    """
     lowered: List[Dict[str, Any]] = []
 
-    def emit(op: str, inputs: List[int], outputs: List[int], attrs: Dict[str, Any] | None = None):
-        lowered.append(
-            {
-                "op": str(op),
-                "inputs": [int(x) for x in inputs],
-                "outputs": [int(y) for y in outputs],
-                "attrs": dict(attrs or {}),
-            }
-        )
-
     for n in ir.nodes:
-        op = n.op
+        ir_op = str(getattr(n, "op", getattr(n, "kind", ""))).strip()
+        op = ir_op.lower()
 
-        # -------------------------
-        # Forward
-        # -------------------------
-        if op == "Linear":
-            if len(n.inputs) not in (2, 3):
-                raise RuntimeError(f"lower(Linear): expected 2 or 3 inputs, got {len(n.inputs)}")
-            if len(n.outputs) != 1:
-                raise RuntimeError("lower(Linear): expected 1 output")
+        ins = [int(x) for x in getattr(n, "inputs", [])]
+        outs = [int(y) for y in getattr(n, "outputs", [])]
+        attrs = dict(getattr(n, "attrs", {}) or {})
 
-            x_vid = int(n.inputs[0])
-            W_vid = int(n.inputs[1])
-            y_vid = int(n.outputs[0])
+        # ---- Linear -> gemm + bias_add ----
+        if op == "linear":
+            # IR Linear inputs: (x, W, b?) outputs: (y)
+            # backend layout: gemm(x, W)->y with transB=True then bias_add(y,b)->y
+            x_vid = ins[0]
+            w_vid = ins[1]
+            y_vid = outs[0]
 
-            emit("gemm", [x_vid, W_vid], [y_vid], {"transB": True})
-
-            # bias 존재 판정: attrs.bias 또는 3rd input
-            has_bias = bool(n.attrs.get("bias", False)) or (len(n.inputs) == 3)
-            if has_bias:
-                if len(n.inputs) != 3:
-                    raise RuntimeError("lower(Linear): bias requested but no bias input")
-                b_vid = int(n.inputs[2])
-                emit("bias_add", [y_vid, b_vid], [y_vid], {})
+            _add_item(lowered, ir, {"op": "gemm", "inputs": [x_vid, w_vid], "outputs": [y_vid], "attrs": {"transB": True}})
+            if bool(attrs.get("bias", False)) and len(ins) >= 3:
+                b_vid = ins[2]
+                _add_item(lowered, ir, {"op": "bias_add", "inputs": [y_vid, b_vid], "outputs": [y_vid], "attrs": {}})
             continue
 
-        if op == "ReLU":
-            if len(n.inputs) != 1 or len(n.outputs) != 1:
-                raise RuntimeError("lower(ReLU): expected 1 in/1 out")
-            emit("relu", [int(n.inputs[0])], [int(n.outputs[0])], {})
+        # ---- Save -> copy_saved ----
+        if op == "save":
+            _add_item(lowered, ir, {"op": "copy_saved", "inputs": [ins[0]], "outputs": [outs[0]], "attrs": {}})
             continue
 
-        if op == "Save":
-            if len(n.inputs) != 1 or len(n.outputs) != 1:
-                raise RuntimeError("lower(Save): expected 1 in/1 out")
-            # ✅ 핵심: Save는 copy가 아니라 copy_saved로 내보낸다
-            # (C++에서 plain copy가 NotImplemented로 떨어지는 케이스 방지)
-            emit("copy_saved", [int(n.inputs[0])], [int(n.outputs[0])], {})
+        # ---- ReLU ----
+        if op == "relu":
+            _add_item(lowered, ir, {"op": "relu", "inputs": [ins[0]], "outputs": [outs[0]], "attrs": {}})
             continue
 
-        if op == "MseGrad":
-            if len(n.inputs) != 2 or len(n.outputs) != 1:
-                raise RuntimeError("lower(MseGrad): expected 2 in/1 out")
-            attrs: Dict[str, Any] = {}
-            if "scale" in n.attrs:
-                attrs["scale"] = float(n.attrs["scale"])
-            emit("mse_grad", [int(n.inputs[0]), int(n.inputs[1])], [int(n.outputs[0])], attrs)
+        # ---- MseGrad ----
+        if op == "msegrad" or op == "mse_grad":
+            _add_item(lowered, ir, {"op": "mse_grad", "inputs": [ins[0], ins[1]], "outputs": [outs[0]], "attrs": attrs})
             continue
 
-        # -------------------------
-        # Backward
-        # -------------------------
-        if op == "LinearBwd":
-            if len(n.inputs) != 3:
-                raise RuntimeError("lower(LinearBwd): expected 3 inputs (x,W,dY)")
-            if len(n.outputs) not in (2, 3):
-                raise RuntimeError("lower(LinearBwd): expected 2 or 3 outputs (dX,dW,dB?)")
-
-            X_vid  = int(n.inputs[0])
-            W_vid  = int(n.inputs[1])
-            dY_vid = int(n.inputs[2])
-
-            dX_vid = int(n.outputs[0])
-            dW_vid = int(n.outputs[1])
-            db_vid = int(n.outputs[2]) if len(n.outputs) == 3 else None
-
-            # dX = dY @ W
-            emit("gemm", [dY_vid, W_vid], [dX_vid], {"transA": False, "transB": False})
-
-            # dW = dY^T @ X
-            emit("gemm", [dY_vid, X_vid], [dW_vid], {"transA": True, "transB": False})
-
-            if db_vid is not None:
-                emit("reduce_sum", [dY_vid], [db_vid], {"axis": 0, "keepdim": False})
-
+        # ---- ReluBwd ----
+        if op == "relubwd" or op == "relu_bwd":
+            _add_item(lowered, ir, {"op": "relu_bwd", "inputs": [ins[0], ins[1]], "outputs": [outs[0]], "attrs": {}})
             continue
 
-        if op == "ReluBwd":
-            if len(n.inputs) != 2 or len(n.outputs) != 1:
-                raise RuntimeError("lower(ReluBwd): expected 2 in/1 out")
-            emit("relu_bwd", [int(n.inputs[0]), int(n.inputs[1])], [int(n.outputs[0])], {})
+        # ---- LinearBwd -> gemm(dx) + gemm(dW) + reduce_sum(db) ----
+        if op == "linearbwd" or op == "linear_bwd":
+            # IR LinearBwd inputs: (x, W, dY)
+            # outputs: (dx, dW, db?)  with bias flag
+            x_vid, w_vid, dy_vid = ins[0], ins[1], ins[2]
+            dx_vid = outs[0]
+            dW_vid = outs[1]
+
+            # dx = dY @ W  (transA=False, transB=False)
+            _add_item(lowered, ir, {"op": "gemm", "inputs": [dy_vid, w_vid], "outputs": [dx_vid], "attrs": {"transA": False, "transB": False}})
+
+            # dW = dY^T @ x (transA=True, transB=False)
+            _add_item(lowered, ir, {"op": "gemm", "inputs": [dy_vid, x_vid], "outputs": [dW_vid], "attrs": {"transA": True, "transB": False}})
+
+            if bool(attrs.get("bias", False)) and len(outs) >= 3:
+                db_vid = outs[2]
+                _add_item(lowered, ir, {"op": "reduce_sum", "inputs": [dy_vid], "outputs": [db_vid], "attrs": {"axis": 0, "keepdim": False}})
             continue
 
-        # -------------------------
-        # Optimizer (Stage6)
-        # -------------------------
-        if op == "StepInc":
-            if len(n.inputs) != 1 or len(n.outputs) != 1:
-                raise RuntimeError("lower(StepInc): expected 1 in/1 out")
-            emit("step_inc", [int(n.inputs[0])], [int(n.outputs[0])], {})
+        # ---- SgdStep ----
+        if op == "sgdstep" or op == "sgd_step":
+            # IR SgdStep inputs: (p, g) outputs: (p)
+            _add_item(lowered, ir, {"op": "sgd_step", "inputs": [ins[0], ins[1]], "outputs": [outs[0]], "attrs": attrs})
             continue
 
-        if op == "BiasCorr":
-            if len(n.inputs) != 1 or len(n.outputs) != 2:
-                raise RuntimeError("lower(BiasCorr): expected 1 in/2 out")
-            emit(
-                "bias_corr",
-                [int(n.inputs[0])],
-                [int(n.outputs[0]), int(n.outputs[1])],
-                {"beta1": float(n.attrs["beta1"]), "beta2": float(n.attrs["beta2"])},
-            )
+        # ---- Already-lowered primitives (just normalize name) ----
+        # If you ever emit primitives directly, keep them working:
+        primitive = op
+        if primitive in ("gemm", "bias_add", "add", "relu", "reduce_sum", "mse_grad", "relu_bwd", "copy", "copy_saved", "copy_aux", "grad_zero", "adam_step", "step_inc", "bias_corr", "layernorm_fwd", "layernorm_bwd", "batchnorm_fwd", "batchnorm_bwd", "sgd_step"):
+            _add_item(lowered, ir, {"op": primitive, "inputs": ins, "outputs": outs, "attrs": attrs})
             continue
 
-        if op == "AdamStep":
-            if len(n.inputs) != 6 or len(n.outputs) != 3:
-                raise RuntimeError("lower(AdamStep): expected 6 in/3 out")
-            emit(
-                "adam_step",
-                [int(x) for x in n.inputs],
-                [int(y) for y in n.outputs],
-                {
-                    "lr": float(n.attrs["lr"]),
-                    "beta1": float(n.attrs["beta1"]),
-                    "beta2": float(n.attrs["beta2"]),
-                    "eps": float(n.attrs["eps"]),
-                },
-            )
-            continue
-
-        raise RuntimeError(f"lower: unsupported IR op '{op}'")
+        raise RuntimeError(f"[lower] unsupported IR op '{ir_op}' (normalized='{op}')")
 
     return lowered

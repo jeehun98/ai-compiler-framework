@@ -21,12 +21,21 @@ enum KernelVariantFlags : uint32_t {
 // - launch(): invoked with workspace ptr/bytes; v0.x policy may still pass nullptr/0
 //
 // Selection policy:
-// - higher priority wins
+// - higher priority wins (legacy Dispatch)
 // - if equal priority, registry insertion order is tie-breaker (stable)
+//
+// NEW (compiler-ready):
+// - kernel_id: stable identifier used by DispatchById() path.
+//   This is the "decision-applied artifact" key.
 struct KernelVariant {
   const char* name = nullptr;
 
-  // higher = earlier selection
+  // ✅ 결정 박제용 stable kernel id (required for by-id path)
+  // Convention recommended:
+  //   "<op>_<variant...>"  e.g., "gemm_sm75_tn_m64n64k32"
+  const char* kernel_id = nullptr;
+
+  // higher = earlier selection (legacy Dispatch path)
   int priority = 0;
 
   // reserved for future policies (arch/capture_safe/etc.)

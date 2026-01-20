@@ -270,3 +270,30 @@ def adam_step(
         attrs={"lr": float(lr), "beta1": float(beta1), "beta2": float(beta2), "eps": float(eps)},
     )
     return p, m, v
+
+def sgd_step(
+    p: SymTensor,
+    g: SymTensor,
+    *,
+    lr: float,
+) -> SymTensor:
+    """
+    SGD update (in-place semantic):
+      p = p - lr * g
+    core_v2 storage semantics:
+      output is p itself.
+    """
+    if not is_tracing():
+        raise RuntimeError("core_v2.ops.sgd_step(): tracing-only")
+
+    ir = get_ir()
+    pv = _val(p, "p")
+    gv = _val(g, "g")
+
+    ir.emit(
+        op="SgdStep",
+        inputs=[pv, gv],
+        outputs=[pv],
+        attrs={"lr": float(lr)},
+    )
+    return p

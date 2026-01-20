@@ -45,12 +45,11 @@ struct AdamAttrs {
 };
 
 static inline AdamAttrs get_adam_attrs_from_attr(const AttrBlob& a) {
-  // defaults (MVP)
   AdamAttrs out{1e-3f, 0.9f, 0.999f, 1e-8f};
 
-  if (a.schema_id == 0) return out;                 // allow default
-  if (a.schema_id != kSchema_ADAM) return out;      // mismatch -> default
-  if (!a.data || a.bytes < 16) return out;          // short -> default
+  if (a.schema_id == 0) return out;
+  if (a.schema_id != kSchema_ADAM) return out;
+  if (!a.data || a.bytes < 16) return out;
 
   const auto* p = static_cast<const uint8_t*>(a.data);
   out.lr    = read_f32_le(p + 0);
@@ -111,7 +110,6 @@ static inline bool any_bad_alias(
   const bool m_inplace = ptr_eq(Mout, M);
   const bool v_inplace = ptr_eq(Vout, V);
 
-  // forbid Pout aliasing M/V (unless that exact allowed pair, which we do NOT allow)
   if (!p_inplace) {
     if (ptr_eq(Pout, M) || ptr_eq(Pout, V) || ptr_eq(Pout, Mout) || ptr_eq(Pout, Vout)) return true;
   }
@@ -129,7 +127,6 @@ static inline bool any_bad_alias(
   return false;
 }
 
-// grid sizing (grid-stride kernel)
 static inline int choose_blocks_1d(int64_t n, int threads) {
   int64_t b = (n + threads - 1) / threads;
   if (b < 1) b = 1;
@@ -141,11 +138,7 @@ static inline int choose_blocks_1d(int64_t n, int threads) {
 static size_t adam_step_workspace(const TensorDesc*, int, const void*) { return 0; }
 
 // -------------------------
-// checks (supported/launch use same predicates)
-// Contract:
-// inputs:  [0]=P, [1]=G, [2]=M, [3]=V, [4]=BC1(scalar), [5]=BC2(scalar)
-// outputs: [0]=Pout, [1]=Mout, [2]=Vout
-// f32 only, contiguous only
+// checks
 // -------------------------
 static inline bool adam_step_check(
     const TensorDesc* inputs, int num_inputs,
@@ -221,6 +214,15 @@ static Status adam_step_f32_launch(
   const AttrBlob& ab = *static_cast<const AttrBlob*>(attr);
   const AdamAttrs a = get_adam_attrs_from_attr(ab);
 
+  // ✅ oop 안전 보장:
+  // kernel은 Pout을 "기존 값에서 - lr*..." 형태로 업데이트하므로,
+  // Pout!=P 인 경우 P 값을 Pout에 먼저 복사한다.
+  if (!ptr_eq(Pout, P)) {
+    const size_t bytes = (size_t)n * sizeof(float);
+    cudaError_t e = cudaMemcpyAsync(Pout.data, P.data, bytes, cudaMemcpyDeviceToDevice, stream);
+    if (e != cudaSuccess) return cuda_to_status(e);
+  }
+
   constexpr int kThreads = 256;
   const int blocks = choose_blocks_1d(n, kThreads);
 
@@ -245,12 +247,13 @@ KernelVariant make_adam_step_f32_variant() {
   v.name = "adam_step_f32_v2";
   v.priority = 0;
   v.flags = 0;
-  v.expected_attr_schema_id = kSchema_ADAM; // schema_id==0도 허용(디폴트)하려면 Dispatch가 0도 패스하는 구조여야 함
+  v.expected_attr_schema_id = kSchema_ADAM; // exec에서 ADAM으로 보내야 매칭됨
   v.launch = adam_step_f32_launch;
   v.supported = adam_step_f32_supported;
   v.query_workspace = adam_step_workspace;
   return v;
 }
+
 __global__ void adam_step_f32_kernel_v2(
     float* __restrict__ Pout,
     const float* __restrict__ G,
@@ -272,21 +275,21 @@ __global__ void adam_step_f32_kernel_v2(
 
     const float g = G[i];
 
-    // m, v update
     const float m_new = beta1 * M[i] + (1.0f - beta1) * g;
     const float v_new = beta2 * V[i] + (1.0f - beta2) * (g * g);
 
     Mout[i] = m_new;
     Vout[i] = v_new;
 
-    // bias correction using provided scalars
     const float m_hat = m_new / bc1v;
     const float v_hat = v_new / bc2v;
 
-    // param update
     const float denom = sqrtf(v_hat) + eps;
+
+    // ✅ launcher가 oop일 때 P->Pout copy를 보장하므로,
+    // 여기서는 "Pout = Pout - ..." 방식이 항상 안전해짐.
     Pout[i] = Pout[i] - lr * (m_hat / denom);
-    // NOTE: Pout may alias P. If out-of-place, Pout already contains initial P from caller (or you pass Pout==P).
   }
 }
+
 } // namespace aicf::cuda

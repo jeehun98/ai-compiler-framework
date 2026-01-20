@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 import re
 
 import torch
@@ -52,9 +52,15 @@ class PlanOptions:
     Stage3/6 규칙(최종):
       - input_names: {"x","t"} 는 input
       - 모델 파라미터만 param: "숫자.(W|b)" 형태만
-      - optimizer state는 무조건 static: "opt.*"
-      - backward/grad는 무조건 static: "d_*", "grad*", "dY" 등
+      - optimizer state는 기본 static: "opt.*"
+      - backward/grad는 기본 static: "d_*", "grad*", "dY" 등
       - 나머지는 static
+
+    NOTE:
+      - host-managed meta(opt.bc1_inv/opt.bc2_inv 등)를 외부에서 주입하고 싶으면
+        PlanOptions.static_prefixes에 걸리더라도 executor의 bind 로직이 role mismatch를
+        완화(fallback)해서 실제 텐서를 env[vid]에 꽂을 수 있다.
+      - “외부 주입 필수 static”을 강제하고 싶으면 아래 ExecPlanOptions에서 제어한다.
     """
     input_names: Set[str] = field(default_factory=lambda: {"x", "t"})
 
@@ -64,7 +70,7 @@ class PlanOptions:
     # 무조건 static 처리 prefix들
     static_prefixes: Tuple[str, ...] = (
         "d_", "grad", "dY",
-        "opt.",           # ★ 핵심: optimizer state는 외부 주입 X, executor가 allocate해서 들고감
+        "opt.",  # optimizer/state/meta는 기본 static
     )
 
 
@@ -82,6 +88,10 @@ def _is_forced_static(nm: str, opts: PlanOptions) -> bool:
 
 
 def build_binding_plan(ir: IRGraph, *, opts: Optional[PlanOptions] = None) -> BindingPlan:
+    """
+    BindingPlan은 “메모리 역할”만 정의한다.
+    (결정/커널 선택은 ExecPlan 단계에서 별도로 한다.)
+    """
     if opts is None:
         opts = PlanOptions()
     param_re = _compile_param_re(opts)
@@ -158,9 +168,6 @@ def _should_zero_init_static(name: str) -> bool:
         return True
     if name.startswith("opt.m.") or name.startswith("opt.v."):
         return True
-    # 필요하면 bc1/bc2도 여기서 제어 가능:
-    # if name.startswith("opt.bc1_inv") or name.startswith("opt.bc2_inv"):
-    #     return False
     return False
 
 
@@ -200,3 +207,218 @@ def allocate_static_env(
             env[int(vid)] = torch.empty(shape, device=device, dtype=dt)
 
     return env
+
+
+# ============================================================
+# ✅ ExecPlan: 결정(커널/전략)을 lowered에 “의미적으로 박제”하는 단계
+# ============================================================
+
+@dataclass
+class ExecPlanOptions:
+    """
+    이 옵션은 'binding'이 아니라 '결정 박제'에 관한 것.
+
+    목표:
+      - lowered op마다 kernel_id를 채워서
+        executor가 runtime dispatch(op_call) 없이 launch_by_id로 실행할 수 있게 한다.
+
+    현재 구현은 '스켈레톤 + 최소 규약' 제공용:
+      - gemm: transA/transB를 kernel_id에 반영
+      - reduce_sum: axis/keepdim을 반영(없으면 default)
+      - adam_step: schema_id=ADAM + attrs(lr,beta1,beta2,eps)는 별도 bytes로 가고,
+        kernel_id는 "adam_step.default" 같은 형태로 고정(추후 variant화 가능)
+
+    NOTE:
+      - 실제 registry의 kernel_id 명명 규칙이 정해지면,
+        아래 _select_kernel_id_* 함수들에서 그 규칙으로 바꾸면 된다.
+    """
+    # arch 문자열을 plan에서 직접 박제하고 싶으면 설정
+    # 예: "sm_75", "sm_80"
+    arch: Optional[str] = None
+
+    # kernel_id가 없던 lowered에 자동으로 채워넣을지 여부
+    # True면 apply_kernel_decisions가 강제로 채움
+    # False면 이미 있는 kernel_id만 유지
+    fill_missing_kernel_id: bool = True
+
+    # 디버깅용: kernel_id에 상세 정보(예: shape 등)를 넣고 싶으면 True
+    verbose_kernel_id: bool = False
+
+
+def apply_kernel_decisions(
+    lowered: List[Dict[str, Any]],
+    *,
+    opts: Optional[ExecPlanOptions] = None,
+) -> List[Dict[str, Any]]:
+    """
+    lowered(list[dict])를 입력으로 받아 각 op에 kernel_id를 채운 복사본을 반환한다.
+
+    lowered item 최소 형식(기존 유지):
+      {
+        "op": "gemm",
+        "inputs": [v0, v1],
+        "outputs": [v2],
+        "attrs": {...}
+      }
+
+    결정 박제 후 형식(추가 필드):
+      {
+        ...,
+        "kernel_id": "gemm.sm_80.ta0.tb1"  # 예시
+      }
+    """
+    if opts is None:
+        opts = ExecPlanOptions()
+
+    out: List[Dict[str, Any]] = []
+    for it in lowered:
+        it2 = dict(it)
+        op = str(it2.get("op", "")).strip().lower()
+
+        # 이미 kernel_id가 있으면 그대로 유지
+        if it2.get("kernel_id", None) is not None:
+            out.append(it2)
+            continue
+
+        if not opts.fill_missing_kernel_id:
+            out.append(it2)
+            continue
+
+        attrs = dict(it2.get("attrs", {}) or {})
+        kid = _select_kernel_id(op, attrs, opts)
+        it2["kernel_id"] = kid
+        out.append(it2)
+
+    return out
+
+
+def _select_kernel_id(op: str, attrs: Dict[str, Any], opts: ExecPlanOptions) -> str:
+    if op == "gemm":
+        return _select_kernel_id_gemm(attrs, opts)
+    if op == "reduce_sum":
+        return _select_kernel_id_reduce_sum(attrs, opts)
+    if op == "adam_step":
+        return _select_kernel_id_adam(attrs, opts)
+
+    # 그 외 op들은 일단 default로 박제 (추후 variant화)
+    # bias_add / relu / relu_bwd / mse_grad / copy 등
+    return _kid_base(op, opts) + ".default"
+
+
+def _kid_base(op: str, opts: ExecPlanOptions) -> str:
+    # 예: "gemm.sm_80" / "relu.sm_75" / "adam_step"
+    if opts.arch:
+        return f"{op}.{opts.arch}"
+    return op
+
+
+def _select_kernel_id_gemm(attrs: Dict[str, Any], opts: ExecPlanOptions) -> str:
+    ta = 1 if bool(attrs.get("transA", False)) else 0
+    tb = 1 if bool(attrs.get("transB", False)) else 0
+    base = _kid_base("gemm", opts)
+    # 최소로 trans flags만 박제
+    kid = f"{base}.ta{ta}.tb{tb}"
+    return kid
+
+
+def _select_kernel_id_reduce_sum(attrs: Dict[str, Any], opts: ExecPlanOptions) -> str:
+    axis = attrs.get("axis", None)
+    keepdim = bool(attrs.get("keepdim", False))
+    base = _kid_base("reduce_sum", opts)
+
+    if axis is None:
+        kid = f"{base}.axis?.k{1 if keepdim else 0}"
+    else:
+        kid = f"{base}.axis{int(axis)}.k{1 if keepdim else 0}"
+    return kid
+
+
+def _select_kernel_id_adam(attrs: Dict[str, Any], opts: ExecPlanOptions) -> str:
+    # adam은 보통 알고리즘/타일링 variant가 따로 존재할 수 있지만,
+    # 지금 단계에서는 “결정이 plan에 박제된다”는 사실이 중요하므로 default로 고정.
+    base = _kid_base("adam_step", opts)
+    return f"{base}.default"
+
+
+def _dtype_str(v) -> str:
+    dt = getattr(v, "dtype", "torch.float32")
+    return str(dt)
+
+
+def _is_f16(dtype_s: str) -> bool:
+    s = str(dtype_s)
+    return ("float16" in s) or ("torch.float16" in s) or ("Half" in s)
+
+
+def _last_dim(ir: IRGraph, vid: int) -> int:
+    v = ir.values[int(vid)]
+    shape = tuple(getattr(v, "shape", ()))
+    if not shape:
+        return 1
+    return int(shape[-1])
+
+
+def _pick_vec2_upgrade(op: str, base_kid: Optional[str], in_dtype: str, out_dtype: str, lastdim: int) -> Optional[str]:
+    """
+    Stage B: vec2/half2 같은 "형상 기반 결정"을 planner에서 박제한다.
+
+    규칙(최소):
+      - f16이고 lastdim % 2 == 0 이면 vec2/half2로 업그레이드
+      - 해당 op에 vec2/half2 variant가 있을 때만
+    """
+
+    op = str(op).strip().lower()
+    f16 = _is_f16(in_dtype) or _is_f16(out_dtype)
+    even = (lastdim % 2 == 0)
+
+    if not (f16 and even):
+        return base_kid
+
+    # add/bias_add/relu/relu_bwd: vec2
+    if op == "add":
+        return "add_f16_vec2_v0"
+    if op == "bias_add":
+        return "bias_add_f16_vec2_v0"
+    if op == "relu":
+        return "relu_f16_vec2_v0"
+    if op == "relu_bwd":
+        return "relu_bwd_f16_vec2_v0"
+
+    # sgd_step: half2
+    if op == "sgd_step":
+        return "sgd_step_f16_half2_v0"
+
+    # 나머지는 그대로
+    return base_kid
+
+
+def apply_kernel_decisions_stageB(ir: IRGraph, lowered: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    lowered 리스트를 받아 kernel_id를 "planner 관점"으로 강화한다.
+    - Stage A에서 이미 kernel_id가 있더라도, vec2/half2 조건 만족하면 업그레이드.
+    - 결정 결과는 lowered item에 kernel_id로 남는다(컴파일 산출물).
+    """
+    out: List[Dict[str, Any]] = []
+
+    for it in lowered:
+        it = dict(it)
+        op = str(it.get("op", "")).strip().lower()
+        in_vids = [int(x) for x in it.get("inputs", [])]
+        out_vids = [int(y) for y in it.get("outputs", [])]
+
+        # dtype/shape 기준값: (관례적으로) 첫 input / 첫 output 기준
+        in_dtype = _dtype_str(ir.values[in_vids[0]]) if in_vids else ""
+        out_dtype = _dtype_str(ir.values[out_vids[0]]) if out_vids else ""
+
+        # vec2/half2 판단 기준: "출력 lastdim" 우선, 없으면 입력 lastdim
+        ld = _last_dim(ir, out_vids[0]) if out_vids else (_last_dim(ir, in_vids[0]) if in_vids else 1)
+
+        base_kid = it.get("kernel_id", None)
+        new_kid = _pick_vec2_upgrade(op, base_kid, in_dtype, out_dtype, ld)
+
+        if new_kid is not None:
+            it["kernel_id"] = str(new_kid)
+
+        out.append(it)
+
+    return out
