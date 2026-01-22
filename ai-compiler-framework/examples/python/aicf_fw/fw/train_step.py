@@ -91,9 +91,11 @@ class CompiledTrainStep:
             self.ex.reset_graph()
         self.ex.capture(inputs=inputs, params=self._bind_all(), reuse_static=reuse_static)
 
-    def replay(self, n: int = 1):
+    def replay(self, n: int = 1, sync: bool = False):
         self.ex.replay(n=int(n))
-
+        if sync:
+            torch.cuda.synchronize()
+            
     def reset(self):
         if hasattr(self.ex, "reset_graph"):
             self.ex.reset_graph()

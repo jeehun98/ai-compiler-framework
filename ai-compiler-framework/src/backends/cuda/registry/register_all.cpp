@@ -99,21 +99,22 @@ extern "C" void aicf_cuda_register_all_kernels() {
 
   // ReduceSum
   {
-    // ✅ f16 -> f16 (v013 같은 케이스)
+    // ✅ f16 -> f16
     R.register_kernel(OpKind::ReduceSum,
       kid(setp(make_reduce_sum_lastdim_f16_variant(), 115),
-          "reduce_sum_lastdim_f16_v0"));
+          "reduce_sum_keep_lastdim_f16_v0"));
 
-    // f16 -> f32 (필요하면 유지)
+    // f16 -> f32
     R.register_kernel(OpKind::ReduceSum,
       kid(setp(make_reduce_sum_lastdim_f16_to_f32_variant(), 110),
-          "reduce_sum_lastdim_f16_to_f32_v0"));
+          "reduce_sum_keep_lastdim_f16_to_f32_v0"));
 
     // f32 -> f32
     R.register_kernel(OpKind::ReduceSum,
       kid(setp(make_reduce_sum_lastdim_f32_variant(), 100),
-          "reduce_sum_lastdim_f32_v0"));
+          "reduce_sum_keep_lastdim_f32_v0"));
   }
+
 
 
   // Gemm

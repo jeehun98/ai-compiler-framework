@@ -45,7 +45,7 @@ def main():
 
     opt = Adam(model, lr=1e-3)
 
-    # ✅ fw-style API: model.compile(...)
+    # fw-style API: model.compile(...)
     model.compile(
         optimizer=opt,
         B=B, D=D, device=device, dtype=dtype,
@@ -58,8 +58,9 @@ def main():
     W0 = dict(model.named_parameters())["0.W"]
     W0_before = W0.clone()
 
-    # --- train_step (compiled handle train_step) ---
+    # --- train_step ---
     model.train_step({"x": x, "t": t})
+    # torch.cuda.synchronize()  # train_step 내부에서 sync 하더라도, 안전하게 한 번 더
     dW0_1 = maxabs_delta(W0, W0_before)
     print("[train_step] |ΔW0| =", dW0_1)
     if dW0_1 == 0.0:
@@ -70,7 +71,7 @@ def main():
     print("OK (capture)")
 
     W0_cap0 = W0.clone()
-    model.replay(n=3)
+    model.replay(n=3, sync=True)
     dW0_rep = maxabs_delta(W0, W0_cap0)
     print("[replay] n=3 |ΔW0| =", dW0_rep)
     if dW0_rep == 0.0:
@@ -85,20 +86,31 @@ def main():
     W0_m0 = W0.clone()
     bc1.fill_(1.0)
     bc2.fill_(1.0)
-    torch.cuda.synchronize()
-    model.replay(n=1)
+    model.replay(n=1, sync=True)
     d_mut = maxabs_delta(W0, W0_m0)
 
     W0_m1 = W0.clone()
     bc1.fill_(bc1_before)
     bc2.fill_(bc2_before)
-    torch.cuda.synchronize()
-    model.replay(n=1)
+    model.replay(n=1, sync=True)
     d_rest = maxabs_delta(W0, W0_m1)
 
     print("[meta] mutated |ΔW0| =", d_mut, " restored |ΔW0| =", d_rest)
     if abs(d_mut - d_rest) < 1e-12:
         raise RuntimeError("meta mutation did not change replay behavior")
+
+    # --- optional: regression check for async vs sync ---
+    W0_a0 = W0.clone()
+    model.replay(n=1, sync=False)  # intentionally async
+    d_async = maxabs_delta(W0, W0_a0)
+
+    W0_s0 = W0.clone()
+    model.replay(n=1, sync=True)
+    d_sync = maxabs_delta(W0, W0_s0)
+
+    print("[replay sync-check] async |ΔW0| =", d_async, " sync |ΔW0| =", d_sync)
+    if d_sync == 0.0:
+        raise RuntimeError("sync replay did not update W0")
 
     model.reset()
     print("ALL OK (fw MVP user experience test)")

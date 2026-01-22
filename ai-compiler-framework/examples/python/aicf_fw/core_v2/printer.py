@@ -43,34 +43,69 @@ def dump_ir(ir: IRGraph) -> str:
     return "\n".join(lines)
 
 
-def dump_lowered(
-    lowered: List[Dict[str, Any]],
-    *,
-    title: str = "LoweredOps",
-    name: Optional[str] = None,
-) -> str:
+def dump_lowered(lowered, name: str = "lowered") -> str:
     """
-    - title: 기본 헤더 이름 (기존 호환)
-    - name: stage 이름 같은 라벨 (신규). 주어지면 'LoweredOps(name)' 형태로 표시.
+    LoweredOps pretty printer.
+    - StageA: op_kind/inputs/outputs/attrs
+    - StageB: +kernel_id(+kind name)까지 함께 표시
     """
-    hdr = f"{title}({name})" if name else title
+    lines = []
+    lines.append(f"=== LoweredOps({name}) ===")
 
-    lines: List[str] = []
-    lines.append(f"=== {hdr} ===")
-    lines.append(f"ops: {len(lowered)}")
-    lines.append("")
+    # lowered가 list[dict] 또는 list[LoweredOp] 둘 다 커버(최대한 관대하게)
+    ops = lowered if isinstance(lowered, (list, tuple)) else getattr(lowered, "ops", lowered)
+    n_ops = len(ops) if hasattr(ops, "__len__") else 0
+    lines.append(f"ops: {n_ops}\n")
 
-    for i, it in enumerate(lowered):
-        op = str(it.get("op"))
-        ins = [int(x) for x in it.get("inputs", [])]
-        outs = [int(y) for y in it.get("outputs", [])]
-        attrs = dict(it.get("attrs", {}) or {})
+    def _fmt_io(vs):
+        if vs is None:
+            return ""
+        # list/tuple of value ids
+        if isinstance(vs, (list, tuple)):
+            return ", ".join(str(x) for x in vs)
+        return str(vs)
 
-        ins_s = ", ".join([f"v{v:03d}" for v in ins])
-        outs_s = ", ".join([f"v{v:03d}" for v in outs])
-        attrs_s = _fmt_attrs(attrs)
+    def _fmt_attrs(attrs):
+        if not attrs:
+            return ""
+        # attrs가 dict면 key 정렬해서 안정적으로 출력
+        if isinstance(attrs, dict):
+            items = []
+            for k in sorted(attrs.keys()):
+                items.append(f"{k}={attrs[k]}")
+            return "{" + ", ".join(items) + "}"
+        # 그 외는 repr
+        return "{" + repr(attrs) + "}"
 
-        lines.append(f"  #{i:03d} {op:10s} ({ins_s}) -> ({outs_s}){attrs_s}")
+    for i, op in enumerate(ops):
+        # dict 형태
+        if isinstance(op, dict):
+            kind = op.get("kind") or op.get("op") or op.get("op_kind") or "unknown"
+            ins = op.get("inputs") or op.get("in") or op.get("args") or []
+            outs = op.get("outputs") or op.get("out") or op.get("rets") or []
+            attrs = op.get("attrs") or {}
+            kid = op.get("kernel_id", None)
+
+        # 객체 형태
+        else:
+            kind = getattr(op, "kind", None) or getattr(op, "op", None) or getattr(op, "op_kind", None) or "unknown"
+            ins = getattr(op, "inputs", None) or getattr(op, "in_", None) or []
+            outs = getattr(op, "outputs", None) or getattr(op, "out", None) or []
+            attrs = getattr(op, "attrs", None) or {}
+            kid = getattr(op, "kernel_id", None)
+
+        io = f"({_fmt_io(ins)}) -> ({_fmt_io(outs)})"
+        a = _fmt_attrs(attrs)
+        if a:
+            base = f"  #{i:03d} {kind:<10} {io}  {a}"
+        else:
+            base = f"  #{i:03d} {kind:<10} {io}"
+
+        # ✅ StageB 핵심: kernel_id를 같이 찍기
+        if kid is not None:
+            base += f"  kid={kid}"
+
+        lines.append(base)
 
     return "\n".join(lines)
 

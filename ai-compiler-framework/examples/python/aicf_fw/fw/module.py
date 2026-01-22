@@ -109,10 +109,10 @@ class Module:
             raise RuntimeError("model is not compiled. call model.compile(...) first.")
         return self._compiled.capture(batch)
 
-    def replay(self, n: int = 1):
+    def replay(self, n: int = 1, sync: bool = False):
         if self._compiled is None:
             raise RuntimeError("model is not compiled. call model.compile(...) first.")
-        return self._compiled.replay(n=n)
+        return self._compiled.replay(n=n, sync=sync)
 
     def reset(self):
         if self._compiled is None:

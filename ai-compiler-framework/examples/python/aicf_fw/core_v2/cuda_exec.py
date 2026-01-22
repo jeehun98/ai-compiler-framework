@@ -427,14 +427,16 @@ class AICFCudaExecutable:
         _C.graph_end()
         self._captured = True
 
-    def replay(self, n: int = 1) -> None:
+    def replay(self, n: int = 1, sync: bool = False) -> None:
         if n <= 0:
             return
         if not self._captured:
-            # allow replay even if bool not set, but raise to catch misuse
             raise RuntimeError("replay called before capture()")
         for _ in range(int(n)):
             _C.graph_launch()
+        if sync:
+            torch.cuda.synchronize()
+
 
     def reset_graph(self) -> None:
         _C.graph_reset()

@@ -53,18 +53,19 @@ def _pick_kernel_id(op: str, in_dtypes: List[str], out_dtypes: List[str], attrs:
         return "relu_bwd_f32_v0"
 
     if op == "reduce_sum":
-        # 결정 박제 기준: "출력 dtype"이 무엇인지가 핵심
-        # - out f16  => reduce_sum_lastdim_f16_v0
-        # - out f32  => (in f16) reduce_sum_lastdim_f16_to_f32_v0 / (in f32) reduce_sum_lastdim_f32_v0
+        # 결정 박제 기준:
+        # reduce_sum_keep_lastdim = bias grad (rowsum over leading dims)
+        # - out f16  => reduce_sum_keep_lastdim_f16_v0
+        # - out f32  => (in f16) reduce_sum_keep_lastdim_f16_to_f32_v0
+        #            => (in f32) reduce_sum_keep_lastdim_f32_v0
 
         if is_f16(out0):
-            # (현재 네 그래프 v013/v017이 여기로 와야 함)
-            return "reduce_sum_lastdim_f16_v0"
+            return "reduce_sum_keep_lastdim_f16_v0"
 
-        # out is f32 (or default)
         if is_f16(in0):
-            return "reduce_sum_lastdim_f16_to_f32_v0"
-        return "reduce_sum_lastdim_f32_v0"
+            return "reduce_sum_keep_lastdim_f16_to_f32_v0"
+        return "reduce_sum_keep_lastdim_f32_v0"
+
 
     if op == "sgd_step":
         if is_f16(in0) or is_f16(out0):

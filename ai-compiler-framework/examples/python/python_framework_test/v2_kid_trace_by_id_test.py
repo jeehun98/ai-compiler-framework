@@ -1,8 +1,8 @@
-# examples/python/python_framework_test/v2_kid_trace_by_id_test.py
 from __future__ import annotations
 
 import sys
 from pathlib import Path
+import time
 import torch
 
 THIS = Path(__file__).resolve()
@@ -26,6 +26,9 @@ from aicf_fw.core_v2.plan import build_binding_plan, apply_kernel_decisions_stag
 from aicf_fw.core_v2.exec import PlannedExecutor, ExecOptions
 
 
+# -------------------------
+# utils
+# -------------------------
 def tf32_off():
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
@@ -40,6 +43,22 @@ def require_contains(hay: str, needle: str):
         raise AssertionError(f"expected to find '{needle}' in trace, but not found.")
 
 
+def now_tag():
+    return time.strftime("%Y%m%d_%H%M%S")
+
+
+def ensure_dir(p: Path):
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def dump_text(path: Path, text: str):
+    path.write_text(text, encoding="utf-8")
+
+
+# -------------------------
+# main
+# -------------------------
 def main():
     tf32_off()
     torch.manual_seed(0)
@@ -58,6 +77,9 @@ def main():
 
     lr = 1e-2
 
+    # -------------------------
+    # build graph
+    # -------------------------
     def build():
         sx = sym_tensor(name="x", shape=(B, D), dtype=dtype, device=device)
         st = sym_tensor(name="t", shape=(B, D), dtype=dtype, device=device)
@@ -94,21 +116,48 @@ def main():
         sgd_step(sW1, dW1, lr=lr)
         sgd_step(sb1, db1, lr=lr)
 
+    # -------------------------
+    # artifacts dir
+    # -------------------------
+    art_root = ensure_dir(
+        Path("artifacts") / f"{now_tag()}_v2_kid_trace_by_id_test"
+    )
+
+    # -------------------------
+    # trace → IR
+    # -------------------------
     ir = trace_ir(build, name="v2_kid_trace_by_id_test")
+    ir_txt = dump_ir(ir)
+    print(ir_txt)
+    dump_text(art_root / "20_ir.txt", ir_txt)
+
+    # -------------------------
+    # lower Stage A + B
+    # -------------------------
     lowered = lower_to_backend_ops(ir)                    # Stage A
     lowered = apply_kernel_decisions_stageB(ir, lowered)  # Stage B
-    plan = build_binding_plan(ir)
 
-    print(dump_ir(ir))
-    print(dump_lowered(lowered, name="v2_kid_trace_by_id_test"))
-    print(dump_plan(plan, name="v2_kid_trace_by_id_test"))
+    lowered_txt = dump_lowered(lowered, name="v2_kid_trace_by_id_test")
+    print(lowered_txt)
+    dump_text(art_root / "30_lowered.txt", lowered_txt)
 
-    # kernel_id 전체 존재
+    # kernel_id 전체 존재 확인
     kids = [it.get("kernel_id", None) for it in lowered]
     if any(k is None for k in kids):
         missing = [i for i, k in enumerate(kids) if k is None]
         raise RuntimeError(f"Some lowered ops have no kernel_id. missing indices={missing}")
 
+    # -------------------------
+    # plan
+    # -------------------------
+    plan = build_binding_plan(ir)
+    plan_txt = dump_plan(plan, name="v2_kid_trace_by_id_test")
+    print(plan_txt)
+    dump_text(art_root / "40_plan.txt", plan_txt)
+
+    # -------------------------
+    # exec + runtime trace
+    # -------------------------
     ex = PlannedExecutor(
         ir=ir,
         lowered=lowered,
@@ -118,7 +167,6 @@ def main():
 
     params = {"0.W": W0, "0.b": b0, "2.W": W1, "2.b": b1}
 
-    # ---- trace validate (by_id path actually used) ----
     ex.trace_reset()
     ex.trace_enable(True)
     ex.run(inputs={"x": x, "t": t}, params=params, reuse_static=True)
@@ -131,15 +179,12 @@ def main():
     trace = "\n".join([str(s) for s in lines])
     print("=== TRACE ===")
     print(trace)
+    dump_text(art_root / "50_runtime_trace.txt", trace)
 
-    # ✅ 최소 기대: stageB 업그레이드된 kid가 실제 호출되었는지
-    # - 너 레지스트리 kid 기준
+    # 최소 기대: stageB 업그레이드된 kid가 실제 호출되었는지
     require_contains(trace, "sgd_step_f16_half2_v0")
 
-    # vec2 쪽도 하나 이상 들어가면 더 좋음(환경에 따라 bias_add vec2 선택되게 해둔 상태라면)
-    # require_contains(trace, "bias_add_f16_vec2_v0")
-
-    print("[OK] trace contains expected kernel_id(s).")
+    print(f"[OK] artifacts dumped to: {art_root}")
     print("OK")
 
 
