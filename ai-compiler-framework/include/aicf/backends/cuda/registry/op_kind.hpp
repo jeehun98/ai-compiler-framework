@@ -24,7 +24,10 @@ enum class OpKind : int {
   BatchNormFwd  = 15,
   BatchNormBwd  = 16,
 
-  _Count        = 17
+  
+  GemmEpilogue  = 17,   // ✅ ADD: (A,B,bias)->C with optional relu in epilogue
+  _Count        = 18
+
 };
 
 }  // namespace aicf::cuda

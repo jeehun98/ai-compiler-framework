@@ -212,6 +212,8 @@ static inline const char* opkind_to_name(aicf::cuda::OpKind k) {
     case aicf::cuda::OpKind::LayerNormBwd: return "layernorm_bwd";
     case aicf::cuda::OpKind::BatchNormFwd: return "batchnorm_fwd";
     case aicf::cuda::OpKind::BatchNormBwd: return "batchnorm_bwd";
+    case aicf::cuda::OpKind::GemmEpilogue: return "gemm_epilogue";   // ✅ ADD
+
     default: return "unknown";
   }
 }
@@ -390,6 +392,8 @@ PYBIND11_MODULE(_C, m) {
       .value("LayerNormBwd", aicf::cuda::OpKind::LayerNormBwd)
       .value("BatchNormFwd", aicf::cuda::OpKind::BatchNormFwd)
       .value("BatchNormBwd", aicf::cuda::OpKind::BatchNormBwd)
+      .value("GemmEpilogue", aicf::cuda::OpKind::GemmEpilogue)  // ✅ ADD
+
       .export_values();
 
   // ---------------- op_call (legacy) ----------------

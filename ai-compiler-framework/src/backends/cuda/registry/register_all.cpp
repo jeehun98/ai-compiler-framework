@@ -78,6 +78,11 @@ KernelVariant make_layernorm_bwd_f16_variant();
 KernelVariant make_batchnorm_fwd_f16_variant();
 KernelVariant make_batchnorm_bwd_f16_variant();
 
+// GemmEpilogue (Gemm + Bias (+Relu))
+KernelVariant make_gemm_bias_relu_f32_naive_variant();
+KernelVariant make_gemm_bias_relu_f16_tc_wmma_out_f16_variant();
+
+
 }  // namespace aicf::cuda
 
 extern "C" void aicf_cuda_register_all_kernels() {
@@ -126,6 +131,17 @@ extern "C" void aicf_cuda_register_all_kernels() {
       kid(setp(make_gemm_f32_naive_variant(), 0),
           "gemm_f32_naive_v0"));
   }
+
+    // GemmEpilogue
+  {
+    R.register_kernel(OpKind::GemmEpilogue,
+      kid(setp(make_gemm_bias_relu_f16_tc_wmma_out_f16_variant(), 20),
+          "gemm_bias_relu_f16_tc_wmma_out_f16_v0"));
+    R.register_kernel(OpKind::GemmEpilogue,
+      kid(setp(make_gemm_bias_relu_f32_naive_variant(), 0),
+          "gemm_bias_relu_f32_naive_v0"));
+  }
+
 
   // BiasAdd
   {
