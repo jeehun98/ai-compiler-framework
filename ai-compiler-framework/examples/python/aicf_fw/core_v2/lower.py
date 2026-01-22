@@ -133,9 +133,20 @@ def lower_to_backend_ops(ir: IRGraph) -> List[Dict[str, Any]]:
         ir_op = str(getattr(n, "op", getattr(n, "kind", ""))).strip()
         op = ir_op.lower()
 
+
+        # ---- aliases / normalize (CamelCase -> snake_case primitive names) ----
+        if op == "adamstep":
+            op = "adam_step"
+        elif op == "stepinc":
+            op = "step_inc"
+        elif op == "biascorr":
+            op = "bias_corr"
+            
         ins = [int(x) for x in getattr(n, "inputs", [])]
         outs = [int(y) for y in getattr(n, "outputs", [])]
         attrs = dict(getattr(n, "attrs", {}) or {})
+
+
 
         # ---- Linear -> gemm + bias_add ----
         if op == "linear":

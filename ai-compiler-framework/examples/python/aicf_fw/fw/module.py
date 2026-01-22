@@ -1,13 +1,32 @@
 from __future__ import annotations
+
 from collections import OrderedDict
+from dataclasses import dataclass
+from typing import Any, Optional
+
 import torch
+
 from aicf_fw.fw.naming import param_name
+
+
+@dataclass
+class CompileConfig:
+    name: str = "train_step"
+    warmup_runs: int = 2
+    warmup_inputs: Optional[dict[str, Any]] = None
+    warmup_required: bool = True
+
 
 class Module:
     def __init__(self):
+        # model structure
         self._modules: OrderedDict[str, Module] = OrderedDict()
         self._params: OrderedDict[str, torch.Tensor] = OrderedDict()
         self._prefix: str = ""  # set by parent
+
+        # compile/runtime
+        self._compiled: Any = None
+        self._compile_cfg: Optional[CompileConfig] = None
 
     # ----- registration -----
     def add_module(self, name: str, m: "Module"):
@@ -40,6 +59,65 @@ class Module:
         for _, m in self._modules.items():
             m.to(dev, dtype=dtype)
         return self
+
+    # ----- fw-style compile API -----
+    def compile(
+        self,
+        *,
+        optimizer,
+        B: int,
+        D: int,
+        device: str,
+        dtype: torch.dtype,
+        name: str = "train_step",
+        warmup_runs: int = 2,
+        warmup_inputs: Optional[dict[str, Any]] = None,
+        warmup_required: bool = True,
+    ):
+        """
+        Attach compiled training step handle to this model instance.
+        """
+        from aicf_fw.fw.compile import compile_train_step
+
+        self._compile_cfg = CompileConfig(
+            name=name,
+            warmup_runs=warmup_runs,
+            warmup_inputs=warmup_inputs,
+            warmup_required=warmup_required,
+        )
+
+        self._compiled = compile_train_step(
+            self, optimizer,
+            B=B, D=D, device=device, dtype=dtype,
+            name=name,
+            warmup_runs=warmup_runs,
+            warmup_inputs=warmup_inputs,
+            warmup_required=warmup_required,
+        )
+        return self
+
+    def is_compiled(self) -> bool:
+        return self._compiled is not None
+
+    def train_step(self, batch: dict[str, Any]):
+        if self._compiled is None:
+            raise RuntimeError("model is not compiled. call model.compile(...) first.")
+        return self._compiled.train_step(batch)
+
+    def capture(self, batch: dict[str, Any]):
+        if self._compiled is None:
+            raise RuntimeError("model is not compiled. call model.compile(...) first.")
+        return self._compiled.capture(batch)
+
+    def replay(self, n: int = 1):
+        if self._compiled is None:
+            raise RuntimeError("model is not compiled. call model.compile(...) first.")
+        return self._compiled.replay(n=n)
+
+    def reset(self):
+        if self._compiled is None:
+            return
+        return self._compiled.reset()
 
     # ----- IR forward -----
     def forward_ir(self, x_sym, psym: dict[str, object]):
