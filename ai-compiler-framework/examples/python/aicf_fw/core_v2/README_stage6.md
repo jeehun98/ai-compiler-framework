@@ -1,105 +1,165 @@
 Stage6 Execution & Capture Architecture (AICF v2)
-
 요약
+
+Stage6는 AICF 실행 구조를 단순화하고 CUDA Graph Capture/Replay를 안정화하기 위한 단계다.
+
+핵심 변화:
 
 AICFBackend 제거
 
-Python → C++ 단일 진입점 _C.op_call만 사용
+Python → C++ 단일 진입점: _C.op_call(kind, ins, outs, attrs)
 
-IR → LoweredOps → BindingPlan → Env → Execute/Capture 로 흐름 단순화
+실행 흐름을
+IR → LoweredOps → BindingPlan → Static Env → Execute / Capture
+로 명확히 분리
 
-이전 gradient mismatch의 원인은 optimizer가 아니라 검증 시점 오류
+이전 gradient mismatch의 원인은 optimizer 구현 문제가 아니라
+검증 시점(optimizer 이후/이전) 혼동이었음
 
 1. 전체 실행 파이프라인 개요
 
-Stage6 기준 실행은 다음 5단계로 구성된다.
+Stage6 기준 실행 파이프라인은 아래 5단계로 구성된다.
 
 IRGraph
   ↓ trace_ir
 LoweredOps (op + vids + attrs)
   ↓ lower_to_backend_ops
 BindingPlan (inputs / params / statics)
-  ↓ build_plan
+  ↓ build_binding_plan
 Static Env (CUDA tensors, pointer-stable)
   ↓ executor.run
 Execute / CUDA Graph Capture & Replay
 
+핵심 설계 목표
 
-이 구조의 핵심 목표는:
+출력/중간 버퍼를 Python에서 즉석 할당하지 않는다
 
-출력 버퍼를 Python에서 즉석 할당하지 않는다
+모든 CUDA Tensor 포인터는 capture 전에 확정
 
-모든 CUDA tensor 포인터는 capture 전에 확정
-
-실행 시 Python 로직은 op_call 호출만 담당
+실행 시 Python은 _C.op_call 호출만 담당
 
 2. IR → LoweredOps
-2.1 IRGraph (예: v2_stage6_train1)
+2.1 IRGraph (의미 단위 DAG)
 
 IR에는 forward / backward / optimizer가 하나의 DAG로 포함된다.
 
-Forward: Linear → ReLU → Save → Linear
+예시 (train step 그래프):
 
-Backward: MseGrad → LinearBwd → ReluBwd → LinearBwd
+Forward
 
-Optimizer: StepInc → BiasCorr → AdamStep(x4)
+Linear → ReLU → Save → Linear
 
-IR은 의미 단위 연산이며, 실행 단위가 아니다.
+Backward
+
+MseGrad → LinearBwd → ReluBwd → LinearBwd
+
+Optimizer
+
+StepInc → BiasCorr → AdamStep(x4)
+
+또는 SgdStep(x4)
+
+IR의 특징:
+
+의미 단위 연산 표현
+
+실행 단위 아님
+
+CUDA, 커널, 메모리 개념 없음
 
 2.2 LoweredOps (실행 단위)
 
 lower_to_backend_ops()는 IR node를 실행 가능한 primitive ops로 분해한다.
 
-예시:
-
+예시: Linear
 Linear
   → gemm (x, W) -> y
-  → bias_add (y, b) -> y
+  → bias_add (y, b) -> y   # in-place
 
+Save
 Save
   → copy_saved (x) -> saved
 
+LinearBwd
 LinearBwd
   → gemm (dY, W) -> dX
   → gemm (dY^T, X) -> dW
   → reduce_sum (dY) -> db
 
-
-Optimizer도 동일하게 lowering된다:
-
+Optimizer lowering
 StepInc   → step_inc
 BiasCorr → bias_corr
 AdamStep → adam_step
+SgdStep  → sgd_step
 
+LoweredOps의 성질
 
-중요한 점:
+순차 리스트
 
-LoweredOps는 순차 리스트
+각 op는 다음 형태:
 
-각 op는 {op, inputs[vid], outputs[vid], attrs} 형태
+{
+  "op": "gemm",
+  "inputs": [vid...],
+  "outputs": [vid...],
+  "attrs": {...},
+  "kernel_id": Optional[str]
+}
+
 
 Python 실행 시 op 이름을 그대로 _C.op_call에 전달
 
-3. BindingPlan & Static Env
-3.1 BindingPlan의 역할
+3. Kernel Selection (StageB)
 
-BindingPlan은 **“이 그래프를 실행하기 위해 필요한 모든 텐서의 계약서”**다.
+StageB는 LoweredOps에 대해 실제 실행할 커널(KID)을 결정한다.
 
-구성:
+3.1 역할
 
-inputs: 사용자 제공 (x, t)
+dtype / shape / alignment / layout / attrs 기반 KID 선택
 
-params: 학습 파라미터 (W, b)
+vec2 / half2 업그레이드 적용
 
-statics:
+(선택) rewrite / fusion 수행 가능
+
+3.2 현재 검증된 적용 사례
+
+v2_kid_trace_by_id_test.py 기준:
+
+bias_add_f16_vec2_v0
+
+relu_f16_vec2_v0
+
+relu_bwd_f16_vec2_v0
+
+sgd_step_f16_half2_v0
+
+LoweredOps와 runtime trace에서 동일 KID 호출 확인 → StageB 정상 동작.
+
+4. BindingPlan & Static Env
+4.1 BindingPlan의 역할
+
+BindingPlan은
+**“이 그래프를 실행하기 위해 필요한 모든 텐서의 계약서”**다.
+
+구성
+
+inputs
+
+사용자 제공 (x, t, ...)
+
+params
+
+학습 파라미터 (W, b)
+
+statics
 
 forward intermediate
 
 backward grads
 
-optimizer state (m, v, step, bc_inv 등)
+optimizer state (m, v, step, bc_inv, ...)
 
-모든 vid에 대해 다음이 확정된다:
+모든 vid에 대해 확정되는 정보
 
 shape
 
@@ -109,207 +169,230 @@ device
 
 role (input / param / static)
 
-3.2 Static Env
+4.2 Static Env (포인터 고정)
 
 Executor는 BindingPlan을 기반으로:
 
 statics 텐서를 미리 CUDA에 할당
 
-이후 실행에서는 항상 동일 포인터 재사용
+이후 모든 실행에서 동일 포인터 재사용
 
 이게 중요한 이유:
 
-CUDA Graph capture는 포인터 주소가 고정되어야 한다
+CUDA Graph capture는 포인터 주소 고정 필수
 
-Python에서 매 step 새 텐서를 만들면 capture 불가능
+Python에서 매 step 새 텐서를 만들면 capture 불가
 
-4. Executor.run: eager 실행
-4.1 핵심 원칙
+5. Executor.run (Eager 실행)
+5.1 핵심 원칙
 
 AICFBackend 없음
 
 op_call_out 없음
 
-모든 실행은 _C.op_call 단일 API
+실행은 오직 _C.op_call 단일 API
 
-4.2 실행 흐름
+5.2 실행 흐름
 env = ex.run(
     inputs={"x": x, "t": t},
     params=params,
-    reuse_static=True
+    reuse_static=True,
 )
 
+내부 동작
 
-내부 동작:
+inputs / params → plan의 vid에 bind
 
-inputs / params를 plan의 vid에 bind
+statics → 미리 할당된 텐서 재사용
 
-statics는 이미 할당된 텐서 사용
-
-lowered ops를 순서대로 실행:
+lowered ops를 순서대로 실행
 
 _C.op_call(kind, ins_tensors, outs_tensors, attrs)
 
+특징
 
-in-place op (bias_add, adam_step)도 동일 경로
+in-place op도 동일 경로
 
-Python은 스케줄링도, 버퍼 관리도 안 함
+Python은:
 
-5. CUDA Graph Capture / Replay
-5.1 제공 API (C++)
+스케줄링 ❌
+
+메모리 관리 ❌
+
+Python의 역할 = 계획 생성 + op_call 루프
+
+6. CUDA Graph Capture / Replay
+6.1 제공 API (C++)
+
 graph_begin()
+
 graph_end()
+
 graph_launch()
+
 graph_reset()
+
 graph_stream()
 
-5.2 Capture 흐름
-
+6.2 Capture 흐름
 graph_begin()
-
-dedicated CUDA stream 생성
-
-executor.run(...)
-
-모든 _C.op_call이 capture stream에서 기록
-
+  - dedicated CUDA stream 전환
+  - executor.run(...)
+  - 모든 _C.op_call 기록
 graph_end()
-
-CUDA graph 인스턴스 확정
-
+  - CUDA graph instance 확정
 graph_launch()
-
-replay
-
+  - replay
 graph_reset()
+  - graph 해제
 
-graph 해제
+6.3 현재 상태
 
-5.3 현재 상태
-
-eager / capture trace가 완전히 동일
+eager / capture trace 완전히 동일
 
 replay n회 후에도 결과 안정
 
-capture 자체는 문제 없음
+capture 실패 시 원인은 대부분:
 
-6. 이전 Gradient Mismatch의 진짜 원인
-6.1 증상
+hidden allocation
+
+포인터 변동
+
+stream mismatch
+
+7. 이전 Gradient Mismatch의 진짜 원인
+7.1 증상
 [check] dW0 maxdiff = 0.04
 [check] d_lin0 maxdiff = 0.02
 
 
-→ 처음엔 gemm / optimizer / capture 문제로 의심됨
+처음엔 gemm / optimizer / capture 문제로 의심됨.
 
-6.2 실제 원인
+7.2 실제 원인: 검증 시점 오류
 
-검증 시점 오류
+Stage6 그래프는 기본적으로:
 
-Stage6 그래프는:
-
-forward → backward → adam_step
+forward → backward → optimizer_step
 
 
 를 한 번에 실행한다.
 
-즉:
+즉 run() 종료 시점에는:
 
-run()이 끝난 시점에는
+gradients 계산 완료
 
-gradients는 계산되었고
+weights는 이미 update됨
 
-weights는 이미 adam_step으로 업데이트됨
+반면 PyTorch reference는 보통:
 
-그런데 PyTorch reference는:
+update 이전 weights 기준 backward
 
-“업데이트 이전 weights” 기준으로 grad를 계산
-
-→ 서로 다른 W로 backward를 한 셈이 됨
+→ 서로 다른 W로 backward 수행
 → grad mismatch 발생
 
-6.3 왜 warmup=1에서는 맞았나?
+7.3 warmup=1에서 맞았던 이유
 
-AICF_WARMUP=1 모드에서는:
+AICF_WARMUP=1:
 
-step_inc → no-op
+step_inc no-op
 
-adam_step → lr=0 또는 skip
+adam_step lr=0 또는 skip
 
-weights가 안 바뀜
+→ weights 변경 없음
+→ PyTorch ref와 동일 chain
+→ diff ≈ 0
 
-그래서:
+8. 검증 전략 정리 (중요)
+8.1 Gradient correctness 검증
 
-AICF run 후에도 W 동일
-
-PyTorch ref와 동일한 chain
-
-diff ≈ 0
-
-7. 검증 전략 정리 (중요)
-7.1 Gradient correctness 검증
-
-다음 중 하나를 반드시 택해야 한다:
+아래 중 하나는 반드시 선택해야 한다.
 
 warmup=1
 
 optimizer 비활성화
 
-backward correctness만 검증
-
 weights snapshot
 
-run 전에 W clone
+run 전 W.clone()
 
-ref backward는 clone 기준
+PyTorch ref backward는 clone 기준
 
-optimizer 분리
+그래프 분리
 
 backward-only graph
 
 optimizer-only graph
 
-7.2 Training correctness 검증
+8.2 Training correctness 검증
 
-grad 비교 ❌
+Training에서는 grad 비교 ❌
 
-대신:
+대신 확인할 것:
 
-W update 방향/크기
+W update 방향 / 크기
 
-m/v 상태 변화
+optimizer state (m/v/step)
 
 loss 감소 추세
 
-replay 안정성
+replay 안정성 (state drift)
 
-8. Save / copy_saved에 대한 메모
+9. Save / copy_saved 메모
 
 현재:
 
 Save → copy_saved
 
 
-이는:
+의미:
 
 메모리 복사
 
 bandwidth 소모
 
-capture 시에도 추가 노드
+capture 노드 증가
 
-향후 개선 여지:
+향후 개선:
 
-ReLU mask를 alias로 저장
+ReLU mask alias
 
-relu_bwd가 input activation 직접 참조
+activation 직접 참조
 
-또는 bitmask 저장
+bitmask 저장
 
-9. 현재 구조의 핵심 정리
+10. 운영 / 사용 가이드
+10.1 기본 실행
+ex = PlannedExecutor(ir, lowered, plan)
+ex.run(inputs, params)
+
+10.2 CUDA Graph Capture
+_C.graph_begin()
+ex.run(inputs, params)
+_C.graph_end()
+
+for _ in range(N):
+    _C.graph_launch()
+
+10.3 Warmup 모드
+
+목적: grad correctness 검증
+
+특징: optimizer 실질 동작 없음
+
+사용 예:
+
+AICF_WARMUP=1
+
+10.4 Trace 켜기
+ex.trace_enable(True)
+ex.run(...)
+trace = ex.trace_get()
+
+11. 현재 구조의 핵심 정리
 
 Python은 스케줄러가 아니다
 
-Python은 메모리 관리자도 아니다
+Python은 메모리 관리자가 아니다
 
 Python은:
 
@@ -321,15 +404,15 @@ plan 생성
 
 _C.op_call 호출만 담당
 
-이 구조 덕분에:
+이 구조의 결과:
 
-CUDA Graph capture가 안정됨
+CUDA Graph capture 안정
 
 eager / replay 경로 동일
 
-디버깅 포인트가 명확해짐
+디버깅 포인트 명확
 
-10. 다음 진행 추천 (Roadmap)
+12. Roadmap
 
 검증 스크립트 분리
 
@@ -337,18 +420,22 @@ check_grad_warmup.py
 
 check_train_step.py
 
-Save 최적화
+Save 최적화 (copy 제거)
 
-copy 제거 or mask화
+replay stress test (1k~10k)
 
-Replay stress test
+multi-step training graph 전략 비교
 
-replay 1k ~ 10k 반복
+Appendix A. KID Trace Test
 
-state drift 체크
+examples/python/python_framework_test/v2_kid_trace_by_id_test.py
 
-Multi-step training 전략
+목적:
 
-step당 graph_launch vs
+StageB kernel selection이
 
-multi-step graph 캡처 비교
+lowered + runtime execution에 반영되는지 확인
+
+통과 조건 예:
+
+kid:sgd_step_f16_half2_v0
