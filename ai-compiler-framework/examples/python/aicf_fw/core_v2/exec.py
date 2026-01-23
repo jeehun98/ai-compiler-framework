@@ -174,6 +174,7 @@ def _choose_vid_for_tensor(
     return None
 
 
+# ✅ add gemm_epilogue
 _OPNAME_TO_KIND: Dict[str, int] = {
     "add": int(_C.OpKind.EltwiseAdd),
     "relu": int(_C.OpKind.EltwiseRelu),
@@ -194,6 +195,9 @@ _OPNAME_TO_KIND: Dict[str, int] = {
     "layernorm_bwd": int(_C.OpKind.LayerNormBwd),
     "batchnorm_fwd": int(_C.OpKind.BatchNormFwd),
     "batchnorm_bwd": int(_C.OpKind.BatchNormBwd),
+
+    # ---- NEW ----
+    "gemm_epilogue": int(_C.OpKind.GemmEpilogue),
 }
 
 
@@ -208,10 +212,44 @@ def _schema_id_ADAM() -> int:
     return int.from_bytes(b"ADAM", "little", signed=False)
 
 
+def _schema_id_GEPI() -> int:
+    # GemmEpilogue
+    return int.from_bytes(b"GEPI", "little", signed=False)
+
+
 def _pack_gemm(attrs: Dict[str, Any]) -> bytes:
     ta = 1 if bool(attrs.get("transA", False)) else 0
     tb = 1 if bool(attrs.get("transB", False)) else 0
     return struct.pack("<ii", int(ta), int(tb))
+
+
+def _pack_gemm_epilogue(attrs: Dict[str, Any]) -> bytes:
+    """
+    Layout:
+      int32 transA
+      int32 transB
+      int32 epilogue_kind
+
+    epilogue_kind:
+      0 = bias_relu (current)
+      1 = bias_only (reserved)
+      2 = relu_only (reserved)
+      ...
+    """
+    ta = 1 if bool(attrs.get("transA", False)) else 0
+    tb = 1 if bool(attrs.get("transB", False)) else 0
+
+    epi = str(attrs.get("epilogue", "bias_relu")).strip().lower()
+    if epi in ("bias_relu", "bias+relu", "biasrelu"):
+        ek = 0
+    elif epi in ("bias", "bias_only", "biasonly"):
+        ek = 1
+    elif epi in ("relu", "relu_only", "reluonly"):
+        ek = 2
+    else:
+        ek = 0  # safe default
+
+    return struct.pack("<iii", int(ta), int(tb), int(ek))
 
 
 def _pack_adam(attrs: Dict[str, Any]) -> bytes:
@@ -228,6 +266,10 @@ def _pack_attrs(op: str, attrs: Dict[str, Any]) -> Tuple[int, bytes]:
 
     if op == "gemm":
         return 0, _pack_gemm(attrs)
+
+    # ✅ NEW
+    if op == "gemm_epilogue":
+        return _schema_id_GEPI(), _pack_gemm_epilogue(attrs)
 
     if op == "adam_step":
         return _schema_id_ADAM(), _pack_adam(attrs)

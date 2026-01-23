@@ -357,47 +357,62 @@ def _last_dim(ir: IRGraph, vid: int) -> int:
         return 1
     return int(shape[-1])
 
+def _numel(ir: IRGraph, vid: int) -> int:
+    v = ir.values[int(vid)]
+    shape = tuple(getattr(v, "shape", ()))
+    if not shape:
+        return 1
+    n = 1
+    for d in shape:
+        n *= int(d)
+    return int(n)
 
-def _pick_vec2_upgrade(op: str, base_kid: Optional[str], in_dtype: str, out_dtype: str, lastdim: int) -> Optional[str]:
+
+def _pick_vec2_upgrade(
+    op: str,
+    base_kid: Optional[str],
+    in_dtype: str,
+    out_dtype: str,
+    lastdim: int,
+    *,
+    in_numel: int,
+    out_numel: int,
+) -> Optional[str]:
     """
     Stage B: vec2/half2 같은 "형상 기반 결정"을 planner에서 박제한다.
 
-    규칙(최소):
-      - f16이고 lastdim % 2 == 0 이면 vec2/half2로 업그레이드
-      - 해당 op에 vec2/half2 variant가 있을 때만
+    - add/bias_add/relu/relu_bwd: lastdim 짝수면 vec2
+    - sgd_step: numel 짝수면 half2  (lastdim 기준 말고 flat 기준)
     """
-
     op = str(op).strip().lower()
     f16 = _is_f16(in_dtype) or _is_f16(out_dtype)
-    even = (lastdim % 2 == 0)
 
-    if not (f16 and even):
+    # f16 아니면 업그레이드 없음
+    if not f16:
         return base_kid
 
-    # add/bias_add/relu/relu_bwd: vec2
-    if op == "add":
+    # add/bias_add/relu/relu_bwd 는 lastdim 기반 vec2
+    even_ld = (int(lastdim) % 2 == 0)
+    if op == "add" and even_ld:
         return "add_f16_vec2_v0"
-    if op == "bias_add":
+    if op == "bias_add" and even_ld:
         return "bias_add_f16_vec2_v0"
-    if op == "relu":
+    if op == "relu" and even_ld:
         return "relu_f16_vec2_v0"
-    if op == "relu_bwd":
+    if op == "relu_bwd" and even_ld:
         return "relu_bwd_f16_vec2_v0"
 
-    # sgd_step: half2
+    # ✅ sgd_step은 flat numel 기반 half2
     if op == "sgd_step":
-        return "sgd_step_f16_half2_v0"
+        even_numel = (int(out_numel) % 2 == 0)  # out_vid == param vid라 out 기준이 자연스러움
+        if even_numel:
+            return "sgd_step_f16_half2_v0"
+        return base_kid
 
-    # 나머지는 그대로
     return base_kid
 
 
 def apply_kernel_decisions_stageB(ir: IRGraph, lowered: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    lowered 리스트를 받아 kernel_id를 "planner 관점"으로 강화한다.
-    - Stage A에서 이미 kernel_id가 있더라도, vec2/half2 조건 만족하면 업그레이드.
-    - 결정 결과는 lowered item에 kernel_id로 남는다(컴파일 산출물).
-    """
     out: List[Dict[str, Any]] = []
 
     for it in lowered:
@@ -406,15 +421,20 @@ def apply_kernel_decisions_stageB(ir: IRGraph, lowered: List[Dict[str, Any]]) ->
         in_vids = [int(x) for x in it.get("inputs", [])]
         out_vids = [int(y) for y in it.get("outputs", [])]
 
-        # dtype/shape 기준값: (관례적으로) 첫 input / 첫 output 기준
         in_dtype = _dtype_str(ir.values[in_vids[0]]) if in_vids else ""
         out_dtype = _dtype_str(ir.values[out_vids[0]]) if out_vids else ""
 
-        # vec2/half2 판단 기준: "출력 lastdim" 우선, 없으면 입력 lastdim
         ld = _last_dim(ir, out_vids[0]) if out_vids else (_last_dim(ir, in_vids[0]) if in_vids else 1)
 
+        in_numel = _numel(ir, in_vids[0]) if in_vids else 1
+        out_numel = _numel(ir, out_vids[0]) if out_vids else 1
+
         base_kid = it.get("kernel_id", None)
-        new_kid = _pick_vec2_upgrade(op, base_kid, in_dtype, out_dtype, ld)
+
+        new_kid = _pick_vec2_upgrade(
+            op, base_kid, in_dtype, out_dtype, ld,
+            in_numel=in_numel, out_numel=out_numel,
+        )
 
         if new_kid is not None:
             it["kernel_id"] = str(new_kid)

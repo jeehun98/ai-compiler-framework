@@ -1,0 +1,27 @@
+=== BindingPlan(v2_kid_trace_by_id_test) ===
+name: v2_kid_trace_by_id_test:binding_plan
+inputs: 2, params: 4, statics: 12
+
+[inputs]
+  v000  x            role=input  shape=(64, 8) dtype=torch.float16 device=cuda:0
+  v009  t            role=input  shape=(64, 8) dtype=torch.float16 device=cuda:0
+
+[params]
+  v001  0.W          role=param  shape=(8, 8) dtype=torch.float16 device=cuda:0
+  v002  0.b          role=param  shape=(8,) dtype=torch.float16 device=cuda:0
+  v006  2.W          role=param  shape=(8, 8) dtype=torch.float16 device=cuda:0
+  v007  2.b          role=param  shape=(8,) dtype=torch.float16 device=cuda:0
+
+[statics]
+  v003  lin0_out     role=static shape=(64, 8) dtype=torch.float16 device=cuda:0
+  v004  relu0_out    role=static shape=(64, 8) dtype=torch.float16 device=cuda:0
+  v005  relu0_saved  role=static shape=(64, 8) dtype=torch.float16 device=cuda:0
+  v008  lin1_out     role=static shape=(64, 8) dtype=torch.float16 device=cuda:0
+  v010  dY           role=static shape=(64, 8) dtype=torch.float16 device=cuda:0
+  v011  d_relu0_out  role=static shape=(64, 8) dtype=torch.float16 device=cuda:0
+  v012  d_2.W        role=static shape=(8, 8) dtype=torch.float16 device=cuda:0
+  v013  d_2.b        role=static shape=(8,) dtype=torch.float16 device=cuda:0
+  v014  d_lin0_out   role=static shape=(64, 8) dtype=torch.float16 device=cuda:0
+  v015  d_x          role=static shape=(64, 8) dtype=torch.float16 device=cuda:0
+  v016  d_0.W        role=static shape=(8, 8) dtype=torch.float16 device=cuda:0
+  v017  d_0.b        role=static shape=(8,) dtype=torch.float16 device=cuda:0
