@@ -11,6 +11,7 @@ EXAMPLES_PY = THIS.parents[1]  # .../examples/python
 if str(EXAMPLES_PY) not in sys.path:
     sys.path.insert(0, str(EXAMPLES_PY))
 
+
 from aicf_fw.core_v2 import trace_ir, dump_ir, dump_lowered, dump_plan
 from aicf_fw.core_v2.ops import (
     sym_tensor,
@@ -25,6 +26,10 @@ from aicf_fw.core_v2.ops import (
 from aicf_fw.core_v2.lower import lower_to_backend_ops
 from aicf_fw.core_v2.plan import build_binding_plan, apply_kernel_decisions_stageB
 from aicf_fw.core_v2.exec import PlannedExecutor, ExecOptions
+from aicf_fw.core_v2.rewrites.stageC_fuse_epilogue import stageC_fuse_gemm_epilogue
+
+# NEW: OpAttrs dump
+from aicf_fw.core_v2.op_attrs.registry import build_op_attr
 
 
 def tf32_off():
@@ -140,7 +145,7 @@ def _fill_missing_kernel_ids(ir, lowered: list[dict]) -> None:
         if it.get("kernel_id", None) is not None:
             continue
 
-        op = str(it.get("op", "")).strip().lower()
+        op = str(it.get("op", it.get("kind", ""))).strip().lower()
         in_vids = [int(x) for x in it.get("inputs", [])]
         out_vids = [int(y) for y in it.get("outputs", [])]
         attrs = dict(it.get("attrs", {}) or {})
@@ -155,6 +160,62 @@ def _fill_missing_kernel_ids(ir, lowered: list[dict]) -> None:
                 f"in_dtypes={in_dtypes} out_dtypes={out_dtypes}"
             )
         it["kernel_id"] = kid
+
+
+# ----------------------------
+# NEW: dump op attrs
+# ----------------------------
+def dump_op_attrs(ir, lowered: list[dict], name: str = "") -> str:
+    """
+    loweredops -> OpAttr 변환 결과를 사람이 보기 쉬운 텍스트로 덤프.
+    목적: 중간 산출물/디버깅 (아직 compose/selection 없음)
+    """
+    lines: list[str] = []
+    title = f"=== OpAttrs({name}) ===" if name else "=== OpAttrs ==="
+    lines.append(title)
+    lines.append(f"ops: {len(lowered)}")
+    lines.append("")
+
+    # TensorDesc.from_any()가 torch.Tensor를 처리하므로 ir.values 그대로 전달
+    value_descs = ir.values
+
+    for i, lop in enumerate(lowered):
+        # build_op_attr가 dict의 kind/name/op_kind를 보도록 설계됐을 수 있으니
+        # lowered dict가 {"op": "..."} 형태면 kind를 보강
+        if isinstance(lop, dict) and ("kind" not in lop) and ("op" in lop):
+            lop_view = dict(lop)
+            lop_view["kind"] = lop_view.get("op")
+        else:
+            lop_view = lop
+
+        oa = build_op_attr(lop_view, value_descs, op_id=i)
+
+        kid = (
+            oa.kid
+            or (lop.get("kernel_id") if isinstance(lop, dict) else None)
+            or (lop.get("kid") if isinstance(lop, dict) else None)
+        )
+
+        lines.append(
+            f"  #{i:03d} {oa.op_kind:<10} sig={oa.sig or '-':<10} "
+            f"in={oa.inputs} out={oa.outputs} kid={kid}"
+        )
+
+        if oa.params:
+            lines.append(f"       params: {oa.params}")
+        if oa.layout:
+            lines.append(f"       layout: {oa.layout}")
+
+        in0s = oa.shapes.get("in0", None)
+        out0s = oa.shapes.get("out0", None)
+        in0d = oa.dtypes.get("in0", None)
+        out0d = oa.dtypes.get("out0", None)
+        if in0s is not None or out0s is not None:
+            lines.append(f"       io0: in0={in0s}/{in0d}  out0={out0s}/{out0d}")
+
+        lines.append("")
+
+    return "\n".join(lines)
 
 
 def main():
@@ -221,12 +282,20 @@ def main():
     lowered = lower_to_backend_ops(ir)                    # Stage A
     lowered = apply_kernel_decisions_stageB(ir, lowered)  # Stage B (vec2/half2 + (optional) rewrite)
 
+    lowered = stageC_fuse_gemm_epilogue(ir, lowered)
+
+
     # StageB가 업그레이드만 하고 기본 kid를 안 채우는 케이스 대비
     _fill_missing_kernel_ids(ir, lowered)
 
     lowered_txt = dump_lowered(lowered, name="v2_kid_trace_by_id_test")
     print(lowered_txt)
     dump_text(art_root / "30_lowered.txt", lowered_txt)
+
+    # NEW: OpAttrs dump (중간 산출물)
+    op_attrs_txt = dump_op_attrs(ir, lowered, name="v2_kid_trace_by_id_test")
+    print(op_attrs_txt)
+    dump_text(art_root / "31_op_attrs.txt", op_attrs_txt)
 
     plan = build_binding_plan(ir)
     plan_txt = dump_plan(plan, name="v2_kid_trace_by_id_test")

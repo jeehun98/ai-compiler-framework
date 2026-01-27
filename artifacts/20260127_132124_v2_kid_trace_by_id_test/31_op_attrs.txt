@@ -1,0 +1,79 @@
+=== OpAttrs(v2_kid_trace_by_id_test) ===
+ops: 18
+
+  #000 gemm       sig=GEMM       in=[0, 1] out=[3] kid=gemm_f16_tc_wmma_out_f16_v0
+       params: {'transB': True, 'mnk': (64, 8, 8)}
+       layout: {'transA': False, 'transB': True}
+       io0: in0=(64, 8)/torch.float16  out0=(64, 8)/torch.float16
+
+  #001 bias_add   sig=BIAS_ADD   in=[3, 2] out=[3] kid=bias_add_f16_vec2_v0
+       params: {'bias_shape': (8,)}
+       io0: in0=(64, 8)/torch.float16  out0=(64, 8)/torch.float16
+
+  #002 relu       sig=ACT        in=[3] out=[4] kid=relu_f16_vec2_v0
+       params: {'act': 'relu', 'inplace': False}
+       io0: in0=(64, 8)/torch.float16  out0=(64, 8)/torch.float16
+
+  #003 copy_saved sig=COPY       in=[4] out=[5] kid=copy_f16_v0
+       io0: in0=(64, 8)/torch.float16  out0=(64, 8)/torch.float16
+
+  #004 gemm       sig=GEMM       in=[4, 6] out=[8] kid=gemm_f16_tc_wmma_out_f16_v0
+       params: {'transB': True, 'mnk': (64, 8, 8)}
+       layout: {'transA': False, 'transB': True}
+       io0: in0=(64, 8)/torch.float16  out0=(64, 8)/torch.float16
+
+  #005 bias_add   sig=BIAS_ADD   in=[8, 7] out=[8] kid=bias_add_f16_vec2_v0
+       params: {'bias_shape': (8,)}
+       io0: in0=(64, 8)/torch.float16  out0=(64, 8)/torch.float16
+
+  #006 mse_grad   sig=MSE_GRAD   in=[8, 9] out=[10] kid=mse_grad_f16_v0
+       params: {'out_matches_in0': True}
+       io0: in0=(64, 8)/torch.float16  out0=(64, 8)/torch.float16
+
+  #007 gemm       sig=GEMM       in=[10, 6] out=[11] kid=gemm_f16_tc_wmma_out_f16_v0
+       params: {'transA': False, 'transB': False, 'mnk': (64, 8, 8)}
+       layout: {'transA': False, 'transB': False}
+       io0: in0=(64, 8)/torch.float16  out0=(64, 8)/torch.float16
+
+  #008 gemm       sig=GEMM       in=[10, 4] out=[12] kid=gemm_f16_tc_wmma_out_f16_v0
+       params: {'transA': True, 'transB': False, 'mnk': (64, 8, 8)}
+       layout: {'transA': True, 'transB': False}
+       io0: in0=(64, 8)/torch.float16  out0=(8, 8)/torch.float16
+
+  #009 reduce_sum sig=REDUCE_SUM in=[10] out=[13] kid=reduce_sum_keep_lastdim_f16_v0
+       params: {'axis': 0, 'keepdim': False, 'expected_out_shape': (8,)}
+       io0: in0=(64, 8)/torch.float16  out0=(8,)/torch.float16
+
+  #010 relu_bwd   sig=ACT_BWD    in=[11, 5] out=[14] kid=relu_bwd_f16_vec2_v0
+       params: {'act': 'relu', 'needs_saved': True}
+       io0: in0=(64, 8)/torch.float16  out0=(64, 8)/torch.float16
+
+  #011 gemm       sig=GEMM       in=[14, 1] out=[15] kid=gemm_f16_tc_wmma_out_f16_v0
+       params: {'transA': False, 'transB': False, 'mnk': (64, 8, 8)}
+       layout: {'transA': False, 'transB': False}
+       io0: in0=(64, 8)/torch.float16  out0=(64, 8)/torch.float16
+
+  #012 gemm       sig=GEMM       in=[14, 0] out=[16] kid=gemm_f16_tc_wmma_out_f16_v0
+       params: {'transA': True, 'transB': False, 'mnk': (64, 8, 8)}
+       layout: {'transA': True, 'transB': False}
+       io0: in0=(64, 8)/torch.float16  out0=(8, 8)/torch.float16
+
+  #013 reduce_sum sig=REDUCE_SUM in=[14] out=[17] kid=reduce_sum_keep_lastdim_f16_v0
+       params: {'axis': 0, 'keepdim': False, 'expected_out_shape': (8,)}
+       io0: in0=(64, 8)/torch.float16  out0=(8,)/torch.float16
+
+  #014 sgd_step   sig=OPTIM_STEP in=[1, 16] out=[1] kid=sgd_step_f16_half2_v0
+       params: {'lr': 0.01, 'optim': 'sgd', 'inplace': True}
+       io0: in0=(8, 8)/torch.float16  out0=(8, 8)/torch.float16
+
+  #015 sgd_step   sig=OPTIM_STEP in=[2, 17] out=[2] kid=sgd_step_f16_half2_v0
+       params: {'lr': 0.01, 'optim': 'sgd', 'inplace': True}
+       io0: in0=(8,)/torch.float16  out0=(8,)/torch.float16
+
+  #016 sgd_step   sig=OPTIM_STEP in=[6, 12] out=[6] kid=sgd_step_f16_half2_v0
+       params: {'lr': 0.01, 'optim': 'sgd', 'inplace': True}
+       io0: in0=(8, 8)/torch.float16  out0=(8, 8)/torch.float16
+
+  #017 sgd_step   sig=OPTIM_STEP in=[7, 13] out=[7] kid=sgd_step_f16_half2_v0
+       params: {'lr': 0.01, 'optim': 'sgd', 'inplace': True}
+       io0: in0=(8,)/torch.float16  out0=(8,)/torch.float16

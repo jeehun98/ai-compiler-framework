@@ -36,3 +36,26 @@ def build_op_attr(op: Any, value_descs: ValueDescs, op_id: Optional[int] = None)
     v = LoweredOpView.from_any(op, op_id=op_id)
     b = _BUILDERS.get(v.kind.lower(), _DEFAULT)
     return b.build(op, value_descs, op_id=op_id)
+
+# examples/python/aicf_fw/core_v2/op_attrs/registry.py (추가 import)
+from .relu import ReluAttrBuilder
+from .copy import CopyAttrBuilder, CopySavedAttrBuilder
+from .reduce_sum import ReduceSumAttrBuilder
+from .mse_grad import MseGradAttrBuilder
+from .relu_bwd import ReluBwdAttrBuilder
+from .sgd_step import SgdStepAttrBuilder
+from .gemm_epilogue import GemmEpilogueAttrBuilder
+
+# 그리고 _BUILDERS에 추가
+_BUILDERS = {
+    "gemm": GemmAttrBuilder(),
+    "gemm_epilogue": GemmEpilogueAttrBuilder(),
+    "bias_add": BiasAddAttrBuilder(),
+    "relu": ReluAttrBuilder(),
+    "copy": CopyAttrBuilder(),
+    "copy_saved": CopySavedAttrBuilder(),
+    "reduce_sum": ReduceSumAttrBuilder(),
+    "mse_grad": MseGradAttrBuilder(),
+    "relu_bwd": ReluBwdAttrBuilder(),
+    "sgd_step": SgdStepAttrBuilder(),
+}

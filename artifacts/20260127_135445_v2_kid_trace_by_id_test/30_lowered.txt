@@ -1,0 +1,19 @@
+=== LoweredOps(v2_kid_trace_by_id_test) ===
+ops: 16
+
+  #000 gemm_epilogue (0, 1, 2) -> (4)  {epilogue_act=relu, epilogue_bias=True, transB=True}  kid=gemm_bias_relu_f16_tc_wmma_out_f16_v0
+  #001 copy_saved (4) -> (5)  kid=copy_f16_v0
+  #002 gemm       (4, 6) -> (8)  {transB=True}  kid=gemm_f16_tc_wmma_out_f16_v0
+  #003 bias_add   (8, 7) -> (8)  kid=bias_add_f16_vec2_v0
+  #004 mse_grad   (8, 9) -> (10)  kid=mse_grad_f16_v0
+  #005 gemm       (10, 6) -> (11)  {transA=False, transB=False}  kid=gemm_f16_tc_wmma_out_f16_v0
+  #006 gemm       (10, 4) -> (12)  {transA=True, transB=False}  kid=gemm_f16_tc_wmma_out_f16_v0
+  #007 reduce_sum (10) -> (13)  {axis=0, keepdim=False}  kid=reduce_sum_keep_lastdim_f16_v0
+  #008 relu_bwd   (11, 5) -> (14)  kid=relu_bwd_f16_vec2_v0
+  #009 gemm       (14, 1) -> (15)  {transA=False, transB=False}  kid=gemm_f16_tc_wmma_out_f16_v0
+  #010 gemm       (14, 0) -> (16)  {transA=True, transB=False}  kid=gemm_f16_tc_wmma_out_f16_v0
+  #011 reduce_sum (14) -> (17)  {axis=0, keepdim=False}  kid=reduce_sum_keep_lastdim_f16_v0
+  #012 sgd_step   (1, 16) -> (1)  {lr=0.01}  kid=sgd_step_f16_half2_v0
+  #013 sgd_step   (2, 17) -> (2)  {lr=0.01}  kid=sgd_step_f16_half2_v0
+  #014 sgd_step   (6, 12) -> (6)  {lr=0.01}  kid=sgd_step_f16_half2_v0
+  #015 sgd_step   (7, 13) -> (7)  {lr=0.01}  kid=sgd_step_f16_half2_v0

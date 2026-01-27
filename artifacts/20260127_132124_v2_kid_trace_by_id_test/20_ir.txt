@@ -1,0 +1,36 @@
+=== IRGraph: v2_kid_trace_by_id_test ===
+values: 18, nodes: 12
+
+[values]
+  v000  x            shape=(64, 8) dtype=torch.float16 device=cuda:0
+  v001  0.W          shape=(8, 8) dtype=torch.float16 device=cuda:0
+  v002  0.b          shape=(8,) dtype=torch.float16 device=cuda:0
+  v003  lin0_out     shape=(64, 8) dtype=torch.float16 device=cuda:0
+  v004  relu0_out    shape=(64, 8) dtype=torch.float16 device=cuda:0
+  v005  relu0_saved  shape=(64, 8) dtype=torch.float16 device=cuda:0
+  v006  2.W          shape=(8, 8) dtype=torch.float16 device=cuda:0
+  v007  2.b          shape=(8,) dtype=torch.float16 device=cuda:0
+  v008  lin1_out     shape=(64, 8) dtype=torch.float16 device=cuda:0
+  v009  t            shape=(64, 8) dtype=torch.float16 device=cuda:0
+  v010  dY           shape=(64, 8) dtype=torch.float16 device=cuda:0
+  v011  d_relu0_out  shape=(64, 8) dtype=torch.float16 device=cuda:0
+  v012  d_2.W        shape=(8, 8) dtype=torch.float16 device=cuda:0
+  v013  d_2.b        shape=(8,) dtype=torch.float16 device=cuda:0
+  v014  d_lin0_out   shape=(64, 8) dtype=torch.float16 device=cuda:0
+  v015  d_x          shape=(64, 8) dtype=torch.float16 device=cuda:0
+  v016  d_0.W        shape=(8, 8) dtype=torch.float16 device=cuda:0
+  v017  d_0.b        shape=(8,) dtype=torch.float16 device=cuda:0
+
+[nodes]
+  #000 Linear     (v000, v001, v002) -> (v003)  {bias=True, layout=y = x @ W^T + b}
+  #001 ReLU       (v003) -> (v004)
+  #002 Save       (v004) -> (v005)
+  #003 Linear     (v004, v006, v007) -> (v008)  {bias=True, layout=y = x @ W^T + b}
+  #004 MseGrad    (v008, v009) -> (v010)
+  #005 LinearBwd  (v004, v006, v010) -> (v011, v012, v013)  {bias=True, layout=y = x @ W^T + b}
+  #006 ReluBwd    (v011, v005) -> (v014)
+  #007 LinearBwd  (v000, v001, v014) -> (v015, v016, v017)  {bias=True, layout=y = x @ W^T + b}
+  #008 SgdStep    (v001, v016) -> (v001)  {lr=0.01}
+  #009 SgdStep    (v002, v017) -> (v002)  {lr=0.01}
+  #010 SgdStep    (v006, v012) -> (v006)  {lr=0.01}
+  #011 SgdStep    (v007, v013) -> (v007)  {lr=0.01}
