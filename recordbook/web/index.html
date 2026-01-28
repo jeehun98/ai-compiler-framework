@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>AICF Recordbook</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">⬛</span>
+      <div>
+        <div class="title">AICF Recordbook</div>
+        <div class="subtitle">Scratch-style graph builder (MVP)</div>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <button id="btnNew" class="btn">New</button>
+      <button id="btnSave" class="btn">Save</button>
+      <button id="btnLoad" class="btn">Load</button>
+      <button id="btnCompile" class="btn primary">Compile</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- Left -->
+    <section class="pane left">
+      <h2>Blocks</h2>
+      <div id="palette" class="palette"></div>
+
+      <h2 style="margin-top:16px;">Run History</h2>
+      <div id="history" class="history"></div>
+    </section>
+
+    <!-- Middle -->
+    <section class="pane middle">
+      <div class="workspace-head">
+        <h2>Workspace</h2>
+        <div class="hint">블럭을 추가하고 드래그로 순서를 바꿔. 블럭 클릭하면 오른쪽에서 파라미터 수정.</div>
+      </div>
+
+      <div id="workspace" class="workspace" aria-label="workspace"></div>
+
+      <div class="workspace-foot">
+        <div class="mini">
+          <div class="mini-title">Pipeline</div>
+          <div id="pipelinePreview" class="mini-body">Empty</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Right -->
+    <section class="pane right">
+      <h2>Inspector</h2>
+      <div id="inspector" class="inspector empty">
+        블럭을 선택해.
+      </div>
+
+      <h2 style="margin-top:16px;">Output</h2>
+      <div class="tabs">
+        <button class="tab active" data-tab="summary">Summary</button>
+        <button class="tab" data-tab="lowered">LoweredOps</button>
+        <button class="tab" data-tab="trace">Trace</button>
+      </div>
+
+      <div id="output" class="output">
+        <div class="panel" data-panel="summary"></div>
+        <div class="panel hidden" data-panel="lowered"></div>
+        <div class="panel hidden" data-panel="trace"></div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>Local MVP • No JSON schema yet • Everything saved in browser localStorage</span>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

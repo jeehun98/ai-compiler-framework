@@ -16,7 +16,7 @@ from .plan import BindingPlan, allocate_static_env
 
 
 def _bootstrap_aicf_cuda():
-    repo_root = Path(__file__).resolve().parents[4]
+    repo_root = Path(__file__).resolve().parents[3]
     pymod_dir = repo_root / "build" / "python"
     pkg_dir = pymod_dir / "aicf_cuda"
 
