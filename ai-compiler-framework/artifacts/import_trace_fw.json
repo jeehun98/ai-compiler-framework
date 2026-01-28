@@ -1,0 +1,23 @@
+{
+  "aicf_fw.core_v2": "examples\\python\\aicf_fw\\core_v2\\__init__.py",
+  "aicf_fw.core_v2.compile": "examples\\python\\aicf_fw\\core_v2\\compile.py",
+  "aicf_fw.core_v2.exec": "examples\\python\\aicf_fw\\core_v2\\exec.py",
+  "aicf_fw.core_v2.ir": "examples\\python\\aicf_fw\\core_v2\\ir.py",
+  "aicf_fw.core_v2.lower": "examples\\python\\aicf_fw\\core_v2\\lower.py",
+  "aicf_fw.core_v2.ops": "examples\\python\\aicf_fw\\core_v2\\ops.py",
+  "aicf_fw.core_v2.plan": "examples\\python\\aicf_fw\\core_v2\\plan.py",
+  "aicf_fw.core_v2.printer": "examples\\python\\aicf_fw\\core_v2\\printer.py",
+  "aicf_fw.core_v2.trace": "examples\\python\\aicf_fw\\core_v2\\trace.py",
+  "aicf_fw.fw": "examples\\python\\aicf_fw\\fw\\__init__.py",
+  "aicf_fw.fw.compile": "examples\\python\\aicf_fw\\fw\\compile.py",
+  "aicf_fw.fw.module": "examples\\python\\aicf_fw\\fw\\module.py",
+  "aicf_fw.fw.naming": "examples\\python\\aicf_fw\\fw\\naming.py",
+  "aicf_fw.fw.train_step": "examples\\python\\aicf_fw\\fw\\train_step.py",
+  "aicf_fw.nn": "examples\\python\\aicf_fw\\nn\\__init__.py",
+  "aicf_fw.nn.linear": "examples\\python\\aicf_fw\\nn\\linear.py",
+  "aicf_fw.nn.relu": "examples\\python\\aicf_fw\\nn\\relu.py",
+  "aicf_fw.nn.sequential": "examples\\python\\aicf_fw\\nn\\sequential.py",
+  "aicf_fw.optim": "examples\\python\\aicf_fw\\optim\\__init__.py",
+  "aicf_fw.optim.adam": "examples\\python\\aicf_fw\\optim\\adam.py",
+  "aicf_fw.optim.base": "examples\\python\\aicf_fw\\optim\\base.py"
+}
