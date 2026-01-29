@@ -1,0 +1,91 @@
+/* Kernel Lab layout helpers */
+.section-head{ display:flex; flex-direction:column; gap:6px; }
+.row{ margin:10px 0; }
+
+.search{
+  width:100%;
+  padding:8px 10px;
+  border-radius:10px;
+  border:1px solid rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.03);
+  color: inherit;
+}
+
+.catalog{
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+}
+
+.card{
+  padding:10px;
+  border:1px solid rgba(255,255,255,0.10);
+  border-radius:12px;
+  background: rgba(255,255,255,0.03);
+  cursor:pointer;
+}
+.card.active{ outline:2px solid rgba(255,255,255,0.22); }
+.card .top{ display:flex; justify-content:space-between; gap:8px; }
+.card .title{ font-weight:800; font-size:12px; }
+.card .badge{ opacity:0.75; font-size:11px; }
+.card .sub{ opacity:0.7; font-size:11px; margin-top:6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+
+.blocks{
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+  padding:12px;
+  overflow:auto;
+  height: calc(100% - 0px);
+}
+
+.block{
+  border:1px solid rgba(255,255,255,0.12);
+  border-radius:14px;
+  padding:12px;
+  background: rgba(255,255,255,0.04);
+  cursor:pointer;
+}
+.block.active{ outline:2px solid rgba(255,255,255,0.28); }
+.block .h{ font-weight:900; margin-bottom:6px; }
+.block .sub{ opacity:0.75; font-size:12px; }
+
+.muted{ opacity:0.7; font-size:12px; }
+
+.insp-row{ display:flex; flex-direction:column; gap:6px; margin:10px 0; }
+.insp-label{ font-size:12px; opacity:0.8; }
+.insp-input{
+  padding:8px 10px; border-radius:10px;
+  border:1px solid rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.03);
+  color: inherit;
+}
+.insp-ta{
+  min-height:90px; resize:vertical;
+  padding:8px 10px; border-radius:10px;
+  border:1px solid rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.03);
+  color: inherit;
+}
+.box{
+  border:1px dashed rgba(255,255,255,0.16);
+  border-radius:12px;
+  padding:10px;
+  margin:12px 0;
+}
+.box .t{ font-weight:900; font-size:12px; margin-bottom:8px; }
+
+.btn.danger{ border-color: rgba(255,80,80,0.45); }
+.btn.small{ padding:6px 10px; font-size:12px; }
+
+.kv{
+  display:flex; gap:8px; flex-wrap:wrap;
+  margin-top:6px;
+}
+.kv span{
+  border:1px solid rgba(255,255,255,0.12);
+  border-radius:999px;
+  padding:4px 8px;
+  font-size:11px;
+  opacity:0.85;
+}
