@@ -10,15 +10,15 @@ const els = {
   kmeta: document.getElementById("kmeta"),
 
   btnNewKernel: document.getElementById("btnNewKernel"),
-  btnExport: document.getElementById("btnExport"),
-  btnImport: document.getElementById("btnImport"),
+  btnExportKernel: document.getElementById("btnExportKernel"),
+  btnImportKernel: document.getElementById("btnImportKernel"),
   btnReset: document.getElementById("btnReset"),
-  fileImport: document.getElementById("fileImport"),
+  fileImportKernel: document.getElementById("fileImportKernel"),
 };
 
 let lab = loadLab();
 
-function rerender(){
+function rerender() {
   renderCatalog({
     catalogEl: els.catalog,
     qEl: els.q,
@@ -38,9 +38,9 @@ function rerender(){
   saveLab(lab);
 }
 
-function boot(){
-  // 첫 실행: bias_add 템플릿 하나 심어두면 시작이 편함
-  if(Object.keys(lab.kernels).length === 0){
+function boot() {
+  // 첫 실행 시 기본 커널 하나
+  if (Object.keys(lab.kernels).length === 0) {
     seedBiasAdd(lab);
     saveLab(lab);
   }
@@ -48,10 +48,10 @@ function boot(){
   wireHeaderButtons({
     lab,
     btnNewKernel: els.btnNewKernel,
+    btnExportKernel: els.btnExportKernel,
+    btnImportKernel: els.btnImportKernel,
     btnReset: els.btnReset,
-    btnExport: els.btnExport,
-    btnImport: els.btnImport,
-    fileImport: els.fileImport,
+    fileImportKernel: els.fileImportKernel,
     onChange: rerender,
   });
 
