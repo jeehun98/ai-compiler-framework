@@ -1,50 +1,28 @@
-# aicf_fw/nn/linear.py
+# aicf_v2/nn/linear.py
 from __future__ import annotations
 
-import torch
-
-from aicf_fw.fw.module import Module
-from aicf_fw.fw.emit_ctx import EmitCtx
+from aicf_v2.fw.module import Module
+from aicf_v2.fw.emit_ctx import EmitCtx
 
 
 class Linear(Module):
-    def __init__(
-        self,
-        in_features: int,
-        out_features: int,
-        bias: bool = True,
-        device: str | torch.device | None = None,
-        dtype: torch.dtype | None = None,
-    ):
+    def __init__(self, in_features: int, out_features: int, bias: bool = True):
         super().__init__()
         self.in_features = int(in_features)
         self.out_features = int(out_features)
         self.bias = bool(bias)
 
-        dev = torch.device(device) if isinstance(device, str) else (device or torch.device("cpu"))
-        dt = dtype or torch.float32
-
-        # params stored in fw.Module; names become "<prefix>.W" / "<prefix>.b"
-        W = torch.randn(self.out_features, self.in_features, device=dev, dtype=dt)
-        self.register_parameter("W", W)
-        if self.bias:
-            b = torch.randn(self.out_features, device=dev, dtype=dt)
-            self.register_parameter("b", b)
-
     def emit(self, ctx: EmitCtx, x_vid: int) -> int:
-        pfx = self._prefix
+        pfx = self._prefix or "linear"
 
-        # param vids (shape required)
         W_vid = ctx.param_vid(f"{pfx}.W", shape=(self.out_features, self.in_features))
 
-        # output (B, out_features) — make it static for capture/replay stability
         y_vid = ctx.new_value(
             name=f"{pfx}.out",
             shape=(ctx.B, self.out_features),
             role="static",
         )
 
-        # y = x @ W^T
         ctx.emit_op(
             "gemm",
             inputs=[x_vid, W_vid],
@@ -54,7 +32,6 @@ class Linear(Module):
             transB=True,
         )
 
-        # y += b (inplace)
         if self.bias:
             b_vid = ctx.param_vid(f"{pfx}.b", shape=(self.out_features,))
             ctx.emit_op(
