@@ -1,0 +1,47 @@
+/* workspace layers */
+.workspace{
+  position: relative;
+  overflow: auto;
+}
+
+.wires{
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* ports */
+.port{
+  position:absolute;
+  top:50%;
+  width:12px;
+  height:12px;
+  border-radius:999px;
+  transform: translateY(-50%);
+  border:1px solid #2a3443;
+  background: rgba(90,169,255,0.25);
+  box-shadow: 0 0 0 2px rgba(10,12,16,0.65);
+}
+
+.port.in{ left:-6px; }
+.port.out{ right:-6px; }
+
+.node.selected .port{
+  border-color: rgba(90,169,255,0.95);
+  background: rgba(90,169,255,0.55);
+}
+
+/* wire style */
+.wire{
+  fill: none;
+  stroke: rgba(90,169,255,0.55);
+  stroke-width: 2.2;
+}
+
+.wire.dim{
+  stroke: rgba(90,169,255,0.25);
+  stroke-width: 2;
+}

@@ -1,0 +1,27 @@
+.tabs{display:flex; gap:8px; margin-top:10px}
+.tab{
+  border:1px solid var(--line);
+  background:rgba(15,19,24,0.9);
+  color:var(--mut);
+  padding:8px 10px;
+  border-radius:10px;
+  cursor:pointer;
+}
+.tab.active{border-color:var(--acc); color:var(--txt)}
+
+.output{
+  margin-top:10px;
+  border:1px solid var(--line);
+  border-radius:14px;
+  background:rgba(10,12,16,0.55);
+  padding:10px;
+  min-height:240px;
+}
+
+.kv{
+  display:flex;
+  justify-content:space-between;
+  padding:6px 0;
+  border-bottom:1px solid rgba(32,40,51,0.6)
+}
+.kv:last-child{border-bottom:none}

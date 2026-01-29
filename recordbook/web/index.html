@@ -4,8 +4,15 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>AICF Recordbook</title>
-  <link rel="stylesheet" href="styles.css" />
+
+  <link rel="stylesheet" href="styles/base.css" />
+  <link rel="stylesheet" href="styles/layout.css" />
+  <link rel="stylesheet" href="styles/blocks.css" />
+  <link rel="stylesheet" href="styles/wires.css" />
+  <link rel="stylesheet" href="styles/inspector.css" />
+  <link rel="stylesheet" href="styles/output.css" />
 </head>
+
 <body>
   <header class="topbar">
     <div class="brand">
@@ -15,6 +22,7 @@
         <div class="subtitle">Scratch-style graph builder (MVP)</div>
       </div>
     </div>
+
     <div class="topbar-actions">
       <button id="btnNew" class="btn">New</button>
       <button id="btnSave" class="btn">Save</button>
@@ -37,10 +45,16 @@
     <section class="pane middle">
       <div class="workspace-head">
         <h2>Workspace</h2>
-        <div class="hint">블럭을 추가하고 드래그로 순서를 바꿔. 블럭 클릭하면 오른쪽에서 파라미터 수정.</div>
+        <div class="hint">
+          블럭 추가 → 드래그로 순서 변경 → 블럭 클릭해서 파라미터 수정 →
+          Compile로 Output 생성
+        </div>
       </div>
 
-      <div id="workspace" class="workspace" aria-label="workspace"></div>
+      <div id="workspace" class="workspace" aria-label="workspace">
+        <svg id="wires" class="wires"></svg>
+        <div id="nodesLayer" class="nodes-layer"></div>
+      </div>
 
       <div class="workspace-foot">
         <div class="mini">
@@ -53,9 +67,7 @@
     <!-- Right -->
     <section class="pane right">
       <h2>Inspector</h2>
-      <div id="inspector" class="inspector empty">
-        블럭을 선택해.
-      </div>
+      <div id="inspector" class="inspector empty">블럭을 선택해.</div>
 
       <h2 style="margin-top:16px;">Output</h2>
       <div class="tabs">
@@ -73,9 +85,9 @@
   </main>
 
   <footer class="footer">
-    <span>Local MVP • No JSON schema yet • Everything saved in browser localStorage</span>
+    <span>Local MVP • 기능 우선(포트/연결선 포함) • 저장: localStorage</span>
   </footer>
 
-  <script src="app.js"></script>
+  <script type="module" src="js/app.js"></script>
 </body>
 </html>
