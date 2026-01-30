@@ -26,7 +26,7 @@ class CudaRegistry:
         self._map: Dict[str, KernelSpec] = {
             "add":      KernelSpec(kind_id=0, attr_schema=fourcc("EADD")),  # 임시(아직 확정 아님)
             "relu":     KernelSpec(kind_id=1, attr_schema=fourcc("EREL")),  # 임시
-            "gemm":     KernelSpec(kind_id=2, attr_schema=fourcc("GEMM")),  # 임시
+            "gemm":     KernelSpec(kind_id=2, attr_schema=0),
             "bias_add": KernelSpec(kind_id=3, attr_schema=fourcc("BADD")),  # ✅ 확정(네 테스트 코드)
         }
 

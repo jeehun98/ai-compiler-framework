@@ -12,8 +12,8 @@ for p in (EX_PY, BUILD_PY):
     sp = str(p)
     if sp not in sys.path:
         sys.path.insert(0, sp)
-
-from aicf_cuda import _C
+        
+import _C
 
 
 def pack_gemm(trans_a: int = 0, trans_b: int = 0) -> bytes:
