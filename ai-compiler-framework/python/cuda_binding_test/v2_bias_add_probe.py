@@ -15,7 +15,7 @@ for p in (EX_PY, BUILD_PY):
     if sp not in sys.path:
         sys.path.insert(0, sp)
 
-from aicf_cuda import _C
+import _C
 
 
 def fourcc(s: str) -> int:

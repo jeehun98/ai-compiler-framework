@@ -4,6 +4,7 @@ from .builder import Builder
 
 from .layers import Layer, Linear, ReLU, Add
 
+
 __all__ = [
     "TensorSpec",
     "Model",
@@ -13,3 +14,6 @@ __all__ = [
     "ReLU",
     "Add",
 ]
+
+from .runtime import CudaExecutor
+__all__.append("CudaExecutor")
