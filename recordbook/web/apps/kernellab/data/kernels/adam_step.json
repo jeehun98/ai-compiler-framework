@@ -1,0 +1,185 @@
+{
+  "id": "adam_step",
+  "name": "adam_step",
+  "kind": "optimizer",
+  "tags": ["cuda", "optimizer", "adam", "attrblob", "alias-policy", "oop-safe"],
+  "summary": "Adam update (F32) with BC1/BC2 scalars. Supports in-place P/M/V, forbids other aliasing. If Pout!=P, launcher copies P->Pout before update to keep kernel logic safe.",
+  "contract": [
+    "Inputs (6): P, G, M, V, BC1, BC2",
+    "Outputs (3): Pout, Mout, Vout",
+    "",
+    "DType/contiguity:",
+    " - P,G,M,V,Pout,Mout,Vout: f32, contiguous, rank>=1",
+    " - BC1,BC2: f32 scalar (rank==0), contiguous",
+    "",
+    "Shape constraints:",
+    " - P,G,M,V must have identical shape",
+    " - Pout matches P shape, Mout matches M, Vout matches V",
+    "",
+    "Alias policy (conservative):",
+    " - Allowed: Pout==P, Mout==M, Vout==V (in-place per-buffer)",
+    " - Forbidden: G aliases anything",
+    " - Forbidden: any cross-alias between {P,M,V} groups (e.g., P==M, M==V, etc.)",
+    " - Forbidden: if not in-place, outputs aliasing other buffers"
+  ],
+  "abi": [
+    "AttrBlob schema_id: 0 or 'ADAM'(0x4D414441).",
+    "Payload (16 bytes): float32 lr, beta1, beta2, eps (little-endian).",
+    "Defaults if schema_id==0 or invalid: lr=1e-3, beta1=0.9, beta2=0.999, eps=1e-8.",
+    "NOTE: variant expected_attr_schema_id == 'ADAM' so exec should send schema_id='ADAM' for matching."
+  ],
+  "notes": [
+    "Kernel: adam_step_f32_kernel_v2 grid-stride loop, threads=256, blocks=ceil(n/256) capped 65535.",
+    "BC1/BC2 are device scalar pointers; kernel reads bc1[0], bc2[0] (fallback 1.0 if null).",
+    "Launcher ensures OOP safety: if Pout!=P, do cudaMemcpyAsync(P -> Pout) before kernel, then kernel uses Pout = Pout - lr*(...).",
+    "Potential perf focus: bandwidth vs math (sqrtf). Consider fast-math, vectorization, fuse BC scalars into attrs, reduce loads."
+  ],
+
+  "variants": [
+    {
+      "id": "v_adam_step_f32_v2",
+      "name": "adam_step_f32_v2",
+      "priority": 0,
+      "flags": 0,
+      "supported": [
+        "dtype: f32 only",
+        "P,G,M,V,Pout,Mout,Vout contiguous rank>=1",
+        "BC1,BC2 scalar f32 contiguous (rank==0)",
+        "P,G,M,V same shape; outputs match respective shapes",
+        "alias policy enforced: only per-buffer in-place allowed; G cannot alias anything"
+      ],
+      "notes": "Launcher performs P->Pout copy if OOP. Kernel updates M/V then Pout."
+    }
+  ],
+
+  "suites": [
+    {
+      "id": "suite_basic",
+      "name": "basic_numel_sweep",
+      "desc": "Sweep numel to see scaling; include typical transformer parameter sizes.",
+      "cases": [
+        {
+          "id": "case_n1m",
+          "label": "n=1,048,576 (1M) f32",
+          "shape": "n=1048576",
+          "dtype": "f32",
+          "params": "lr=1e-3,beta1=0.9,beta2=0.999,eps=1e-8; BC1/BC2 scalar"
+        },
+        {
+          "id": "case_n16m",
+          "label": "n=16,777,216 (16M) f32",
+          "shape": "n=16777216",
+          "dtype": "f32",
+          "params": "defaults; BC1/BC2 scalar"
+        },
+        {
+          "id": "case_n64m",
+          "label": "n=67,108,864 (64M) f32",
+          "shape": "n=67108864",
+          "dtype": "f32",
+          "params": "defaults"
+        }
+      ]
+    },
+    {
+      "id": "suite_alias",
+      "name": "alias_modes",
+      "desc": "Compare in-place vs out-of-place overhead (copy).",
+      "cases": [
+        {
+          "id": "case_inplace",
+          "label": "In-place (Pout==P, Mout==M, Vout==V)",
+          "shape": "n=16777216",
+          "dtype": "f32",
+          "params": "inplace=true"
+        },
+        {
+          "id": "case_oop_p_only",
+          "label": "OOP P only (Pout!=P, M/V in-place)",
+          "shape": "n=16777216",
+          "dtype": "f32",
+          "params": "Pout!=P triggers memcpy; Mout==M; Vout==V"
+        },
+        {
+          "id": "case_oop_all",
+          "label": "OOP all (Pout!=P, Mout!=M, Vout!=V)",
+          "shape": "n=16777216",
+          "dtype": "f32",
+          "params": "all outputs distinct"
+        }
+      ]
+    },
+    {
+      "id": "suite_attr",
+      "name": "attr_variations",
+      "desc": "AttrBlob default vs explicit 'ADAM' payload; check parsing overhead (should be negligible).",
+      "cases": [
+        {
+          "id": "case_schema0",
+          "label": "schema_id=0 (defaults)",
+          "shape": "n=16777216",
+          "dtype": "f32",
+          "params": "schema_id=0"
+        },
+        {
+          "id": "case_schema_adam",
+          "label": "schema_id='ADAM' (explicit payload)",
+          "shape": "n=16777216",
+          "dtype": "f32",
+          "params": "schema_id=ADAM; lr=1e-3,beta1=0.9,beta2=0.999,eps=1e-8"
+        }
+      ]
+    }
+  ],
+
+  "experiments": [
+    {
+      "id": "exp_oop_copy",
+      "ts": 0,
+      "title": "OOP safety via P->Pout memcpy",
+      "suite_id": "suite_alias",
+      "change": "If Pout!=P, launcher copies P to Pout before kernel. Kernel always updates Pout in-place style.",
+      "why": "Kernel uses 'Pout = Pout - ...' update. Without copy, OOP would read garbage/uninitialized Pout.",
+      "hypothesis": "In-place path fastest; OOP adds memcpy cost proportional to n*sizeof(float).",
+      "result": "",
+      "proof": "nsys timeline: memcpy + kernel; compare latency. Validate numerics vs reference.",
+      "conclusion": "",
+      "next": "If OOP common, consider kernel reading P separately (P pointer) to avoid memcpy; or fuse memcpy into kernel (load P and write Pout)."
+    },
+    {
+      "id": "exp_math_fast",
+      "ts": 0,
+      "title": "Math path: sqrtf + eps",
+      "suite_id": "suite_basic",
+      "change": "Baseline uses sqrtf(v_hat) + eps; examine fast-math / rsqrt approximations.",
+      "why": "sqrtf can be expensive; could trade precision for speed in training loops.",
+      "hypothesis": "fast-math or rsqrt improves latency slightly on large n; verify stability/accuracy.",
+      "result": "",
+      "proof": "ncu: instruction mix (sqrt), achieved occupancy, dram throughput. Compare loss stability in small training loop.",
+      "conclusion": "",
+      "next": "Try __frsqrt_rn + refinement; test effect with BC and eps."
+    }
+  ],
+
+  "measurements": [
+    {
+      "id": "m_template",
+      "ts": 0,
+      "suite_id": "suite_alias",
+      "case_id": "case_inplace",
+      "variant_id": "v_adam_step_f32_v2",
+      "device": "",
+      "driver": "",
+      "cuda": "",
+      "dtype": "f32",
+      "shape": "n=16777216",
+      "lat_us": "",
+      "gb_s": "",
+      "tflops": "",
+      "speedup": "",
+      "notes": "For optimizer kernels, report latency + effective GB/s. TFLOP/s optional.",
+      "ncu": "",
+      "nsys": ""
+    }
+  ]
+}

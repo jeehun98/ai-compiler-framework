@@ -1,0 +1,168 @@
+{
+  "id": "bias_add",
+  "name": "bias_add",
+  "kind": "elementwise",
+  "tags": ["cuda", "broadcast", "last-dim", "memory-bound", "half2"],
+  "summary": "Out = Y + bias (broadcast on last dim). F16 half2(vec2) fastpath when N even + 4B aligned pointers.",
+
+  "contract": [
+    "Inputs: Y, bias. Output: Out.",
+    "Y: rank>=2, contiguous, dtype in {f16,f32}.",
+    "bias: rank==1, contiguous, same dtype as Y, shape[0]==N(last dim).",
+    "Out: same shape as Y, contiguous, same dtype as Y.",
+    "axis: only last dim allowed (-1 or rank-1)."
+  ],
+
+  "abi": [
+    "AttrBlob schema_id: 0 or 'BADD'(0x44444142).",
+    "schema_id==0 => default axis=-1",
+    "schema_id=='BADD' payload: int64 axis (little-endian, Python: struct.pack('<q', axis))."
+  ],
+
+  "notes": [
+    "Launch config: kThreads=256, blocks=ceil(M*N/threads) capped to 65535.",
+    "Implementation computes MN by flattening all dims except last into M, last dim into N.",
+    "F16 vec2 path uses __half2 and requires 4B alignment for Y/bias/Out pointers."
+  ],
+
+  "variants": [
+    {
+      "id": "v_bias_add_f32",
+      "name": "bias_add_f32",
+      "priority": 0,
+      "flags": 0,
+      "supported": [
+        "dtype=f32",
+        "Y,Out contiguous, rank>=2",
+        "bias contiguous rank==1 and len==N",
+        "axis in {-1, rank-1}"
+      ],
+      "notes": "Scalar float add. Memory-bandwidth limited."
+    },
+    {
+      "id": "v_bias_add_f16_naive",
+      "name": "bias_add_f16_naive",
+      "priority": 0,
+      "flags": 0,
+      "supported": [
+        "dtype=f16",
+        "Y,Out contiguous, rank>=2",
+        "bias contiguous rank==1 and len==N",
+        "axis in {-1, rank-1}"
+      ],
+      "notes": "Scalar half add using __hadd. Baseline for f16."
+    },
+    {
+      "id": "v_bias_add_f16_vec2_half2",
+      "name": "bias_add_f16_vec2_half2",
+      "priority": 10,
+      "flags": 0,
+      "supported": [
+        "dtype=f16",
+        "Y,Out contiguous, rank>=2",
+        "bias contiguous rank==1 and len==N",
+        "axis in {-1, rank-1}",
+        "N % 2 == 0 (last dim even)",
+        "ptr alignment: Y,bias,Out 4B aligned"
+      ],
+      "notes": "Vectorized half2 path using __hadd2. Improves throughput when eligible."
+    }
+  ],
+
+  "suites": [
+    {
+      "id": "suite_basic",
+      "name": "basic_shape_sweep",
+      "desc": "Common transformer-ish shapes; include even/odd N to force half2 fallback.",
+      "cases": [
+        {
+          "id": "case_m4096_n768_f16_even",
+          "label": "M=4096 N=768 f16 (even N → half2 eligible)",
+          "shape": "M=4096,N=768",
+          "dtype": "f16",
+          "params": "axis=-1"
+        },
+        {
+          "id": "case_m4096_n767_f16_odd",
+          "label": "M=4096 N=767 f16 (odd N → half2 disabled)",
+          "shape": "M=4096,N=767",
+          "dtype": "f16",
+          "params": "axis=-1"
+        },
+        {
+          "id": "case_m16384_n3072_f16_even",
+          "label": "M=16384 N=3072 f16 (even N)",
+          "shape": "M=16384,N=3072",
+          "dtype": "f16",
+          "params": "axis=-1"
+        },
+        {
+          "id": "case_m4096_n768_f32",
+          "label": "M=4096 N=768 f32",
+          "shape": "M=4096,N=768",
+          "dtype": "f32",
+          "params": "axis=-1"
+        }
+      ]
+    },
+    {
+      "id": "suite_alignment",
+      "name": "alignment_probe",
+      "desc": "Measure impact of misalignment on vec2 eligibility (expect fallback to f16_naive).",
+      "cases": [
+        {
+          "id": "case_align_ok",
+          "label": "Aligned pointers (expected half2 path if N even)",
+          "shape": "M=4096,N=768",
+          "dtype": "f16",
+          "params": "axis=-1; aligned"
+        },
+        {
+          "id": "case_align_bad",
+          "label": "Misaligned pointers (force fallback)",
+          "shape": "M=4096,N=768",
+          "dtype": "f16",
+          "params": "axis=-1; misaligned(+2 bytes view)"
+        }
+      ]
+    }
+  ],
+
+  "experiments": [
+    {
+      "id": "exp_vec2_half2",
+      "ts": 0,
+      "title": "Add half2 fastpath (vec2)",
+      "suite_id": "suite_basic",
+      "change": "Introduce bias_add_f16_vec2_half2 variant and eligibility checks: N even + 4B alignment.",
+      "why": "Increase effective load/store throughput for f16 by processing 2 elements per thread op.",
+      "hypothesis": "For large M*N and aligned memory, vec2 path increases GB/s and reduces latency vs f16_naive.",
+      "result": "",
+      "proof": "Collect Nsight Compute: gld/gst throughput, achieved occupancy, memory throughput; confirm kernel name selection in logs.",
+      "conclusion": "",
+      "next": "Try wider vectorization (half4 via int2) or improve grid-stride with better launch bounds; consider 128 threads for L2-bound regimes."
+    }
+  ],
+
+  "measurements": [
+    {
+      "id": "m_template",
+      "ts": 0,
+      "suite_id": "suite_basic",
+      "case_id": "case_m4096_n768_f16_even",
+      "variant_id": "v_bias_add_f16_vec2_half2",
+      "device": "",
+      "driver": "",
+      "cuda": "",
+      "dtype": "f16",
+      "shape": "M=4096,N=768",
+      "lat_us": "",
+      "gb_s": "",
+      "tflops": "",
+      "speedup": "",
+      "notes": "Fill in after microbench. Prefer reporting GB/s + latency. TFLOP/s not meaningful for pure add.",
+      "ncu": "",
+      "nsys": ""
+    }
+  ]
+}

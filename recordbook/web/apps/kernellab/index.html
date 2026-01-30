@@ -5,13 +5,10 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>AICF Kernel Lab</title>
 
-  <!-- shared styles -->
   <link rel="stylesheet" href="../../shared/styles/base.css" />
   <link rel="stylesheet" href="../../shared/styles/layout.css" />
   <link rel="stylesheet" href="../../shared/styles/inspector.css" />
   <link rel="stylesheet" href="../../shared/styles/output.css" />
-
-  <!-- kernellab only -->
   <link rel="stylesheet" href="styles/kernellab.css" />
 </head>
 
@@ -21,9 +18,7 @@
       <span class="logo">⬛</span>
       <div>
         <div class="title">AICF Kernel Lab</div>
-        <div class="subtitle">
-          Kernel library • optimization notes • benchmarks (manual-first)
-        </div>
+        <div class="subtitle">Kernel library • optimization notes • benchmarks (manual-first)</div>
       </div>
     </div>
 
@@ -40,7 +35,7 @@
   </header>
 
   <main class="layout">
-    <!-- Left -->
+    <!-- Left: Catalog -->
     <section class="pane left">
       <div class="section-head">
         <h2>Catalog</h2>
@@ -48,14 +43,13 @@
       </div>
 
       <div class="row">
-        <input id="q" class="search"
-               placeholder="Search: bias_add / gemm / reduce ..." />
+        <input id="q" class="search" placeholder="Search: bias_add / gemm / reduce ..." />
       </div>
 
       <div id="catalog" class="catalog"></div>
     </section>
 
-    <!-- Middle -->
+    <!-- Middle: Blocks -->
     <section class="pane middle">
       <div class="section-head">
         <h2>Kernel</h2>
@@ -65,16 +59,14 @@
       <div id="blocks" class="blocks"></div>
     </section>
 
-    <!-- Right -->
+    <!-- Right: Inspector -->
     <section class="pane right">
       <div class="section-head">
         <h2>Inspector</h2>
         <div class="hint">블록 선택 → 여기서 기록/수정</div>
       </div>
 
-      <div id="inspector" class="inspector empty">
-        왼쪽에서 커널 선택 후 블록을 클릭해.
-      </div>
+      <div id="inspector" class="inspector empty">왼쪽에서 커널 선택 후 블록을 클릭해.</div>
 
       <h2 style="margin-top:16px;">Quick View</h2>
       <div id="quick" class="output">
