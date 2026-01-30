@@ -1,0 +1,193 @@
+{
+  "id": "grad_zero",
+  "name": "grad_zero",
+  "kind": "optimizer_aux",
+  "tags": ["cuda", "memset", "zero-fill", "nd", "contiguous", "inplace-ok", "no-attr"],
+  "summary": "Zero-fill tensor (typically gradients). Writes Y = 0 for f16/f32 contiguous tensors of any rank using cudaMemsetAsync. Supports in-place (X and Y may alias).",
+  "contract": [
+    "Inputs (1): X",
+    "Outputs (1): Y",
+    "",
+    "DType/contiguity:",
+    " - X,Y: same dtype in {f16,f32}",
+    " - X,Y: contiguous (any-rank)",
+    "",
+    "Shape constraints:",
+    " - X and Y same rank and same shape",
+    "",
+    "Aliasing:",
+    " - In-place allowed (X.data may equal Y.data). Input is not read; only output is written.",
+    "",
+    "Semantics:",
+    " - Y is filled with zeros (byte-wise memset to 0). For f16/f32, this corresponds to numeric 0.",
+    "",
+    "Edge cases:",
+    " - if numel==0 => Status::Ok (no memset)"
+  ],
+  "abi": [
+    "AttrBlob: ignored (no attrs required).",
+    "expected_attr_schema_id: 0"
+  ],
+  "notes": [
+    "Implementation uses cudaMemsetAsync(Y.data, 0, bytes, stream).",
+    "dtype_bytes: f32=4 bytes, f16=2 bytes; other dtypes rejected.",
+    "numel_anyrank(): returns 0 if rank<=0 or any dim<=0; otherwise product(shape).",
+    "Launcher clears previous CUDA error with cudaGetLastError() before memset and returns last error after.",
+    "Because this is memset-based, performance is typically bandwidth-bound and launch overhead dominates for small tensors."
+  ],
+  "variants": [
+    {
+      "id": "v_grad_zero_memset_f16_f32",
+      "name": "grad_zero",
+      "priority": 0,
+      "flags": 0,
+      "expected_attr_schema_id": 0,
+      "supported": [
+        "inputs(1)=X ; outputs(1)=Y",
+        "dtype: X==Y in {f16,f32}",
+        "X,Y contiguous",
+        "X,Y same rank and same shape",
+        "n=numel(Y) >= 0"
+      ],
+      "notes": [
+        "Backend op is a cudaMemsetAsync (not a custom kernel).",
+        "If n==0 => return Ok without launching memset."
+      ]
+    }
+  ],
+  "suites": [
+    {
+      "id": "suite_basic",
+      "name": "basic_nd_shapes",
+      "desc": "Zeroing gradients across common shapes and dtypes; validate all-zero output and in-place behavior.",
+      "cases": [
+        {
+          "id": "case_vec_1m_f16",
+          "label": "1D n=1,048,576 f16",
+          "shape": "n=1048576",
+          "dtype": "f16",
+          "params": "contiguous"
+        },
+        {
+          "id": "case_mat_4096x768_f32",
+          "label": "2D 4096x768 f32",
+          "shape": "4096x768",
+          "dtype": "f32",
+          "params": "contiguous"
+        },
+        {
+          "id": "case_4d_8x64x32x32_f16",
+          "label": "4D 8x64x32x32 f16",
+          "shape": "8x64x32x32",
+          "dtype": "f16",
+          "params": "contiguous"
+        },
+        {
+          "id": "case_inplace_alias",
+          "label": "In-place: X and Y alias (same buffer)",
+          "shape": "n=1048576",
+          "dtype": "f16",
+          "params": "X.data == Y.data"
+        }
+      ]
+    },
+    {
+      "id": "suite_edge",
+      "name": "edge_cases",
+      "desc": "Corner cases: n=0 and invalid dtypes.",
+      "cases": [
+        {
+          "id": "case_numel_zero_dim",
+          "label": "Any dim==0 -> numel==0 -> Ok without memset",
+          "shape": "e.g., 8x0x32",
+          "dtype": "f32",
+          "params": "contiguous"
+        },
+        {
+          "id": "case_reject_dtype",
+          "label": "Reject non f16/f32 dtype",
+          "shape": "n=1024",
+          "dtype": "i32",
+          "params": "expect supported=false"
+        }
+      ]
+    },
+    {
+      "id": "suite_gating",
+      "name": "supported_gating",
+      "desc": "Verify supported() rejects mismatch dtype/shape or non-contiguous.",
+      "cases": [
+        {
+          "id": "case_reject_dtype_mismatch",
+          "label": "Reject X f16, Y f32",
+          "shape": "n=1024",
+          "dtype": "X=f16, Y=f32",
+          "params": "expect supported=false"
+        },
+        {
+          "id": "case_reject_shape_mismatch",
+          "label": "Reject shape mismatch",
+          "shape": "X=1024, Y=1023",
+          "dtype": "f16",
+          "params": "expect supported=false"
+        },
+        {
+          "id": "case_reject_noncontig",
+          "label": "Reject non-contiguous views",
+          "shape": "any",
+          "dtype": "f16",
+          "params": "expect supported=false"
+        }
+      ]
+    }
+  ],
+  "experiments": [
+    {
+      "id": "exp_fuse_zero_into_optimizer",
+      "ts": 0,
+      "title": "Fuse grad_zero into optimizer step",
+      "suite_id": "suite_basic",
+      "change": "Remove standalone grad_zero op; perform gradient zeroing inside fused optimizer kernel after consuming grad.",
+      "why": "Standalone memset adds an extra dispatch; fusion can reduce launch count and improve small-model step latency.",
+      "hypothesis": "Lower end-to-end optimizer step time when many parameters are small tensors.",
+      "result": "",
+      "proof": "nsys launch count and step timing; ensure gradients are zeroed at correct point in training loop.",
+      "conclusion": "",
+      "next": "Add a flag to keep standalone op for debugging/repro flows."
+    },
+    {
+      "id": "exp_memset_vs_kernel",
+      "ts": 0,
+      "title": "Compare cudaMemsetAsync vs custom vectorized kernel",
+      "suite_id": "suite_basic",
+      "change": "Implement a vectorized zero kernel (e.g., int4 stores) and compare with cudaMemsetAsync across sizes.",
+      "why": "cudaMemsetAsync is usually fast, but a custom kernel may win in some graph-capture or alignment scenarios.",
+      "hypothesis": "For very large tensors, both are bandwidth-bound; for mid sizes, custom kernel might reduce overhead or improve scheduling.",
+      "result": "",
+      "proof": "Benchmark latency and achieved bandwidth; confirm correctness.",
+      "conclusion": "",
+      "next": "If custom kernel wins, gate on alignment and size; otherwise keep memset."
+    }
+  ],
+  "measurements": [
+    {
+      "id": "m_template",
+      "ts": 0,
+      "suite_id": "suite_basic",
+      "case_id": "case_vec_1m_f16",
+      "variant_id": "v_grad_zero_memset_f16_f32",
+      "device": "",
+      "driver": "",
+      "cuda": "",
+      "dtype": "f16",
+      "shape": "n=1048576",
+      "lat_us": "",
+      "gb_s": "",
+      "tflops": "",
+      "speedup": "",
+      "notes": "Zero-fill is memory-bound; effective bytes written = n * dtype_bytes. GB/s is meaningful; TFLOP/s not meaningful.",
+      "ncu": "",
+      "nsys": ""
+    }
+  ]
+}

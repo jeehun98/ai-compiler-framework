@@ -1,0 +1,284 @@
+{
+  "id": "layernorm",
+  "name": "layernorm",
+  "kind": "normalization",
+  "tags": ["cuda", "layernorm", "2d-only", "row-major", "contiguous", "affine-optional", "f16", "f32", "train", "backward"],
+  "summary": "LayerNorm over last dim for 2D row-major contiguous tensors. Fwd outputs (Y, Mean[M], Rstd[M]). Optional affine (Gamma/Beta). Bwd supports noaff (dX) and affine (dX + dGamma[f32,N] + dBeta[f32,N]). eps via AttrBlob schema 'LNEP' or schema_id==0 default.",
+  "contract": [
+    "Layout:",
+    " - 2D only: X[M,N] contiguous row-major (stride[1]==1, stride[0]==N)",
+    " - Normalization axis: last dim N (per-row stats over N)",
+    "",
+    "Forward signatures:",
+    " - noaff  inputs(1):  X                         outputs(3): Y, Mean[f32,M], Rstd[f32,M]",
+    " - affine inputs(3):  X, Gamma, Beta            outputs(3): Y, Mean[f32,M], Rstd[f32,M]",
+    "",
+    "Backward signatures:",
+    " - noaff  inputs(4):  X, dY, Mean, Rstd         outputs(1): dX",
+    " - affine inputs(5):  X, dY, Gamma, Mean, Rstd  outputs(3): dX, dGamma[f32,N], dBeta[f32,N]",
+    "",
+    "DType rules:",
+    " - f32 path: X,Y,dY,dX are f32; Gamma/Beta f32 when present; Mean/Rstd f32; dGamma/dBeta f32",
+    " - f16 path: X,Y,dY,dX are f16; Gamma/Beta f16 when present; Mean/Rstd f32; dGamma/dBeta f32",
+    "",
+    "Shape rules:",
+    " - Y same shape as X",
+    " - Mean and Rstd are 1D contiguous length M",
+    " - Gamma/Beta (if present) are 1D contiguous length N",
+    " - dX same shape as X",
+    " - dGamma/dBeta (if present) are 1D contiguous length N",
+    "",
+    "Aliasing:",
+    " - No explicit aliasing guarantee; treat as out-of-place unless runtime ensures safety.",
+    "",
+    "Semantics:",
+    " - mu[m]  = mean(x[m,:])",
+    " - var[m] = mean(x[m,:]^2) - mu[m]^2",
+    " - rstd[m]= rsqrt(var[m] + eps)",
+    " - xhat   = (x - mu) * rstd",
+    " - if affine: y = xhat * gamma + beta else y = xhat",
+    "",
+    "Backward semantics (training):",
+    " - dy_hat = dy * gamma (or dy if no gamma)",
+    " - dX per row: (1/N)*rstd * ( N*dy_hat - sum(dy_hat) - xhat*sum(dy_hat*xhat) )",
+    " - dBeta[c]  = sum_m dy[m,c]",
+    " - dGamma[c] = sum_m dy[m,c] * xhat[m,c]"
+  ],
+  "abi": [
+    "AttrBlob schema: eps (float32 little-endian)",
+    " - schema_id == 0 => default eps (1e-5 in launcher usage)",
+    " - schema_id == 'LNEP' (0x50454E4C) => payload: f32 eps",
+    "",
+    "payload layout (little-endian, 4 bytes):",
+    " - f32 eps",
+    "",
+    "Parsing behavior:",
+    " - if schema mismatch or payload too short => default eps",
+    "expected_attr_schema_id for fwd variants is set to 'LNEP' (note: launcher also accepts schema_id==0)."
+  ],
+  "notes": [
+    "Row-major contiguous is enforced strictly via stride[1]==1 and stride[0]==shape[1].",
+    "Threads per row are chosen as a power-of-two up to 256 based on N (pick_threads_pow2_le_256).",
+    "Forward uses block reductions (warp shuffles + shared memory) to compute sum and sumsq per row.",
+    "Mean/Rstd are written by thread0 of each row block.",
+    "Backward dX is computed per row; dGamma/dBeta is computed per column (one block per c, threads over M).",
+    "No workspace required (workspace_bytes=0).",
+    "For very large M,N, the dGamma/dBeta kernel (grid=N blocks) can be heavy; consider 2D tiling or two-stage reduction later."
+  ],
+  "variants": [
+    {
+      "id": "v_layernorm_fwd_f32_contig2d",
+      "name": "layernorm_fwd_f32_contig2d",
+      "priority": 0,
+      "flags": 0,
+      "expected_attr_schema_id": "LNEP",
+      "supported": [
+        "Forward: ni in {1,3}, no=3",
+        "X,Y: dtype=f32, rank=2, contiguous row-major (stride[1]==1, stride[0]==N)",
+        "Y shape == X shape",
+        "Mean,Rstd: dtype=f32, rank=1, contiguous, len=M",
+        "If affine (ni==3): Gamma,Beta are f32 1D contiguous len=N",
+        "Attr: schema_id in {0,'LNEP'} (eps optional)"
+      ],
+      "notes": "Kernel: layernorm_fwd_f32_kernel. Launch: grid=(M,1,1), block=(threads,1,1) where threads=pow2<=256 based on N."
+    },
+    {
+      "id": "v_layernorm_fwd_f16_contig2d",
+      "name": "layernorm_fwd_f16_contig2d",
+      "priority": 10,
+      "flags": 0,
+      "expected_attr_schema_id": "LNEP",
+      "supported": [
+        "Forward: ni in {1,3}, no=3",
+        "X,Y: dtype=f16, rank=2, contiguous row-major (stride[1]==1, stride[0]==N)",
+        "Y shape == X shape",
+        "Mean,Rstd: dtype=f32, rank=1, contiguous, len=M",
+        "If affine (ni==3): Gamma,Beta are f16 1D contiguous len=N",
+        "Attr: schema_id in {0,'LNEP'} (eps optional)"
+      ],
+      "notes": "Kernel: layernorm_fwd_f16_kernel. Internals accumulate in f32; store Y in f16."
+    },
+    {
+      "id": "v_layernorm_bwd_f32_contig2d",
+      "name": "layernorm_bwd_f32_contig2d",
+      "priority": 0,
+      "flags": 0,
+      "expected_attr_schema_id": 0,
+      "supported": [
+        "Backward: (noaff) ni=4,no=1 OR (affine) ni=5,no=3",
+        "X,dY,dX: dtype=f32, rank=2, contiguous row-major; shapes match X[M,N]",
+        "Mean,Rstd: dtype=f32, rank=1, contiguous, len=M",
+        "If affine: Gamma is f32 1D contiguous len=N; dGamma,dBeta are f32 1D contiguous len=N"
+      ],
+      "notes": [
+        "Pass A: layernorm_bwd_dx_f32_kernel, grid=(M), block=pow2<=256 based on N",
+        "Pass B (affine only): layernorm_bwd_dg_db_f32_kernel, grid=(N), block=pow2<=256 based on M"
+      ]
+    },
+    {
+      "id": "v_layernorm_bwd_f16_contig2d",
+      "name": "layernorm_bwd_f16_contig2d",
+      "priority": 10,
+      "flags": 0,
+      "expected_attr_schema_id": 0,
+      "supported": [
+        "Backward: (noaff) ni=4,no=1 OR (affine) ni=5,no=3",
+        "X,dY,dX: dtype=f16, rank=2, contiguous row-major; shapes match X[M,N]",
+        "Mean,Rstd: dtype=f32, rank=1, contiguous, len=M",
+        "If affine: Gamma is f16 1D contiguous len=N; dGamma,dBeta are f32 1D contiguous len=N"
+      ],
+      "notes": [
+        "Pass A: layernorm_bwd_dx_f16_kernel, grid=(M), block=pow2<=256 based on N",
+        "Pass B (affine only): layernorm_bwd_dg_db_f16_kernel, grid=(N), block=pow2<=256 based on M"
+      ]
+    }
+  ],
+  "suites": [
+    {
+      "id": "suite_fwd",
+      "name": "forward_basic",
+      "desc": "Forward correctness: affine/noaff, eps handling, f16 vs f32.",
+      "cases": [
+        {
+          "id": "case_f32_noaff_1024x768",
+          "label": "f32 fwd noaff M=1024 N=768",
+          "shape": "X=1024x768",
+          "dtype": "f32",
+          "params": "ni=1; eps default"
+        },
+        {
+          "id": "case_f32_affine_256x1024",
+          "label": "f32 fwd affine M=256 N=1024",
+          "shape": "X=256x1024, G=1024, B=1024",
+          "dtype": "f32",
+          "params": "ni=3; eps=LNEP(1e-5)"
+        },
+        {
+          "id": "case_f16_affine_512x1536",
+          "label": "f16 fwd affine M=512 N=1536",
+          "shape": "X=512x1536, G=1536, B=1536",
+          "dtype": "f16",
+          "params": "ni=3; eps schema_id==0 default"
+        }
+      ]
+    },
+    {
+      "id": "suite_bwd",
+      "name": "backward_basic",
+      "desc": "Backward correctness: noaff vs affine gradients, f16 vs f32.",
+      "cases": [
+        {
+          "id": "case_f32_noaff_bwd",
+          "label": "f32 bwd noaff M=256 N=1024",
+          "shape": "X=256x1024, dY=256x1024, Mean=256, Rstd=256",
+          "dtype": "f32",
+          "params": "ni=4 no=1"
+        },
+        {
+          "id": "case_f32_affine_bwd",
+          "label": "f32 bwd affine M=256 N=1024",
+          "shape": "X=256x1024, dY=256x1024, G=1024, Mean=256, Rstd=256",
+          "dtype": "f32",
+          "params": "ni=5 no=3; outputs dG=1024 dB=1024"
+        },
+        {
+          "id": "case_f16_affine_bwd",
+          "label": "f16 bwd affine M=128 N=1536",
+          "shape": "X=128x1536, dY=128x1536, G=1536, Mean=128, Rstd=128",
+          "dtype": "f16",
+          "params": "ni=5 no=3; outputs dG=f32[1536], dB=f32[1536]"
+        }
+      ]
+    },
+    {
+      "id": "suite_gating",
+      "name": "supported_gating",
+      "desc": "Reject non-2D, non-contig, wrong strides, or mismatched lengths.",
+      "cases": [
+        {
+          "id": "case_reject_noncontig",
+          "label": "Reject X stride[1]!=1 or stride[0]!=N",
+          "shape": "X=view/noncontig 2D",
+          "dtype": "f32",
+          "params": "expect supported=false"
+        },
+        {
+          "id": "case_reject_wrong_mean_len",
+          "label": "Reject Mean/Rstd length != M",
+          "shape": "X=64x128, Mean=63, Rstd=64",
+          "dtype": "f32",
+          "params": "expect supported=false"
+        },
+        {
+          "id": "case_reject_wrong_gamma_len",
+          "label": "Reject Gamma/Beta length != N (affine fwd/bwd)",
+          "shape": "X=64x128, G=127, B=128",
+          "dtype": "f16",
+          "params": "expect supported=false"
+        }
+      ]
+    }
+  ],
+  "experiments": [
+    {
+      "id": "exp_fwd_vectorize",
+      "ts": 0,
+      "title": "Vectorize forward loads/stores (half2/float2)",
+      "suite_id": "suite_fwd",
+      "change": "Add vectorized path when N is even and pointers aligned, using half2 for f16 and float2 for f32.",
+      "why": "Current kernels are scalar per element; vectorization can reduce instruction count and improve memory throughput.",
+      "hypothesis": "Lower latency for large N; higher achieved bandwidth.",
+      "result": "",
+      "proof": "ncu: gld/gst efficiency, dram throughput; correctness vs reference.",
+      "conclusion": "",
+      "next": "Also vectorize reduction with pairwise sums to reduce rounding error."
+    },
+    {
+      "id": "exp_bwd_dgdb_two_stage",
+      "ts": 0,
+      "title": "Two-stage reduction for dGamma/dBeta",
+      "suite_id": "suite_bwd",
+      "change": "Replace per-column single-block reduction over M with a two-stage reduction (partial sums per block then finalize).",
+      "why": "Current dg/db kernel uses one block per column; for large M this becomes slow and may exceed efficient thread utilization.",
+      "hypothesis": "Better scaling when M is large (e.g., batch*seq).",
+      "result": "",
+      "proof": "Benchmark large M (e.g., 8192) and compare runtime; verify numerics.",
+      "conclusion": "",
+      "next": "Fuse dx and dg/db passes if beneficial (tradeoff: more registers/shared)."
+    },
+    {
+      "id": "exp_welford",
+      "ts": 0,
+      "title": "Welford variance for improved numerical stability",
+      "suite_id": "suite_fwd",
+      "change": "Compute mean/var using Welford online algorithm instead of sum/sumsq.",
+      "why": "sum/sumsq can accumulate error for large N and large magnitude values.",
+      "hypothesis": "Closer match to PyTorch reference and fewer negative var clamp events.",
+      "result": "",
+      "proof": "Compare max error vs reference across random distributions with large N; check how often var<0 clamp triggers.",
+      "conclusion": "",
+      "next": "Optionally keep sum/sumsq for speed and add a 'stable' flag."
+    }
+  ],
+  "measurements": [
+    {
+      "id": "m_template_fwd",
+      "ts": 0,
+      "suite_id": "suite_fwd",
+      "case_id": "case_f16_affine_512x1536",
+      "variant_id": "v_layernorm_fwd_f16_contig2d",
+      "device": "",
+      "driver": "",
+      "cuda": "",
+      "dtype": "f16",
+      "shape": "M=512 N=1536",
+      "lat_us": "",
+      "gb_s": "",
+      "tflops": "",
+      "speedup": "",
+      "notes": "Report latency and effective bandwidth (read X (+G/B) and write Y plus mean/rstd). TFLOP/s not primary.",
+      "ncu": "",
+      "nsys": ""
+    }
+  ]
+}

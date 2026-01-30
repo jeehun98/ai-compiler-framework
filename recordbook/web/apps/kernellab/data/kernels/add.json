@@ -1,0 +1,186 @@
+{
+  "id": "add",
+  "name": "add",
+  "kind": "elementwise",
+  "tags": ["cuda", "elementwise", "nd", "contiguous", "half2", "memory-bound"],
+  "summary": "Out = A + B (ND contiguous, flattened numel). Variants: f32 naive, f16 naive, f16 half2(vec2) fastpath when numel even + 4B aligned.",
+  "contract": [
+    "Inputs (2): A, B",
+    "Outputs (1): Out",
+    "",
+    "DType/contiguity:",
+    " - A,B,Out: {f16,f32}, contiguous",
+    "",
+    "Shape constraints:",
+    " - A and B same shape",
+    " - Out same shape as A",
+    "",
+    "Semantics:",
+    " - elementwise add on flattened numel() (ND supported)"
+  ],
+  "abi": [
+    "AttrBlob: ignored (no attrs required).",
+    "expected_attr_schema_id: 0",
+    "Note: launcher does not read attr; exec can pass schema 0 or anything (but variant matching uses expected_attr_schema_id==0)."
+  ],
+  "notes": [
+    "numel = product(shape[0..rank-1])",
+    "Common check: dtype match, contiguous, shapes match, numel>0",
+    "Launch: threads=256, blocks=ceil(N/256) (current code does NOT cap blocks; consider cap=65535 for huge N).",
+    "F16 half2 path: requires numel even + A/B/Out pointers 4B aligned; reinterpret as __half2 and run N2 threads.",
+    "Current kernels are simple 1D if(i<N) body (no grid-stride). For very large tensors, consider grid-stride + blocks cap."
+  ],
+
+  "variants": [
+    {
+      "id": "v_add_f32_naive",
+      "name": "add_f32_naive",
+      "priority": 0,
+      "flags": 0,
+      "supported": [
+        "dtype=f32",
+        "A,B,Out contiguous",
+        "A,B same shape; Out same shape",
+        "N=numel(Out) > 0"
+      ],
+      "notes": "Kernel: add_f32_kernel, 1D launch, if(i<N) out[i]=a[i]+b[i]."
+    },
+    {
+      "id": "v_add_f16_naive",
+      "name": "add_f16_naive",
+      "priority": 0,
+      "flags": 0,
+      "supported": [
+        "dtype=f16",
+        "A,B,Out contiguous",
+        "A,B same shape; Out same shape",
+        "N=numel(Out) > 0"
+      ],
+      "notes": "Kernel: add_f16_kernel, scalar __half + __hadd."
+    },
+    {
+      "id": "v_add_f16_vec2_half2",
+      "name": "add_f16_vec2_half2",
+      "priority": 10,
+      "flags": 0,
+      "supported": [
+        "dtype=f16",
+        "A,B,Out contiguous",
+        "A,B same shape; Out same shape",
+        "N=numel(Out) even",
+        "A/B/Out pointers 4B aligned"
+      ],
+      "notes": "Kernel: add_f16x2_kernel, __half2 + __hadd2, uses N2=numel/2."
+    }
+  ],
+
+  "suites": [
+    {
+      "id": "suite_basic",
+      "name": "basic_nd_shapes",
+      "desc": "Common ND shapes; compare f16 naive vs half2 eligibility and f32 baseline.",
+      "cases": [
+        {
+          "id": "case_vec_1m_f16_even",
+          "label": "1D n=1,048,576 f16 (even → half2 eligible)",
+          "shape": "n=1048576",
+          "dtype": "f16",
+          "params": "contiguous; aligned"
+        },
+        {
+          "id": "case_vec_1m_f16_odd",
+          "label": "1D n=1,048,575 f16 (odd → half2 disabled)",
+          "shape": "n=1048575",
+          "dtype": "f16",
+          "params": "contiguous; aligned"
+        },
+        {
+          "id": "case_mat_4096x768_f16",
+          "label": "2D 4096x768 f16 (even numel)",
+          "shape": "4096x768",
+          "dtype": "f16",
+          "params": "contiguous"
+        },
+        {
+          "id": "case_mat_4096x768_f32",
+          "label": "2D 4096x768 f32",
+          "shape": "4096x768",
+          "dtype": "f32",
+          "params": "contiguous"
+        }
+      ]
+    },
+    {
+      "id": "suite_alignment",
+      "name": "alignment_probe",
+      "desc": "Force pointer alignment/misalignment to verify half2 gating.",
+      "cases": [
+        {
+          "id": "case_align_ok",
+          "label": "Aligned pointers (expected half2 if N even)",
+          "shape": "n=1048576",
+          "dtype": "f16",
+          "params": "aligned"
+        },
+        {
+          "id": "case_align_bad",
+          "label": "Misaligned(+2B view) (force fallback)",
+          "shape": "n=1048576",
+          "dtype": "f16",
+          "params": "misaligned(+2B view)"
+        }
+      ]
+    }
+  ],
+
+  "experiments": [
+    {
+      "id": "exp_half2_fastpath",
+      "ts": 0,
+      "title": "Add half2(vec2) fastpath",
+      "suite_id": "suite_basic",
+      "change": "Introduce add_f16_vec2_half2 variant: N even + 4B aligned pointers; reinterpret to __half2 and use __hadd2.",
+      "why": "Improve bandwidth utilization for f16 elementwise add.",
+      "hypothesis": "For large N, half2 path increases GB/s and reduces latency vs f16 naive.",
+      "result": "",
+      "proof": "Check selected variant + ncu dram throughput; compare gld/gst efficiency; validate correctness vs reference.",
+      "conclusion": "",
+      "next": "Switch to grid-stride loop + blocks cap; try vectorized loads (ld.global.v2) and unroll."
+    },
+    {
+      "id": "exp_gridstride_cap",
+      "ts": 0,
+      "title": "Stability for huge N (blocks cap + grid-stride)",
+      "suite_id": "suite_basic",
+      "change": "Replace if(i<N) with grid-stride loop; cap blocks to 65535.",
+      "why": "Current blocks=ceil(N/256) can exceed CUDA grid limits for very large tensors.",
+      "hypothesis": "No perf regression; avoids launch failure at large N.",
+      "result": "",
+      "proof": "Test N >> 2^31; verify launch success; ncu runtime similar.",
+      "conclusion": "",
+      "next": "Consider 2D mapping for better L2 locality if needed (usually unnecessary for pure elementwise)."
+    }
+  ],
+
+  "measurements": [
+    {
+      "id": "m_template",
+      "ts": 0,
+      "suite_id": "suite_basic",
+      "case_id": "case_vec_1m_f16_even",
+      "variant_id": "v_add_f16_vec2_half2",
+      "device": "",
+      "driver": "",
+      "cuda": "",
+      "dtype": "f16",
+      "shape": "n=1048576",
+      "lat_us": "",
+      "gb_s": "",
+      "tflops": "",
+      "speedup": "",
+      "notes": "Elementwise: report latency + effective GB/s. TFLOP/s optional.",
+      "ncu": "",
+      "nsys": ""
+    }
+  ]
+}

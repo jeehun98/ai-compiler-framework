@@ -1,0 +1,224 @@
+{
+  "id": "gemm",
+  "name": "gemm",
+  "kind": "matmul",
+  "tags": ["cuda", "gemm", "matmul", "2d-only", "strided", "attr-optional", "f32-naive", "f16-tensorcore", "wmma"],
+  "summary": "C = A @ B (2D GEMM) with optional transA/transB via AttrBlob. Variants: (1) f32 naive strided kernel, (2) f16 WMMA tensor-core path with f16 output (requires C contiguous row-major).",
+  "contract": [
+    "Inputs (2): A, B",
+    "Outputs (1): C",
+    "",
+    "Rank / strides:",
+    " - A,B,C must be rank==2",
+    " - strides must be valid (>0) for both dims (strided allowed)",
+    "",
+    "DType:",
+    " - f32 path: A,B,C all f32",
+    " - f16 TC path: A,B,C all f16 (wmma accumulator is f32 internally, stored to f16)",
+    "",
+    "Attrs (optional): transA/transB",
+    " - Controls logical 2D views without physically transposing tensors",
+    "",
+    "Shape constraints (after applying transpose flags):",
+    " - A_view: [M,K], B_view: [K,N], C: [M,N]",
+    " - M,N,K must be > 0",
+    "",
+    "Semantics:",
+    " - C[m,n] = sum_{k=0..K-1} A_view[m,k] * B_view[k,n]",
+    "",
+    "Extra constraint for f16 TC variant:",
+    " - C must be contiguous row-major (stride[1]==1 and stride[0]==shape[1])"
+  ],
+  "abi": [
+    "AttrBlob schema for GEMM:",
+    " - schema_id==0 => default transA=0, transB=0",
+    " - schema_id=='GEMM' (0x47454D4D) => parse GemmAttrV0 from bytes",
+    "",
+    "payload layout (little-endian bytes, sizeof=8):",
+    " - i32 transA (0/1)",
+    " - i32 transB (0/1)",
+    "",
+    "Parsing behavior:",
+    " - If schema_id is neither 0 nor 'GEMM' => treat as defaults (transA=0, transB=0)",
+    " - If payload missing/short => defaults"
+  ],
+  "notes": [
+    "MatView2D is formed from TensorDesc shape/stride; transpose swaps logical rows/cols and uses swapped strides.",
+    "gemm_check_2d enforces: rank==2, dtype match, positive strides, consistent shapes after transpose, and positive M,N,K.",
+    "No alpha/beta scaling: this op computes pure matmul only (no C = alpha*A@B + beta*C).",
+    "f16 TC variant uses WMMA fragments (16x16x16) with A row-major, B col-major packing into shared memory.",
+    "WMMA path pads K to ceil16(K) with zero-fill loads (out-of-bounds loads return 0)."
+  ],
+  "variants": [
+    {
+      "id": "v_gemm_f32_naive_strided",
+      "name": "gemm_f32_naive_strided",
+      "priority": 0,
+      "flags": 0,
+      "expected_attr_schema_id": 0,
+      "supported": [
+        "inputs(2)=A,B ; outputs(1)=C",
+        "A,B,C: dtype=f32, rank=2",
+        "A,B,C: strides valid (>0 for both dims)",
+        "Attr: schema_id in {0,'GEMM'} or anything else (treated as default)",
+        "After applying transA/transB: A_view=[M,K], B_view=[K,N], C=[M,N]",
+        "M>0, N>0, K>0",
+        "C strides valid (>0)"
+      ],
+      "notes": [
+        "Kernel: gemm_f32_naive_strided_kernel",
+        "Launch: block=(16,16), grid=(ceil(N/16), ceil(M/16))",
+        "Each thread computes one C element with a K loop (no tiling)."
+      ]
+    },
+    {
+      "id": "v_gemm_f16_tc_wmma_out_f16_strided",
+      "name": "gemm_f16_tc_wmma_out_f16_strided",
+      "priority": 20,
+      "flags": 0,
+      "expected_attr_schema_id": 0,
+      "supported": [
+        "inputs(2)=A,B ; outputs(1)=C",
+        "A,B,C: dtype=f16, rank=2",
+        "A,B,C: strides valid (>0 for both dims)",
+        "After applying transA/transB: A_view=[M,K], B_view=[K,N], C=[M,N]",
+        "M>0, N>0, K>0",
+        "TC requirement: C is contiguous row-major (stride[1]==1 && stride[0]==C.shape[1])"
+      ],
+      "notes": [
+        "Kernel: gemm_f16_tc_wmma_out_f16_strided_kernel (WMMA 16x16 tiles)",
+        "Launch: block=(32,1,1) (single warp), grid=(ceil(N/16), ceil(M/16))",
+        "Per-tile: pack A as row-major 16x16 into smem, pack B as col-major 16x16 into smem, wmma::mma_sync accumulates in f32.",
+        "Store: accumulator -> smemC (row-major f32), then convert/store to f16 C with bounds checks.",
+        "K is padded to ceil16(K); out-of-range loads are treated as 0."
+      ]
+    }
+  ],
+  "suites": [
+    {
+      "id": "suite_basic",
+      "name": "basic_shapes_and_transpose",
+      "desc": "Correctness across shapes and transpose flags for both f32 and f16 paths (where eligible).",
+      "cases": [
+        {
+          "id": "case_f32_256x256",
+          "label": "f32 M=N=K=256 (baseline)",
+          "shape": "A=256x256, B=256x256, C=256x256",
+          "dtype": "f32",
+          "params": "transA=0 transB=0; strided allowed"
+        },
+        {
+          "id": "case_f32_transA",
+          "label": "f32 with transA=1",
+          "shape": "A=128x64 (view->64x128), B=128x32, C=64x32",
+          "dtype": "f32",
+          "params": "transA=1 transB=0"
+        },
+        {
+          "id": "case_f32_transB",
+          "label": "f32 with transB=1",
+          "shape": "A=64x128, B=32x128 (view->128x32), C=64x32",
+          "dtype": "f32",
+          "params": "transA=0 transB=1"
+        },
+        {
+          "id": "case_f16_tc_256x256",
+          "label": "f16 TC M=N=K=256 (C row-major contig required)",
+          "shape": "A=256x256, B=256x256, C=256x256",
+          "dtype": "f16",
+          "params": "transA=0 transB=0; C contiguous row-major"
+        },
+        {
+          "id": "case_f16_tc_nonmultipleK",
+          "label": "f16 TC with K not multiple of 16 (zero-pad path)",
+          "shape": "A=128x250, B=250x96, C=128x96",
+          "dtype": "f16",
+          "params": "transA=0 transB=0; C contiguous row-major"
+        }
+      ]
+    },
+    {
+      "id": "suite_gating",
+      "name": "tc_gating_and_strides",
+      "desc": "Verify f16 TC path gating (C contiguous row-major) and stride validity rules.",
+      "cases": [
+        {
+          "id": "case_tc_reject_noncontig_C",
+          "label": "Reject TC when C is not contiguous row-major",
+          "shape": "A=128x128, B=128x128, C=view/noncontig",
+          "dtype": "f16",
+          "params": "expect supported=false for TC variant"
+        },
+        {
+          "id": "case_reject_bad_strides",
+          "label": "Reject when any stride<=0",
+          "shape": "manual TensorDesc with stride[0]<=0",
+          "dtype": "f32",
+          "params": "expect supported=false"
+        }
+      ]
+    }
+  ],
+  "experiments": [
+    {
+      "id": "exp_f32_tiling",
+      "ts": 0,
+      "title": "Tile f32 GEMM (shared memory) to replace naive K loop",
+      "suite_id": "suite_basic",
+      "change": "Replace per-element naive kernel with block tiling (e.g., 128x64xK tile), shared memory staging for A/B, and register blocking.",
+      "why": "Current f32 path is O(M*N*K) with no data reuse; extremely slow for anything beyond tiny matrices.",
+      "hypothesis": "Tiling increases arithmetic intensity and reduces global loads; large speedup vs naive kernel.",
+      "result": "",
+      "proof": "ncu: global load efficiency, achieved FLOP/s; compare vs cublas reference timing.",
+      "conclusion": "",
+      "next": "Add vectorized loads, double-buffering, and optionally mma for f16/f32 mixed modes."
+    },
+    {
+      "id": "exp_tc_support_strided_C",
+      "ts": 0,
+      "title": "Relax TC constraint by adding store path for strided C",
+      "suite_id": "suite_gating",
+      "change": "Allow non-contiguous C by storing each element with (Crs,Ccs) instead of assuming row-major contiguous; keep wmma compute the same.",
+      "why": "Current TC gating blocks many legitimate strided outputs; only store path needs to be strided-aware.",
+      "hypothesis": "Broader applicability with minimal perf loss when C is mildly strided; still faster than f16 naive.",
+      "result": "",
+      "proof": "Correctness tests with transposed/strided C; benchmark store overhead.",
+      "conclusion": "",
+      "next": "If store overhead is high, add epilogue kernel to reorder into contiguous buffer."
+    },
+    {
+      "id": "exp_wmma_bank_conflict",
+      "ts": 0,
+      "title": "Shared memory layout tweaks to reduce bank conflicts in WMMA pack",
+      "suite_id": "suite_basic",
+      "change": "Adjust smemA/smemB layout (padding or swizzle) to reduce bank conflicts when packing 16x16 tiles.",
+      "why": "Current smem arrays are tight 256 elements; bank conflicts can hurt warp load/store efficiency.",
+      "hypothesis": "Improves WMMA kernel throughput for large M,N.",
+      "result": "",
+      "proof": "ncu shared_load_transactions_per_request / bank conflict metrics; compare runtime.",
+      "conclusion": "",
+      "next": "Try padding leading dimension to 16+1 or use ldmatrix-friendly layout on newer arch."
+    }
+  ],
+  "measurements": [
+    {
+      "id": "m_template_f16_tc",
+      "ts": 0,
+      "suite_id": "suite_basic",
+      "case_id": "case_f16_tc_256x256",
+      "variant_id": "v_gemm_f16_tc_wmma_out_f16_strided",
+      "device": "",
+      "driver": "",
+      "cuda": "",
+      "dtype": "f16",
+      "shape": "A=256x256 B=256x256 C=256x256",
+      "lat_us": "",
+      "gb_s": "",
+      "tflops": "",
+      "speedup": "",
+      "notes": "Report latency and achieved TFLOP/s (2*M*N*K ops). Compare against cublasGemmEx if available.",
+      "ncu": "",
+      "nsys": ""
+    }
+  ]
+}

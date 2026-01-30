@@ -1,0 +1,165 @@
+{
+  "id": "relu",
+  "name": "relu",
+  "kind": "elementwise",
+  "tags": [
+    "cuda",
+    "relu",
+    "elementwise",
+    "any-rank",
+    "flatten",
+    "contiguous",
+    "f32",
+    "f16",
+    "half2",
+    "vec2",
+    "memory-bound",
+    "attr-ignored"
+  ],
+  "summary": "ReLU elementwise: out = max(in, 0). Any-rank contiguous tensors are flattened to 1D numel. Variants: f32 naive, f16 naive, f16 half2(vec2) fastpath when numel even and pointers 4B aligned. AttrBlob is ignored (no attrs).",
+  "contract": [
+    "Inputs: 1 tensor (I). Outputs: 1 tensor (O).",
+    "DType:",
+    " - f32 path: I=f32, O=f32",
+    " - f16 path: I=f16, O=f16",
+    "Shape:",
+    " - I and O must have same rank and identical shape (any-rank).",
+    "Layout:",
+    " - Both I and O must be contiguous (checked via strides; last stride==1 and stride[i]==shape[i+1]*stride[i+1]).",
+    "Numel limits:",
+    " - numel(I) == numel(O) must satisfy 0 < numel <= INT_MAX (kernel uses int N).",
+    "Attrs:",
+    " - attr ignored; expected_attr_schema_id = 0."
+  ],
+  "abi": [
+    "AttrBlob schema: none. expected_attr_schema_id=0.",
+    "Dispatcher may pass any attr; kernel ignores it."
+  ],
+  "notes": [
+    "Any-rank flatten is logical only; kernel assumes linear contiguous memory.",
+    "f16 vec2 path requires numel even and 4B alignment for in/out pointers.",
+    "Workspace: none (0 bytes)."
+  ],
+  "variants": [
+    {
+      "id": "v_relu_f32",
+      "name": "relu_f32_naive",
+      "priority": 0,
+      "flags": 0,
+      "expected_attr_schema_id": 0,
+      "supported": [
+        "I.dtype==f32 && O.dtype==f32",
+        "same shape any-rank",
+        "I contiguous (stride-checked)",
+        "O contiguous (stride-checked)",
+        "0 < numel <= INT_MAX"
+      ],
+      "kernel": "relu_f32_kernel",
+      "launch": "grid=(ceil_div(N,256),1,1), block=(256,1,1)"
+    },
+    {
+      "id": "v_relu_f16",
+      "name": "relu_f16_naive",
+      "priority": 0,
+      "flags": 0,
+      "expected_attr_schema_id": 0,
+      "supported": [
+        "I.dtype==f16 && O.dtype==f16",
+        "same shape any-rank",
+        "I contiguous (stride-checked)",
+        "O contiguous (stride-checked)",
+        "0 < numel <= INT_MAX"
+      ],
+      "kernel": "relu_f16_kernel",
+      "launch": "grid=(ceil_div(N,256),1,1), block=(256,1,1)"
+    },
+    {
+      "id": "v_relu_f16_vec2",
+      "name": "relu_f16_vec2_half2",
+      "priority": 10,
+      "flags": 0,
+      "expected_attr_schema_id": 0,
+      "supported": [
+        "All relu_f16_naive conditions",
+        "numel even",
+        "I.data 4B aligned",
+        "O.data 4B aligned"
+      ],
+      "kernel": "relu_f16x2_kernel",
+      "launch": "grid=(ceil_div(N/2,256),1,1), block=(256,1,1)",
+      "notes": "Processes __half2 lanes; computes out = max(in, 0) via __hmax2."
+    }
+  ],
+  "suites": [
+    {
+      "id": "suite_basic",
+      "name": "basic_correctness",
+      "desc": "Compare output against reference max(x,0) over various shapes and dtypes.",
+      "cases": [
+        { "id": "case_f32_1d", "dtype": "f32", "shape": "[1024]" },
+        { "id": "case_f32_2d", "dtype": "f32", "shape": "[256,768]" },
+        { "id": "case_f16_3d", "dtype": "f16", "shape": "[8,16,64]" },
+        { "id": "case_f16_large", "dtype": "f16", "shape": "[4096,4096]" }
+      ]
+    },
+    {
+      "id": "suite_vec2_gating",
+      "name": "half2_gating",
+      "desc": "Validate vec2 selection logic and fallback behavior.",
+      "cases": [
+        { "id": "case_even_aligned", "dtype": "f16", "shape": "[2048]", "expect": "vec2" },
+        { "id": "case_odd_numel", "dtype": "f16", "shape": "[2049]", "expect": "naive" },
+        {
+          "id": "case_misaligned_out",
+          "dtype": "f16",
+          "shape": "[2048]",
+          "expect": "naive",
+          "notes": "Make output pointer misaligned to break 4B alignment."
+        }
+      ]
+    },
+    {
+      "id": "suite_contig_checks",
+      "name": "contiguity_checks",
+      "desc": "Ensure non-contiguous strides are rejected.",
+      "cases": [
+        { "id": "case_noncontig_view", "dtype": "f32", "shape": "[64,128]", "expect": "unsupported", "notes": "Use a strided view where stride[last]!=1." }
+      ]
+    }
+  ],
+  "experiments": [
+    {
+      "id": "exp_vec2_half2",
+      "ts": 0,
+      "title": "half2 fastpath",
+      "change": "Use __half2 + __hmax2 for f16 when numel even and 4B aligned.",
+      "why": "Vectorize memory ops and reduce instruction count.",
+      "hypothesis": "Higher bandwidth utilization on memory-bound ReLU.",
+      "next": "Add LDG.128 vectorization (half8) for larger alignment if needed."
+    },
+    {
+      "id": "exp_anyrank_stridecheck",
+      "ts": 0,
+      "title": "Any-rank via stride-checked contiguity",
+      "change": "Accept arbitrary rank by flattening numel, but require strict contiguous strides.",
+      "why": "Maximize reuse for elementwise ops with minimal specialization.",
+      "hypothesis": "Simplifies lowering and avoids shape-specific kernels.",
+      "next": "Optional: allow TensorDesc.contiguous shortcut if guaranteed correct."
+    }
+  ],
+  "measurements": [
+    {
+      "id": "m_template",
+      "ts": 0,
+      "suite_id": "suite_basic",
+      "case_id": "case_f16_large",
+      "variant_id": "v_relu_f16_vec2",
+      "device": "",
+      "cuda": "",
+      "shape": "[4096,4096]",
+      "lat_us": "",
+      "gb_s": "",
+      "notes": "Effective bytes ~= read+write = numel*2B*2. Compare naive vs vec2."
+    }
+  ]
+}

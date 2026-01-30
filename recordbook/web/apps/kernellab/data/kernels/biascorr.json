@@ -1,0 +1,181 @@
+{
+  "id": "biascorr",
+  "name": "biascorr",
+  "kind": "optimizer_aux",
+  "tags": ["cuda", "scalar", "adam", "bias-correction", "f32", "attr-required", "single-thread"],
+  "summary": "Adam bias-correction inverse factors. Given step t (i32 scalar) and AttrBlob(beta1,beta2), outputs bc1_inv = 1/(1-beta1^t), bc2_inv = 1/(1-beta2^t). Implemented as a tiny 1-block kernel writing two f32 scalars.",
+  "contract": [
+    "Inputs (1): step",
+    "Outputs (2): bc1_inv, bc2_inv",
+    "",
+    "DType / shapes:",
+    " - step: i32 scalar (rank==0) OR i32 1D with shape[0]==1; contiguous required",
+    " - bc1_inv: f32 scalar (rank==0) OR f32 1D with shape[0]==1; contiguous required",
+    " - bc2_inv: f32 scalar (rank==0) OR f32 1D with shape[0]==1; contiguous required",
+    "",
+    "Semantics:",
+    " - t = max(step[0], 1)",
+    " - bc1_inv = 1 / max(1 - pow(beta1, t), 1e-20)",
+    " - bc2_inv = 1 / max(1 - pow(beta2, t), 1e-20)",
+    " - denominators are clamped by absolute value threshold 1e-20 to avoid inf/NaN"
+  ],
+  "abi": [
+    "AttrBlob: REQUIRED.",
+    "schema_id: 'BCOR' (0x524F4342). schema_id==0 is NOT accepted.",
+    "payload layout (little-endian bytes, total 8 bytes):",
+    " - f32 beta1",
+    " - f32 beta2",
+    "",
+    "Validation:",
+    " - attr must exist, schema match, bytes>=8",
+    " - beta1 and beta2 must be non-NaN (beta==beta check)"
+  ],
+  "notes": [
+    "Kernel writes only if (blockIdx.x==0 && threadIdx.x==0); launch config is <<<1,32>>>.",
+    "Contiguity is required even for rank==0 scalars (current helper enforces d.contiguous).",
+    "Intended use: Adam optimizer step bias-correction factors (1/(1-b1^t), 1/(1-b2^t)).",
+    "Pow uses powf(beta, (float)t). Large t may underflow beta^t toward 0, which is fine."
+  ],
+  "variants": [
+    {
+      "id": "v_biascorr_f32_v0",
+      "name": "biascorr_f32_v0",
+      "priority": 0,
+      "flags": 0,
+      "expected_attr_schema_id": "BCOR",
+      "supported": [
+        "inputs(1)=step ; outputs(2)=bc1_inv,bc2_inv",
+        "step: dtype=i32, scalar(0D) or 1D len=1, contiguous",
+        "bc1_inv: dtype=f32, scalar(0D) or 1D len=1, contiguous",
+        "bc2_inv: dtype=f32, scalar(0D) or 1D len=1, contiguous",
+        "AttrBlob schema_id == 'BCOR' and payload bytes>=8",
+        "beta1,beta2 are non-NaN"
+      ],
+      "notes": [
+        "Kernel: biascorr_kernel <<<1,32>>>",
+        "Thread0 computes t=max(step,1), b1t=powf(beta1,t), b2t=powf(beta2,t), then outputs inverses with denom clamp."
+      ]
+    }
+  ],
+  "suites": [
+    {
+      "id": "suite_basic",
+      "name": "basic_values",
+      "desc": "Bias-correction correctness across typical Adam betas and steps.",
+      "cases": [
+        {
+          "id": "case_step_1_default_betas",
+          "label": "t=1, beta1=0.9 beta2=0.999",
+          "shape": "scalar",
+          "dtype": "step=i32, out=f32",
+          "params": "beta1=0.9 beta2=0.999"
+        },
+        {
+          "id": "case_step_10_default_betas",
+          "label": "t=10, beta1=0.9 beta2=0.999",
+          "shape": "scalar",
+          "dtype": "step=i32, out=f32",
+          "params": "beta1=0.9 beta2=0.999"
+        },
+        {
+          "id": "case_step_1000_default_betas",
+          "label": "t=1000, beta1=0.9 beta2=0.999 (b2^t underflow-prone)",
+          "shape": "scalar",
+          "dtype": "step=i32, out=f32",
+          "params": "beta1=0.9 beta2=0.999"
+        },
+        {
+          "id": "case_step_le_0_clamp",
+          "label": "t<=0 clamp to 1 (step=0)",
+          "shape": "scalar",
+          "dtype": "step=i32, out=f32",
+          "params": "step=0; beta1=0.9 beta2=0.999"
+        }
+      ]
+    },
+    {
+      "id": "suite_gating",
+      "name": "supported_gating",
+      "desc": "Ensure attr and dtype/shape requirements are enforced.",
+      "cases": [
+        {
+          "id": "case_reject_missing_attr",
+          "label": "Reject missing AttrBlob",
+          "shape": "scalar",
+          "dtype": "step=i32, out=f32",
+          "params": "attr=null => supported=false"
+        },
+        {
+          "id": "case_reject_wrong_schema",
+          "label": "Reject wrong schema_id",
+          "shape": "scalar",
+          "dtype": "step=i32, out=f32",
+          "params": "schema_id != BCOR => supported=false"
+        },
+        {
+          "id": "case_reject_short_payload",
+          "label": "Reject payload bytes < 8",
+          "shape": "scalar",
+          "dtype": "step=i32, out=f32",
+          "params": "bytes=4 => supported=false"
+        },
+        {
+          "id": "case_reject_nan_beta",
+          "label": "Reject NaN beta",
+          "shape": "scalar",
+          "dtype": "step=i32, out=f32",
+          "params": "beta1=NaN => supported=false"
+        }
+      ]
+    }
+  ],
+  "experiments": [
+    {
+      "id": "exp_pow_approx",
+      "ts": 0,
+      "title": "Fast pow approximation for beta^t",
+      "suite_id": "suite_basic",
+      "change": "Replace powf(beta, t) with exp2f(t * log2f(beta)) or precomputed log(beta) path; optionally handle beta near 1 with expm1 for better precision.",
+      "why": "powf can be relatively heavy even though kernel is tiny; may matter if launched very frequently.",
+      "hypothesis": "Lower kernel latency and improve optimizer step throughput when biascorr is executed per-step frequently.",
+      "result": "",
+      "proof": "Profile kernel duration in nsys; compare against powf baseline; validate numerical agreement for typical beta/t ranges.",
+      "conclusion": "",
+      "next": "If step is always host-known, consider computing on host and passing scalars to fused optimizer kernel to remove this launch."
+    },
+    {
+      "id": "exp_fuse_into_adam_step",
+      "ts": 0,
+      "title": "Fuse bias-correction into Adam update kernel",
+      "suite_id": "suite_basic",
+      "change": "Compute (1/(1-b1^t), 1/(1-b2^t)) inside Adam update kernel, remove standalone biascorr op.",
+      "why": "Standalone scalar kernel launch overhead can dominate; fusion reduces launches and sync points.",
+      "hypothesis": "End-to-end optimizer step latency decreases, especially for small parameter tensors or many small ops.",
+      "result": "",
+      "proof": "nsys launch count reduction; measure optimizer step time with/without fusion; correctness vs reference optimizer.",
+      "conclusion": "",
+      "next": "Make fusion conditional: only when Adam kernel already reads step/betas; keep biascorr op for modular paths."
+    }
+  ],
+  "measurements": [
+    {
+      "id": "m_template",
+      "ts": 0,
+      "suite_id": "suite_basic",
+      "case_id": "case_step_10_default_betas",
+      "variant_id": "v_biascorr_f32_v0",
+      "device": "",
+      "driver": "",
+      "cuda": "",
+      "dtype": "i32->f32",
+      "shape": "scalar",
+      "lat_us": "",
+      "gb_s": "",
+      "tflops": "",
+      "speedup": "",
+      "notes": "Report kernel launch+exec latency; bandwidth/TFLOPs not meaningful for scalar op.",
+      "ncu": "",
+      "nsys": ""
+    }
+  ]
+}

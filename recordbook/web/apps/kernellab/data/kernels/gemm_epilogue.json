@@ -1,0 +1,235 @@
+{
+  "id": "gemm_epilogue",
+  "name": "gemm_epilogue",
+  "kind": "matmul_fused_epilogue",
+  "tags": ["cuda", "gemm", "biasadd", "relu", "fused-epilogue", "2d-only", "strided", "attr-optional", "f32-naive", "f16-tensorcore", "wmma"],
+  "summary": "Fused GEMM + BiasAdd (+ optional ReLU). C = (A @ B) + bias, then optionally ReLU at epilogue. Supports f32 naive strided and f16 WMMA tensor-core out_f16 (requires C contiguous row-major). Bias is 1D length N with stride_valid; f16 path assumes bias dtype f16.",
+  "contract": [
+    "Inputs (3): A, B, Bias",
+    "Outputs (1): C",
+    "",
+    "Rank / strides:",
+    " - A,B,C must be rank==2",
+    " - Bias must be rank==1",
+    " - strides must be valid (>0) for all tensors (strided allowed)",
+    "",
+    "DType:",
+    " - f32 path: A,B,Bias,C all f32",
+    " - f16 TC path: A,B,Bias,C all f16 (WMMA accumulator is f32 internally, stored to f16)",
+    "",
+    "Attrs (optional): transA/transB/relu",
+    " - transA/transB control logical 2D views without physically transposing",
+    " - relu toggles epilogue activation (default enabled in v0)",
+    "",
+    "Shape constraints (after applying transpose flags):",
+    " - A_view: [M,K], B_view: [K,N], C: [M,N], Bias: [N]",
+    " - M,N,K must be > 0",
+    "",
+    "Semantics:",
+    " - acc[m,n] = sum_{k=0..K-1} A_view[m,k] * B_view[k,n]",
+    " - y = acc[m,n] + Bias[n] (Bias index uses its stride)",
+    " - if relu==1: y = max(y, 0)",
+    " - write C[m,n] = y",
+    "",
+    "Extra constraint for f16 TC variant:",
+    " - C must be contiguous row-major (stride[1]==1 and stride[0]==shape[1])",
+    " - Bias contiguous is recommended but NOT required in v0 (only stride_valid>0 is required)"
+  ],
+  "abi": [
+    "AttrBlob schema for GEMM_EPILOGUE:",
+    " - schema_id==0 => default transA=0, transB=0, relu=1 (Bias+ReLU default)",
+    " - schema_id=='GPEL' (0x4750454C) => parse GemmEpilogueAttrV0 from bytes",
+    "",
+    "payload layout (little-endian bytes, sizeof=12):",
+    " - i32 transA (0/1)",
+    " - i32 transB (0/1)",
+    " - i32 relu   (0/1)",
+    "",
+    "Parsing behavior:",
+    " - If schema_id is neither 0 nor 'GPEL' => treat as defaults",
+    " - If payload missing/short => defaults"
+  ],
+  "notes": [
+    "Bias indexing uses Bias[(int64_t)col * Bs], where Bs is Bias.stride[0].",
+    "No alpha/beta scaling: computes pure (A@B)+bias (+relu).",
+    "f16 TC variant uses WMMA 16x16 tiles. A is packed row-major; B is packed col-major into shared memory; accumulate in f32 then add bias and apply ReLU at store.",
+    "WMMA path pads K to ceil16(K) with zero-fill loads (out-of-bounds loads return 0).",
+    "C contig row-major is required for TC path selection; f32 path supports arbitrary positive strides."
+  ],
+  "variants": [
+    {
+      "id": "v_gemm_bias_relu_f32_naive_strided",
+      "name": "gemm_bias_relu_f32_naive_strided",
+      "priority": 0,
+      "flags": 0,
+      "expected_attr_schema_id": 0,
+      "supported": [
+        "inputs(3)=A,B,Bias ; outputs(1)=C",
+        "A,B,C: dtype=f32, rank=2",
+        "Bias: dtype=f32, rank=1",
+        "A,B,C: strides valid (>0 for both dims)",
+        "Bias: stride_valid (>0)",
+        "Attr: schema_id in {0,'GPEL'} or anything else (treated as default)",
+        "After applying transA/transB: A_view=[M,K], B_view=[K,N], C=[M,N]",
+        "Bias length == N",
+        "M>0, N>0, K>0"
+      ],
+      "notes": [
+        "Kernel: gemm_bias_relu_f32_naive_strided_kernel",
+        "Launch: block=(16,16), grid=(ceil(N/16), ceil(M/16))",
+        "Per element: K-loop accumulate, add bias, optional ReLU, store."
+      ]
+    },
+    {
+      "id": "v_gemm_bias_relu_f16_tc_wmma_out_f16_strided",
+      "name": "gemm_bias_relu_f16_tc_wmma_out_f16_strided",
+      "priority": 20,
+      "flags": 0,
+      "expected_attr_schema_id": 0,
+      "supported": [
+        "inputs(3)=A,B,Bias ; outputs(1)=C",
+        "A,B,C: dtype=f16, rank=2",
+        "Bias: dtype=f16, rank=1",
+        "A,B,C: strides valid (>0 for both dims)",
+        "Bias: stride_valid (>0)",
+        "After applying transA/transB: A_view=[M,K], B_view=[K,N], C=[M,N]",
+        "Bias length == N",
+        "M>0, N>0, K>0",
+        "TC requirement: C is contiguous row-major (stride[1]==1 && stride[0]==C.shape[1])"
+      ],
+      "notes": [
+        "Kernel: gemm_f16_tc_wmma_out_f16_bias_relu_strided_kernel",
+        "Launch: block=(32,1,1) (single warp), grid=(ceil(N/16), ceil(M/16))",
+        "Compute: WMMA accumulate (f32), then epilogue does +bias and optional ReLU before storing f16.",
+        "K padded to ceil16(K) with zero-fill loads."
+      ]
+    }
+  ],
+  "suites": [
+    {
+      "id": "suite_basic",
+      "name": "basic_shapes_and_relu_toggle",
+      "desc": "Correctness across shapes, transpose flags, bias stride, and relu toggle for both f32 and f16 (where eligible).",
+      "cases": [
+        {
+          "id": "case_f32_relu_on",
+          "label": "f32: Bias+ReLU default (schema 0)",
+          "shape": "A=128x256, B=256x96, Bias=96, C=128x96",
+          "dtype": "f32",
+          "params": "attr schema=0 (transA=0, transB=0, relu=1)"
+        },
+        {
+          "id": "case_f32_relu_off",
+          "label": "f32: relu=0 via GPEL",
+          "shape": "A=128x256, B=256x96, Bias=96, C=128x96",
+          "dtype": "f32",
+          "params": "GPEL(transA=0, transB=0, relu=0)"
+        },
+        {
+          "id": "case_f32_bias_stride",
+          "label": "f32: bias stride>1 (non-contig 1D view)",
+          "shape": "A=64x128, B=128x64, Bias=64, C=64x64",
+          "dtype": "f32",
+          "params": "Bias.stride[0]=2; validate Bias indexing uses stride"
+        },
+        {
+          "id": "case_f16_tc_relu_on",
+          "label": "f16 TC: Bias+ReLU on (C contig row-major)",
+          "shape": "A=256x256, B=256x256, Bias=256, C=256x256",
+          "dtype": "f16",
+          "params": "C contiguous row-major; attr schema=0"
+        },
+        {
+          "id": "case_f16_tc_k_not_multiple_16",
+          "label": "f16 TC: K not multiple of 16 (zero-pad path)",
+          "shape": "A=128x250, B=250x96, Bias=96, C=128x96",
+          "dtype": "f16",
+          "params": "C contiguous row-major; relu=1"
+        }
+      ]
+    },
+    {
+      "id": "suite_gating",
+      "name": "tc_gating_and_bias",
+      "desc": "Verify TC path gating (C contiguous row-major) and bias dtype assumptions.",
+      "cases": [
+        {
+          "id": "case_tc_reject_noncontig_C",
+          "label": "Reject TC when C is not contiguous row-major",
+          "shape": "A=128x128, B=128x128, Bias=128, C=view/noncontig",
+          "dtype": "f16",
+          "params": "expect supported=false for TC variant"
+        },
+        {
+          "id": "case_reject_bias_wrong_dtype",
+          "label": "Reject when Bias dtype mismatch (f16 path requires Bias f16, f32 path requires Bias f32)",
+          "shape": "A=128x128, B=128x128, Bias=128, C=128x128",
+          "dtype": "A/B/C=f16, Bias=f32",
+          "params": "expect supported=false"
+        }
+      ]
+    }
+  ],
+  "experiments": [
+    {
+      "id": "exp_bias_contig_gating",
+      "ts": 0,
+      "title": "Optionally require Bias contiguous in TC path",
+      "suite_id": "suite_gating",
+      "change": "Enable the commented gating: require Bias stride==1 for f16 TC variant.",
+      "why": "Non-contig bias implies strided loads for every output element; can hurt bandwidth and complicate vectorization.",
+      "hypothesis": "Slight throughput gain for large N when bias is contiguous; clearer expectations for fused epilogue.",
+      "result": "",
+      "proof": "Benchmark TC variant with Bias stride=1 vs stride>1; ncu global load efficiency for bias.",
+      "conclusion": "",
+      "next": "If keeping stride support, consider caching bias tile in shared memory per CTA."
+    },
+    {
+      "id": "exp_vectorized_store_epilogue",
+      "ts": 0,
+      "title": "Vectorize epilogue store (bias+relu) for f16 path",
+      "suite_id": "suite_basic",
+      "change": "Store f16 outputs in vector packs (half2/half4) and fuse bias loads similarly when C is contiguous row-major.",
+      "why": "Current WMMA store loop writes scalars; vectorization can improve memory coalescing and reduce instruction count.",
+      "hypothesis": "Higher effective GB/s and lower latency for large M,N.",
+      "result": "",
+      "proof": "ncu: global store transactions per request, achieved bandwidth; correctness vs reference.",
+      "conclusion": "",
+      "next": "Add alignment gating and ensure bias addressing supports vector loads when stride==1."
+    },
+    {
+      "id": "exp_epilogue_extension",
+      "ts": 0,
+      "title": "Extend epilogue: bias + activation family",
+      "suite_id": "suite_basic",
+      "change": "Generalize relu flag into an activation enum (none/relu/gelu/silu) and optionally add scale (alpha) support.",
+      "why": "Epilogue fusion is the main win path for inference; having a richer epilogue avoids extra elementwise kernels.",
+      "hypothesis": "Fewer launches and better end-to-end throughput on transformer MLP blocks.",
+      "result": "",
+      "proof": "Measure graph-level speedup on MLP: GEMM+Bias+Act vs GEMM_epilogue fused; validate numerics.",
+      "conclusion": "",
+      "next": "Define new AttrBlob schema v1 with activation enum and parameters; keep v0 backward compatible."
+    }
+  ],
+  "measurements": [
+    {
+      "id": "m_template_f16_tc",
+      "ts": 0,
+      "suite_id": "suite_basic",
+      "case_id": "case_f16_tc_relu_on",
+      "variant_id": "v_gemm_bias_relu_f16_tc_wmma_out_f16_strided",
+      "device": "",
+      "driver": "",
+      "cuda": "",
+      "dtype": "f16",
+      "shape": "A=256x256 B=256x256 Bias=256 C=256x256",
+      "lat_us": "",
+      "gb_s": "",
+      "tflops": "",
+      "speedup": "",
+      "notes": "Report latency and achieved TFLOP/s (2*M*N*K ops). Compare against unfused GEMM + bias_add + relu chain.",
+      "ncu": "",
+      "nsys": ""
+    }
+  ]
+}

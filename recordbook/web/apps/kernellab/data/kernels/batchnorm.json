@@ -1,0 +1,280 @@
+{
+  "id": "batchnorm",
+  "name": "batchnorm",
+  "kind": "normalization",
+  "tags": ["cuda", "batchnorm", "nchw", "4d-only", "f16-io", "f32-stats", "atomic-reduction", "correctness-first"],
+  "summary": "BatchNorm (NCHW 4D only). f16 inputs/outputs (x,y,gamma,beta), f32 stats (running_mean/var or save_mean/rstd, dgamma/dbeta). Forward supports inference(using running stats) and training(batch stats). Backward supports training+affine only. Correctness-first via atomic reductions.",
+  "contract": [
+    "Layout / rank:",
+    " - NCHW 4D only: x[N,C,H,W] contiguous NCHW",
+    "",
+    "DType:",
+    " - x, y: f16",
+    " - gamma, beta: f16 when affine path",
+    " - running_mean, running_var: f32 (inference)",
+    " - save_mean, save_rstd: f32 (training outputs)",
+    " - dgamma, dbeta: f32 (backward outputs)",
+    "",
+    "Forward signatures:",
+    " - inference affine:  inputs(5) = x, gamma, beta, running_mean, running_var ; outputs(1) = y",
+    " - inference noaff :  inputs(3) = x, running_mean, running_var             ; outputs(1) = y",
+    " - training  affine:  inputs(3) = x, gamma, beta                           ; outputs(3) = y, save_mean, save_rstd",
+    " - training  noaff :  inputs(1) = x                                        ; outputs(3) = y, save_mean, save_rstd",
+    "",
+    "Backward signatures:",
+    " - training affine only: inputs(5) = x, dy, gamma, save_mean, save_rstd ; outputs(3) = dx, dgamma, dbeta",
+    " - training noaff: NotImplemented (even though supported() accepts it for dx-only, launch returns NotImplemented)",
+    "",
+    "Semantics (per-channel over NHW = N*H*W):",
+    " - Training stats: sum[c] = Σ x, sumsq[c] = Σ x^2 over N*H*W",
+    "   mean[c] = sum[c]/NHW",
+    "   var[c]  = sumsq[c]/NHW - mean[c]^2 (clamp var>=0)",
+    "   rstd[c] = rsqrt(var[c] + eps)",
+    " - Forward output: y = ((x - mean)*rstd)*gamma + beta (gamma/beta optional, default 1/0)",
+    " - Inference uses running_mean/var, computes rstd = rsqrt(running_var+eps) inside apply kernel",
+    " - Backward (PyTorch-style):",
+    "   dbeta[c]  = Σ dy",
+    "   dgamma[c] = Σ (dy * xhat), where xhat=(x-mean)*rstd",
+    "   dx = (gamma*rstd/NHW) * (NHW*dy - Σdy - xhat*Σ(dy*xhat))"
+  ],
+  "abi": [
+    "AttrBlob schema for forward: 'BNEP' (0x50454E42) = BatchNorm eps + flags.",
+    "payload layout (little-endian bytes):",
+    " - f32 eps",
+    " - u32 flags  (bit0 = use_running_stats)",
+    "",
+    "Defaults:",
+    " - schema_id==0 or missing/short payload => eps=1e-5, use_running_stats=true",
+    "",
+    "Runtime rule (launcher-enforced):",
+    " - If training signature is used (outputs==3), attr must NOT force running stats.",
+    "   i.e., if training && use_running_stats==true => Status::InvalidArgument",
+    "",
+    "Backward: AttrBlob ignored, expected_attr_schema_id = 0"
+  ],
+  "notes": [
+    "Contiguity constraint is strict NCHW (strideW=1, strideH=W, strideC=H*W, strideN=C*H*W).",
+    "Correctness-first reduction: stats and bwd sums use atomicAdd into float[C]. This is simple but can be slow for large NHW/C due to contention.",
+    "Forward(training): save_mean buffer is reused as sum then overwritten to mean; save_rstd is reused as sumsq then overwritten to var then in-place to rstd.",
+    "Launch policy: threads=256, blocks=ceil(N*C*H*W / 256), blocks capped at 4096.",
+    "All heavy kernels use grid-stride loops over flattened total=N*C*H*W.",
+    "bn_finalize_mean_var uses 1D over C; then bn_var_to_rstd_inplace converts var->rstd in-place."
+  ],
+  "variants": [
+    {
+      "id": "v_bn_fwd_infer_affine_f16_nchw",
+      "name": "batchnorm_fwd_infer_affine_f16_nchw",
+      "priority": 10,
+      "flags": 0,
+      "expected_attr_schema_id": "BNEP",
+      "supported": [
+        "inputs(5)=x,gamma,beta,running_mean,running_var ; outputs(1)=y",
+        "x,y: f16 4D NCHW contiguous; y shape == x shape",
+        "gamma,beta: f16 1D, len==C",
+        "running_mean,running_var: f32 1D, len==C"
+      ],
+      "notes": [
+        "Kernel path: bn_infer_apply_f16",
+        "Uses running stats; computes rsqrt(running_var+eps) inside the kernel."
+      ]
+    },
+    {
+      "id": "v_bn_fwd_infer_noaff_f16_nchw",
+      "name": "batchnorm_fwd_infer_noaff_f16_nchw",
+      "priority": 9,
+      "flags": 0,
+      "expected_attr_schema_id": "BNEP",
+      "supported": [
+        "inputs(3)=x,running_mean,running_var ; outputs(1)=y",
+        "x,y: f16 4D NCHW contiguous; y shape == x shape",
+        "running_mean,running_var: f32 1D, len==C"
+      ],
+      "notes": [
+        "Kernel path: bn_infer_apply_f16",
+        "gamma/beta treated as null => g=1, b=0"
+      ]
+    },
+    {
+      "id": "v_bn_fwd_train_affine_f16_nchw_atomic",
+      "name": "batchnorm_fwd_train_affine_f16_nchw_atomic",
+      "priority": 10,
+      "flags": 0,
+      "expected_attr_schema_id": "BNEP",
+      "supported": [
+        "inputs(3)=x,gamma,beta ; outputs(3)=y,save_mean,save_rstd",
+        "x,y: f16 4D NCHW contiguous; y shape == x shape",
+        "gamma,beta: f16 1D, len==C",
+        "save_mean,save_rstd: f32 1D, len==C",
+        "Attr rule: use_running_stats must be false when using training signature"
+      ],
+      "notes": [
+        "Pass A: bn_fwd_stats_f16_atomic => sum/sumsq",
+        "Pass B: bn_finalize_mean_var => sum->mean, sumsq->var",
+        "Pass C: bn_var_to_rstd_inplace => var->rstd",
+        "Pass D: bn_fwd_apply_f16 => y"
+      ]
+    },
+    {
+      "id": "v_bn_fwd_train_noaff_f16_nchw_atomic",
+      "name": "batchnorm_fwd_train_noaff_f16_nchw_atomic",
+      "priority": 8,
+      "flags": 0,
+      "expected_attr_schema_id": "BNEP",
+      "supported": [
+        "inputs(1)=x ; outputs(3)=y,save_mean,save_rstd",
+        "x,y: f16 4D NCHW contiguous; y shape == x shape",
+        "save_mean,save_rstd: f32 1D, len==C",
+        "Attr rule: use_running_stats must be false when using training signature"
+      ],
+      "notes": [
+        "Same as train_affine but gamma/beta are null => g=1, b=0"
+      ]
+    },
+    {
+      "id": "v_bn_bwd_train_affine_f16_nchw_atomic",
+      "name": "batchnorm_bwd_train_affine_f16_nchw_atomic",
+      "priority": 10,
+      "flags": 0,
+      "expected_attr_schema_id": 0,
+      "supported": [
+        "inputs(5)=x,dy,gamma,save_mean,save_rstd ; outputs(3)=dx,dgamma,dbeta",
+        "x,dy,dx: f16 4D NCHW contiguous; dx shape == x shape; dy shape == x shape",
+        "gamma: f16 1D, len==C",
+        "save_mean,save_rstd: f32 1D, len==C",
+        "dgamma,dbeta: f32 1D, len==C"
+      ],
+      "notes": [
+        "Pass A: bn_bwd_sums_f16_atomic => dbeta=sum(dy), dgamma=sum(dy*xhat)",
+        "Pass B: bn_bwd_dx_f16 => dx using sums + gamma"
+      ]
+    }
+  ],
+  "suites": [
+    {
+      "id": "suite_bn_forward",
+      "name": "forward_shapes_and_modes",
+      "desc": "Forward inference/training coverage with NCHW contig, affine/noaff; validate outputs and saved stats.",
+      "cases": [
+        {
+          "id": "case_fwd_train_affine_small",
+          "label": "Train affine N=8 C=64 H=32 W=32 (atomic contention moderate)",
+          "shape": "8x64x32x32",
+          "dtype": "f16(x/y/g/b) + f32(stats)",
+          "params": "contig NCHW; eps=1e-5; use_running_stats=false"
+        },
+        {
+          "id": "case_fwd_train_noaff_small",
+          "label": "Train noaff N=8 C=64 H=32 W=32",
+          "shape": "8x64x32x32",
+          "dtype": "f16(x/y) + f32(save_mean/save_rstd)",
+          "params": "contig NCHW; eps=1e-5; use_running_stats=false"
+        },
+        {
+          "id": "case_fwd_infer_affine_small",
+          "label": "Infer affine N=8 C=64 H=32 W=32",
+          "shape": "8x64x32x32",
+          "dtype": "f16(x/y/g/b) + f32(running_mean/var)",
+          "params": "contig NCHW; eps=1e-5; use_running_stats=true"
+        },
+        {
+          "id": "case_fwd_infer_noaff_small",
+          "label": "Infer noaff N=8 C=64 H=32 W=32",
+          "shape": "8x64x32x32",
+          "dtype": "f16(x/y) + f32(running_mean/var)",
+          "params": "contig NCHW; eps=1e-5; use_running_stats=true"
+        }
+      ]
+    },
+    {
+      "id": "suite_bn_backward",
+      "name": "backward_affine_only",
+      "desc": "Backward correctness for affine path; compare dx/dgamma/dbeta to reference.",
+      "cases": [
+        {
+          "id": "case_bwd_affine_small",
+          "label": "Bwd affine N=8 C=64 H=32 W=32",
+          "shape": "8x64x32x32",
+          "dtype": "f16(x/dy/dx/gamma) + f32(save_mean/save_rstd/dg/db)",
+          "params": "contig NCHW; save_mean/rstd from fwd training"
+        }
+      ]
+    },
+    {
+      "id": "suite_gate_checks",
+      "name": "supported_gating",
+      "desc": "Ensure supported() rejects non-4D, non-contig, wrong dtypes, and wrong channel lengths.",
+      "cases": [
+        {
+          "id": "case_reject_noncontig",
+          "label": "Reject non-contiguous NCHW",
+          "shape": "view/transpose to break stride",
+          "dtype": "f16",
+          "params": "expect supported=false"
+        },
+        {
+          "id": "case_reject_wrong_stats_dtype",
+          "label": "Reject running_mean/var not f32",
+          "shape": "8x64x32x32",
+          "dtype": "stats=f16",
+          "params": "expect supported=false"
+        },
+        {
+          "id": "case_reject_training_with_use_running",
+          "label": "Reject training signature + use_running_stats=true",
+          "shape": "8x64x32x32",
+          "dtype": "f16/f32",
+          "params": "expect launch InvalidArgument"
+        }
+      ]
+    }
+  ],
+  "experiments": [
+    {
+      "id": "exp_bn_reduce_opt",
+      "ts": 0,
+      "title": "Replace atomic reductions with block/warp reductions",
+      "suite_id": "suite_bn_forward",
+      "change": "Compute per-channel sum/sumsq using hierarchical reduction (block partials -> final reduce) instead of atomicAdd into sum[C]/sumsq[C].",
+      "why": "Atomic contention grows with NHW and hurts throughput; especially for large N*H*W and small C.",
+      "hypothesis": "Reduce global atomic traffic; improve latency and effective bandwidth for training forward and backward sums.",
+      "result": "",
+      "proof": "ncu: check atomic throughput, serialization stalls; compare kernel time vs baseline atomic version; validate correctness.",
+      "conclusion": "",
+      "next": "Try per-CTA shared partials + final kernel over partials; consider C-tiling when C large."
+    },
+    {
+      "id": "exp_bn_fuse_apply",
+      "ts": 0,
+      "title": "Fuse finalize + rstd + apply (training forward)",
+      "suite_id": "suite_bn_forward",
+      "change": "After computing sum/sumsq, fuse mean/var/rstd computation with apply using a single kernel over (C, NHW) with cached mean/rstd in registers or shared.",
+      "why": "Currently 3 small C-kernels + 1 big apply kernel; extra launches and extra global reads of mean/rstd.",
+      "hypothesis": "Fewer launches + fewer global reads => lower latency.",
+      "result": "",
+      "proof": "nsys launch timeline + ncu memory reads; validate saved_mean/save_rstd outputs match reference.",
+      "conclusion": "",
+      "next": "If keeping save buffers, ensure they still end up with mean/rstd as required by backward."
+    }
+  ],
+  "measurements": [
+    {
+      "id": "m_template_fwd_train_affine",
+      "ts": 0,
+      "suite_id": "suite_bn_forward",
+      "case_id": "case_fwd_train_affine_small",
+      "variant_id": "v_bn_fwd_train_affine_f16_nchw_atomic",
+      "device": "",
+      "driver": "",
+      "cuda": "",
+      "dtype": "f16+f32",
+      "shape": "8x64x32x32",
+      "lat_us": "",
+      "gb_s": "",
+      "tflops": "",
+      "speedup": "",
+      "notes": "Report latency; optional: effective read/write GB/s for x/y and stat buffers; training forward has multiple kernels.",
+      "ncu": "",
+      "nsys": ""
+    }
+  ]
+}

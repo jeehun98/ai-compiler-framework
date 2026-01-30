@@ -1,0 +1,230 @@
+{
+  "id": "mse_grad",
+  "name": "mse_grad",
+  "kind": "loss_grad",
+  "tags": ["cuda", "mse", "grad", "elementwise", "nd", "contiguous", "grid-stride", "f16", "f32", "half2", "memory-bound"],
+  "summary": "dPred = (Pred - Target) * scale. scale defaults to 2/numel unless AttrBlob('MSEG') provides explicit scale. Supports f32 and f16; f16 uses half2(vec2) fastpath when numel even and pointers are 4B aligned.",
+  "contract": [
+    "Inputs (2): Pred, Target",
+    "Outputs (1): dPred",
+    "",
+    "DType/contiguity:",
+    " - Pred,Target,dPred: {f16,f32}, contiguous",
+    " - All tensors must share the same dtype (variant-selected) and same shape",
+    "",
+    "Shape constraints:",
+    " - rank >= 1",
+    " - Pred shape == Target shape == dPred shape",
+    " - numel = product(shape[0..rank-1]) must be > 0 (launcher treats <=0 as invalid)",
+    "",
+    "Semantics:",
+    " - dPred[i] = (Pred[i] - Target[i]) * scale, flattened over numel",
+    " - default scale = 2.0 / numel unless provided by AttrBlob('MSEG')",
+    "",
+    "Vectorization (f16 only):",
+    " - half2 path if numel even AND Pred/Target/dPred pointers are 4-byte aligned"
+  ],
+  "abi": [
+    "AttrBlob schema (optional):",
+    " - schema_id == 0 => default scale = 2.0/numel",
+    " - schema_id == 'MSEG' (0x4745534D) => payload: float32 scale (little-endian)",
+    "Python pack: struct.pack('<f', scale)",
+    "",
+    "Parsing behavior:",
+    " - only schema_id=='MSEG' is parsed; otherwise treated as 'no scale provided' and defaults apply",
+    "",
+    "expected_attr_schema_id:",
+    " - variants set expected_attr_schema_id = 0 (dispatcher should allow passing schema 0 or MSEG; launcher parses MSEG when present)"
+  ],
+  "notes": [
+    "Kernels use grid-stride loops: i += blockDim.x * gridDim.x.",
+    "Block selection caps blocks at 4096 (compute_blocks_1d).",
+    "f16 half2 path uses __hsub2 + __hmul2 with scale broadcast to __half2 via __float2half2_rn(scale).",
+    "mse_grad_check_dt validates rank>=1, contiguous, same shape, and numel>0.",
+    "mse_grad_vec2_ok gates half2 on (numel even) + (4B alignment for all pointers).",
+    "Workspace: none (0 bytes)."
+  ],
+  "variants": [
+    {
+      "id": "v_mse_grad_f32",
+      "name": "mse_grad_f32",
+      "priority": 0,
+      "flags": 0,
+      "expected_attr_schema_id": 0,
+      "supported": [
+        "dtype=f32",
+        "Pred,Target,dPred contiguous",
+        "rank(Pred) >= 1",
+        "Pred/Target/dPred same shape",
+        "numel(Pred) > 0"
+      ],
+      "notes": "Kernel: mse_grad_f32_kernel. Launch: threads=256, blocks=min(ceil(numel/256), 4096), grid-stride."
+    },
+    {
+      "id": "v_mse_grad_f16_scalar",
+      "name": "mse_grad_f16",
+      "priority": 0,
+      "flags": 0,
+      "expected_attr_schema_id": 0,
+      "supported": [
+        "dtype=f16",
+        "Pred,Target,dPred contiguous",
+        "rank(Pred) >= 1",
+        "Pred/Target/dPred same shape",
+        "numel(Pred) > 0"
+      ],
+      "notes": "Scalar f16 kernel fallback: mse_grad_f16_kernel using __half2float / __float2half_rn, grid-stride."
+    },
+    {
+      "id": "v_mse_grad_f16_vec2_half2",
+      "name": "mse_grad_f16x2_half2",
+      "priority": 10,
+      "flags": 0,
+      "expected_attr_schema_id": 0,
+      "supported": [
+        "dtype=f16",
+        "Pred,Target,dPred contiguous",
+        "rank(Pred) >= 1",
+        "Pred/Target/dPred same shape",
+        "numel(Pred) even",
+        "Pred/Target/dPred pointers 4B aligned"
+      ],
+      "notes": "Fastpath: mse_grad_f16x2_kernel over numel2=numel/2 with __half2 ops, grid-stride."
+    }
+  ],
+  "suites": [
+    {
+      "id": "suite_basic",
+      "name": "basic_shapes_and_dtypes",
+      "desc": "Cover common ND shapes and both dtypes; validate default scale and explicit scale.",
+      "cases": [
+        {
+          "id": "case_f32_vec_1m_default",
+          "label": "f32 1D n=1,048,576 default scale(2/numel)",
+          "shape": "n=1048576",
+          "dtype": "f32",
+          "params": "attr schema_id=0"
+        },
+        {
+          "id": "case_f32_mat_4096x768_scale",
+          "label": "f32 2D 4096x768 explicit scale",
+          "shape": "4096x768",
+          "dtype": "f32",
+          "params": "attr=MSEG(scale=0.001)"
+        },
+        {
+          "id": "case_f16_vec_even_half2",
+          "label": "f16 1D n=1,048,576 (even + aligned → half2 eligible)",
+          "shape": "n=1048576",
+          "dtype": "f16",
+          "params": "aligned; attr schema_id=0"
+        },
+        {
+          "id": "case_f16_vec_odd_fallback",
+          "label": "f16 1D n=1,048,575 (odd → scalar fallback)",
+          "shape": "n=1048575",
+          "dtype": "f16",
+          "params": "aligned; attr schema_id=0"
+        }
+      ]
+    },
+    {
+      "id": "suite_alignment",
+      "name": "half2_gating_alignment",
+      "desc": "Force alignment/misalignment to verify half2 gating for f16.",
+      "cases": [
+        {
+          "id": "case_align_ok",
+          "label": "Aligned pointers (expect half2 when numel even)",
+          "shape": "n=1048576",
+          "dtype": "f16",
+          "params": "aligned"
+        },
+        {
+          "id": "case_align_bad",
+          "label": "Misaligned(+2B view) (force scalar fallback)",
+          "shape": "n=1048576",
+          "dtype": "f16",
+          "params": "misaligned(+2B view)"
+        }
+      ]
+    },
+    {
+      "id": "suite_attr",
+      "name": "scale_attr_behavior",
+      "desc": "Validate default scale vs explicit MSEG scale and schema mismatch fallback.",
+      "cases": [
+        {
+          "id": "case_default_scale",
+          "label": "schema_id=0 → scale=2/numel",
+          "shape": "1024x1024",
+          "dtype": "f32",
+          "params": "attr schema_id=0"
+        },
+        {
+          "id": "case_explicit_scale",
+          "label": "schema_id='MSEG' → scale from payload",
+          "shape": "1024x1024",
+          "dtype": "f32",
+          "params": "attr=MSEG(scale=2.0)"
+        },
+        {
+          "id": "case_schema_mismatch",
+          "label": "unknown schema → treated as no-scale (default 2/numel)",
+          "shape": "1024x1024",
+          "dtype": "f32",
+          "params": "attr schema_id='XXXX'"
+        }
+      ]
+    }
+  ],
+  "experiments": [
+    {
+      "id": "exp_half2_fastpath",
+      "ts": 0,
+      "title": "f16 half2(vec2) fastpath",
+      "suite_id": "suite_basic",
+      "change": "Add half2 kernel mse_grad_f16x2_kernel gated by even numel + 4B alignment.",
+      "why": "Reduce instruction count and improve memory throughput for f16 elementwise grad.",
+      "hypothesis": "Large tensors see higher GB/s vs scalar f16 kernel with identical results.",
+      "result": "",
+      "proof": "Check selected variant + ncu dram throughput; compare gld/gst efficiency; validate correctness vs reference.",
+      "conclusion": "",
+      "next": "Try vectorized global loads (ld.global.v2) + unroll 2-4 to reduce loop overhead."
+    },
+    {
+      "id": "exp_scale_fuse",
+      "ts": 0,
+      "title": "Precompute default scale on host side",
+      "suite_id": "suite_attr",
+      "change": "Pass explicit MSEG(scale=2/numel) from planner to avoid device-side branching on attr presence.",
+      "why": "Slightly simplifies launch path and keeps scale logic consistent across backends.",
+      "hypothesis": "No perf change in kernel; less host logic divergence.",
+      "result": "",
+      "proof": "Compare functional outputs and launch-time overhead (nsys).",
+      "conclusion": "",
+      "next": "Standardize loss-grad ops to always require explicit scale in AttrBlob."
+    }
+  ],
+  "measurements": [
+    {
+      "id": "m_template",
+      "ts": 0,
+      "suite_id": "suite_basic",
+      "case_id": "case_f16_vec_even_half2",
+      "variant_id": "v_mse_grad_f16_vec2_half2",
+      "device": "",
+      "driver": "",
+      "cuda": "",
+      "dtype": "f16",
+      "shape": "n=1048576",
+      "lat_us": "",
+      "gb_s": "",
+      "tflops": "",
+      "speedup": "",
+      "notes": "Elementwise grad: report latency + effective GB/s. Compare scalar vs half2.",
+      "ncu": "",
+      "nsys": ""
+    }
+  ]
+}
