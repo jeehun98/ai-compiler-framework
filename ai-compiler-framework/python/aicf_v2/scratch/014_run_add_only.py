@@ -23,6 +23,6 @@ feed = {
 ref = feed["a"] + feed["b"]
 
 out = exe.run(m, feed)
-Y = out["s.out"]
+Y = out["y"]
 
 print("max|delta| =", (Y - ref).abs().max().item())
