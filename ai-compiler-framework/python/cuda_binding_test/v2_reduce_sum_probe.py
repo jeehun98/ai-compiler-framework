@@ -12,7 +12,7 @@ for p in (EX_PY, BUILD_PY):
     if sp not in sys.path:
         sys.path.insert(0, sp)
 
-from aicf_cuda import _C
+import _C
 
 RSUM = 0x5253554D  # 'RSUM' (ReduceSumAttrV0 schema_id)
 def pack_axis(axis: int) -> bytes:

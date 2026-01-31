@@ -43,5 +43,39 @@ def pack_attrs(kind, attrs, *, runtime_flags=None) -> bytes:
     if kind == "layernorm_bwd":
         return b""
 
+    if kind == "reduce_sum":
+        axis = int(attrs.get("axis", 0))
+        return struct.pack("<q", axis)
+
+    if kind == "mse_grad":
+        return b""  # schema=0, default scale path
+
+    if kind == "mse_grad_scaled":
+        scale = float(attrs["scale"])  # 반드시 있어야 함
+        return struct.pack("<f", scale)
     
+    if kind == "relu_bwd":
+        return b""  
+    
+    if kind == "copy":
+        return b""
+    
+    if kind == "grad_zero":
+        return b""
+    
+    if kind == "step_inc":
+        return b""
+    
+    if kind == "bias_corr":
+        beta1 = float(attrs.get("beta1", 0.9))
+        beta2 = float(attrs.get("beta2", 0.999))
+        return struct.pack("<ff", beta1, beta2)
+    
+    # ✅ matches your binding test: <iii> transA, transB, relu
+    if kind == "gemm_epilogue":
+        ta = 1 if bool(attrs.get("transA", False)) else 0
+        tb = 1 if bool(attrs.get("transB", False)) else 0
+        relu = 1 if bool(attrs.get("relu", True)) else 0
+        return struct.pack("<iii", ta, tb, relu)
+
     raise KeyError(f"pack_attrs: unsupported op kind '{kind}'")
