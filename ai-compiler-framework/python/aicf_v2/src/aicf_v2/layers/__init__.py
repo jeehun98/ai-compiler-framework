@@ -3,4 +3,12 @@ from .linear import Linear
 from .relu import ReLU
 from .add import Add
 
-__all__ = ["Layer", "Linear", "ReLU", "Add"]
+from .adam_step import AdamStep
+
+__all__ = [
+    "Layer",
+    "Linear",
+    "ReLU",
+    "Add",
+    "AdamStep",
+]

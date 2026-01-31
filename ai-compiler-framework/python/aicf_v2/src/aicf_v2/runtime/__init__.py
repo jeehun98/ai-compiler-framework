@@ -1,3 +1,1 @@
-from .cuda_exec import CudaExecutor, LoweredOp
-
-__all__ = ["CudaExecutor", "LoweredOp"]
+from .cuda_exec import CudaExecutor

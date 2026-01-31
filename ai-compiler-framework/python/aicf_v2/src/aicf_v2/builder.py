@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional
 from .tensor_spec import TensorSpec
 from .graph import Value, Op
 
+
 class Builder:
     def __init__(self, dtype: str, device: str):
         self.dtype = str(dtype)
@@ -14,7 +15,10 @@ class Builder:
 
         self._name2vid: Dict[str, int] = {}
         self.input_vids: List[int] = []
+
+        # outputs (execution result interface)
         self.output_vids: List[int] = []
+        self.outputs: Dict[str, int] = {}  # output alias name -> vid
 
     # -------- Values --------
     def input(self, name: str, spec: TensorSpec) -> int:
@@ -38,7 +42,7 @@ class Builder:
             raise ValueError(f"Value name already exists: {name}")
         vid = len(self.values)
         self._name2vid[name] = vid
-        self.values.append(Value(vid=vid, name=name, spec=spec, producer_op=producer_op))
+        self.values.append(Value(vid=vid, name=str(name), spec=spec, producer_op=producer_op))
         return vid
 
     # -------- Emit ops --------
@@ -75,6 +79,27 @@ class Builder:
 
         return op_index
 
+    # -------- Outputs --------
     def output(self, name: str, vid: int) -> None:
-        # name은 우선 dump에서 쓰진 않지만, 나중에 output alias mapping에 사용 가능
-        self.output_vids.append(int(vid))
+        """
+        Register a user-facing output alias.
+
+        - `name` is the key the executor should return (out[name] = tensor).
+        - `vid` is the internal value id.
+
+        Keeps:
+          - outputs[name] = vid
+          - output_vids maintains unique vids in insertion order
+        """
+        name = str(name)
+        vid = int(vid)
+
+        # optional: prevent accidental remap of the same output name to a different vid
+        if name in self.outputs and self.outputs[name] != vid:
+            raise ValueError(f"Output name '{name}' already mapped to vid={self.outputs[name]}, cannot remap to vid={vid}")
+
+        self.outputs[name] = vid
+
+        # keep deterministic unique list of vids
+        if vid not in self.output_vids:
+            self.output_vids.append(vid)

@@ -10,11 +10,19 @@ class Model:
         self.dtype = str(dtype)
         self.device = str(device)
         self.b = Builder(dtype=self.dtype, device=self.device)
-
+    
     def input(self, name: str, spec: TensorSpec) -> int:
+        if spec.dtype is None or spec.device is None:
+            spec = TensorSpec(
+                shape=spec.shape,
+                dtype=spec.dtype or self.dtype,
+                device=spec.device or self.device,
+            )
         return self.b.input(name, spec)
 
-    def add(self, layer: Layer, *xs: int) -> int:
+
+
+    def add(self, layer: Layer, *xs: int) -> int | tuple[int, ...]:
         return layer.emit(self.b, *xs)
 
     def output(self, name: str, vid: int) -> None:

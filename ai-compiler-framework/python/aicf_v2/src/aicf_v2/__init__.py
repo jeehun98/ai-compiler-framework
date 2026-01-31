@@ -1,19 +1,19 @@
 from .tensor_spec import TensorSpec
 from .model import Model
-from .builder import Builder
 
-from .layers import Layer, Linear, ReLU, Add
+from .layers.linear import Linear
+from .layers.relu import ReLU
+from .layers.add import Add
+from .layers.adam_step import AdamStep
 
+from .runtime.cuda_exec import CudaExecutor
 
 __all__ = [
     "TensorSpec",
     "Model",
-    "Builder",
-    "Layer",
     "Linear",
     "ReLU",
     "Add",
+    "AdamStep",
+    "CudaExecutor",
 ]
-
-from .runtime import CudaExecutor
-__all__.append("CudaExecutor")
