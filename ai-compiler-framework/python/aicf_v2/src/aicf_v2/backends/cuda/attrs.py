@@ -24,4 +24,24 @@ def pack_attrs(kind, attrs, *, runtime_flags=None) -> bytes:
         eps = float(attrs.get("eps", 1e-8))
         return struct.pack("<ffff", lr, beta1, beta2, eps)
 
+    if kind == "sgd_step":
+        lr = float(attrs.get("lr", 1e-3))
+        return struct.pack("<f", lr)
+    
+    if kind == "batchnorm_fwd":
+        eps = float(attrs.get("eps", 1e-5))
+        use_running_stats = 1 if bool(attrs.get("use_running_stats", False)) else 0
+        return struct.pack("<fI", eps, use_running_stats)
+
+    if kind == "batchnorm_bwd":
+        return b""
+
+    if kind == "layernorm_fwd":
+        eps = float(attrs.get("eps", 1e-5))
+        return struct.pack("<f", eps)
+
+    if kind == "layernorm_bwd":
+        return b""
+
+    
     raise KeyError(f"pack_attrs: unsupported op kind '{kind}'")

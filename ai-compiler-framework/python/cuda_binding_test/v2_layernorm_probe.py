@@ -16,7 +16,7 @@ for p in (EX_PY, BUILD_PY):
 
 import struct
 import torch
-import aicf_cuda._C as _C
+import _C
 
 def schema_id(tag4: str) -> int:
     b = tag4.encode("ascii")
