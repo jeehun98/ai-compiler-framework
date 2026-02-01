@@ -51,13 +51,13 @@ class AdamStep(Layer):
             if tuple(s.shape) != tuple(P_spec.shape):
                 raise ValueError(f"AdamStep shape mismatch: P.shape={P_spec.shape} {nm}.shape={s.shape}")
 
-        # bc1/bc2 must be scalar
+        # bc1/bc2 must be scalar (v2: allow (1,) since 0d is forbidden)
         for nm, s in [("bc1", bc1_spec), ("bc2", bc2_spec)]:
             if s.dtype != P_spec.dtype:
                 raise ValueError(f"AdamStep dtype mismatch: P={P_spec.dtype} {nm}={s.dtype}")
             if s.device != P_spec.device:
                 raise ValueError(f"AdamStep device mismatch: P={P_spec.device} {nm}={s.device}")
-            if tuple(s.shape) != tuple(()):
+            if tuple(s.shape) not in (tuple(()), (1,)):
                 raise ValueError(f"AdamStep expects {nm} as scalar tensor; got shape={s.shape}")
 
         # outputs (same spec as P/M/V)

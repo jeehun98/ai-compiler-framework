@@ -2,7 +2,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from .tensor_spec import TensorSpec
-from .graph import Value, Op
+from .graph import Value, Op, ValueRole
 
 
 class Builder:
@@ -14,7 +14,14 @@ class Builder:
         self.ops: List[Op] = []
 
         self._name2vid: Dict[str, int] = {}
-        self.input_vids: List[int] = []
+
+        # externals (feed로 들어오는 것들)
+        self.input_vids: List[int] = []   # 순수 입력
+        self.param_vids: List[int] = []   # W/b 같은 파라미터
+        self.state_vids: List[int] = []   # optimizer state (m/v/step 등)
+
+        # 기존 호환: "externals 전체"가 필요하면 이걸 쓰면 됨
+        self.external_vids: List[int] = []
 
         # outputs (execution result interface)
         self.output_vids: List[int] = []
@@ -22,27 +29,39 @@ class Builder:
 
     # -------- Values --------
     def input(self, name: str, spec: TensorSpec) -> int:
-        vid = self._new_value(name, spec, producer_op=None)
+        vid = self._new_value(name, spec, producer_op=None, role="input")
         self.input_vids.append(vid)
+        self.external_vids.append(vid)
         return vid
 
     def param(self, name: str, spec: TensorSpec) -> int:
-        # params are "externally provided" -> treat as inputs
+        # params are "externally provided" -> treat as externals
         if name in self._name2vid:
             return self._name2vid[name]
-        vid = self._new_value(name, spec, producer_op=None)
-        self.input_vids.append(vid)
+        vid = self._new_value(name, spec, producer_op=None, role="param")
+        self.param_vids.append(vid)
+        self.external_vids.append(vid)
+        return vid
+
+    def state(self, name: str, spec: TensorSpec) -> int:
+        # optimizer state, also external (initial value) but then mutated in graph
+        if name in self._name2vid:
+            return self._name2vid[name]
+        vid = self._new_value(name, spec, producer_op=None, role="state")
+        self.state_vids.append(vid)
+        self.external_vids.append(vid)
         return vid
 
     def value(self, name: str, spec: TensorSpec) -> int:
-        return self._new_value(name, spec, producer_op=None)
+        # internal temp by default
+        return self._new_value(name, spec, producer_op=None, role="tmp")
 
-    def _new_value(self, name: str, spec: TensorSpec, producer_op: Optional[int]) -> int:
+    def _new_value(self, name: str, spec: TensorSpec, producer_op: Optional[int], role: ValueRole) -> int:
         if name in self._name2vid:
             raise ValueError(f"Value name already exists: {name}")
         vid = len(self.values)
         self._name2vid[name] = vid
-        self.values.append(Value(vid=vid, name=str(name), spec=spec, producer_op=producer_op))
+        self.values.append(Value(vid=vid, name=str(name), spec=spec, producer_op=producer_op, role=role))
         return vid
 
     # -------- Emit ops --------
@@ -74,6 +93,7 @@ class Builder:
         # book-keeping
         for out_vid in outputs:
             self.values[out_vid].producer_op = op_index
+            # (선택) output role 자동 지정하고 싶으면 여기서 처리 가능
         for in_vid in inputs:
             self.values[in_vid].users.append(op_index)
 
@@ -94,12 +114,15 @@ class Builder:
         name = str(name)
         vid = int(vid)
 
-        # optional: prevent accidental remap of the same output name to a different vid
         if name in self.outputs and self.outputs[name] != vid:
-            raise ValueError(f"Output name '{name}' already mapped to vid={self.outputs[name]}, cannot remap to vid={vid}")
+            raise ValueError(
+                f"Output name '{name}' already mapped to vid={self.outputs[name]}, cannot remap to vid={vid}"
+            )
 
         self.outputs[name] = vid
 
-        # keep deterministic unique list of vids
         if vid not in self.output_vids:
             self.output_vids.append(vid)
+
+        # (선택) output으로 등록된 value의 role을 "output"으로 바꾸고 싶으면:
+        # self.values[vid].role = "output"

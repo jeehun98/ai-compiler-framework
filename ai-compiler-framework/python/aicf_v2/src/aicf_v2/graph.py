@@ -1,8 +1,10 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Literal
 
 from .tensor_spec import TensorSpec
+
+ValueRole = Literal["input", "param", "state", "tmp", "output"]
 
 @dataclass
 class Value:
@@ -11,6 +13,9 @@ class Value:
     spec: TensorSpec
     producer_op: Optional[int] = None
     users: List[int] = field(default_factory=list)
+
+    # ✅ NEW: role for CUDA Graph-friendly policies
+    role: ValueRole = "tmp"
 
 @dataclass
 class Op:

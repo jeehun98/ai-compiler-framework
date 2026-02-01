@@ -8,14 +8,9 @@ class StepInc(Layer):
     StepInc:
       S_out = S + 1   (int32)
 
-    Kernel contract:
-      inputs : [S]
-      outputs: [S_out]
-      schema : 0
-      payload: empty
-
     Note:
-      kernel supports in-place, but v2 keeps alias/inplace planning for later.
+      kernel supports in-place.
+      Alias/inplace decision is made in plan (constraints inplace_ok).
     """
 
     def __init__(self, name: str):
@@ -32,5 +27,6 @@ class StepInc(Layer):
             inputs=[s],
             outputs=[so],
             name=f"{self.name}.step_inc",
+            constraints={"inplace_ok": True},   # ✅ 이거 추가
         )
         return so
