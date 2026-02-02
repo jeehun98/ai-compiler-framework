@@ -1,7 +1,11 @@
-# src/aicf_v2/layers/gemm_epilogue.py
 from __future__ import annotations
+
 from .base import Layer
 from ..tensor_spec import TensorSpec
+
+from ..emitters.cuda.context import CudaEmitContext
+from ..emitters.cuda.gemm_epilogue import gemm_epilogue as emit_gemm_epilogue
+
 
 class GemmEpilogue(Layer):
     """
@@ -12,13 +16,14 @@ class GemmEpilogue(Layer):
       outputs = [C]            C shape: (M, N)
       attrs payload: <iii> (transA, transB, relu) with schema_id=0
     """
+
     def __init__(self, name: str, *, transA: bool = False, transB: bool = False, relu: bool = True):
         super().__init__(name)
         self.transA = bool(transA)
         self.transB = bool(transB)
         self.relu = bool(relu)
 
-    def emit(self, b, A: int, B: int, bias: int) -> int:
+    def emit(self, b, A: int, B: int, bias: int, *, ctx: CudaEmitContext) -> int:
         a = b.values[A].spec
         w = b.values[B].spec
         bi = b.values[bias].spec
@@ -38,12 +43,16 @@ class GemmEpilogue(Layer):
         y_spec = TensorSpec(shape=(M, N), dtype=a.dtype, device=a.device)
         Y = b.value(f"{self.name}.out", y_spec)
 
-        b.emit(
-            "gemm_epilogue",
-            inputs=[A, B, bias],
-            outputs=[Y],
+        emit_gemm_epilogue(
+            b, ctx,
+            A=A,
+            B=B,
+            bias=bias,
+            out=Y,
+            transA=self.transA,
+            transB=self.transB,
+            relu=self.relu,
             name=f"{self.name}.gemm_epilogue",
-            attrs={"transA": self.transA, "transB": self.transB, "relu": self.relu},
             hints={"prefer_epilogue_fusion": True},
         )
         return Y

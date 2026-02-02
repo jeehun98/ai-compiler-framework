@@ -6,7 +6,7 @@ import torch
 from ..model import Model
 from ..builder import Builder
 from ..compile.compile import compile_cuda
-from ..compile.types import CompiledProgram
+from ..compile.types import CompiledProgram, LoweredOp
 from ..backends.cuda.registry import CudaRegistry
 from ..backends.cuda.bridge import op_call, current_stream_u64
 from .alloc import bind_and_alloc_slots
@@ -14,20 +14,13 @@ from .graph_capture import GraphCapturedProgram, capture_cuda_graph, replay_cuda
 
 
 def _tensor_sig(t: torch.Tensor) -> Tuple[Tuple[int, ...], str, str]:
-    # (shape, dtype, device)
-    # NOTE: do NOT include contiguity in cache key. We already contig() at bind/copy stage.
     return (tuple(t.shape), str(t.dtype), str(t.device))
 
 
 def _feed_signature(b: Builder, feed: Dict[str, torch.Tensor]) -> Tuple[Tuple[str, Tuple[Tuple[int, ...], str, str]], ...]:
-    """
-    Stable signature used for CUDA graph cache.
-    Uses ONLY externals and only shape/dtype/device.
-    """
     items = []
     for vid in getattr(b, "external_vids", []):
         name = b.values[vid].name
-        # FIX: make missing external a hard error (safer cache key & capture behavior)
         if name not in feed:
             raise KeyError(f"Missing feed for external '{name}'")
         items.append((name, _tensor_sig(feed[name])))
@@ -35,48 +28,32 @@ def _feed_signature(b: Builder, feed: Dict[str, torch.Tensor]) -> Tuple[Tuple[st
     return tuple(items)
 
 
-def _fixup_inputs_for_backend(kind: str, ins: list[torch.Tensor]) -> list[torch.Tensor]:
+def _apply_abi_fixups(lop: LoweredOp, ins: list[torch.Tensor]) -> list[torch.Tensor]:
     """
-    Backend ABI fixups (temporary shims).
+    Apply ABI fixups using per-op hints (emitter-provided).
 
-    - adam_step: C++ kernel test uses rank0 scalars for bc1/bc2.
-      In v2 we often represent scalars as shape (1,).
-      Use view(()) to present rank0 to the kernel without copying.
+    Supported hints:
+      - view_rank0_inputs: list[int]
+          For each input index i, if ins[i] is rank1 scalar (shape (1,), numel==1),
+          present it to the backend as rank0 via view(()) without copy.
     """
-    if kind == "adam_step":
-        # inputs: [P, G, M, V, bc1, bc2]
-        if len(ins) >= 6:
-            bc1 = ins[4]
-            bc2 = ins[5]
-            if bc1.dim() == 1 and bc1.numel() == 1:
-                ins[4] = bc1.view(())
-            if bc2.dim() == 1 and bc2.numel() == 1:
-                ins[5] = bc2.view(())
+    hints = getattr(lop, "hints", None) or {}
+    idxs = hints.get("view_rank0_inputs", None)
+    if idxs:
+        for i in idxs:
+            if 0 <= i < len(ins):
+                t = ins[i]
+                if t.dim() == 1 and t.numel() == 1:
+                    ins[i] = t.view(())
     return ins
 
 
 class CudaExecutor:
-    """
-    Executor:
-      - compile(Model) -> CompiledProgram(plan)
-      - run_compiled(Model, CompiledProgram, feed) -> outputs
-      - run(Model, feed) -> uses compiled cache for stable plan identity
-
-    + optional CUDA Graph capture/replay cache
-    """
-
     def __init__(self, registry: Optional[CudaRegistry] = None):
         self.registry = registry or CudaRegistry()
-
-        # compiled cache: prevents plan identity changing every run()
         self._compiled_cache: Dict[int, CompiledProgram] = {}
-
-        # cuda graph cache: key -> GraphCapturedProgram
         self._graph_cache: Dict[Any, GraphCapturedProgram] = {}
 
-    # -------------------------
-    # Compile
-    # -------------------------
     def compile(self, m: Model) -> CompiledProgram:
         return compile_cuda(m, self.registry)
 
@@ -92,9 +69,6 @@ class CudaExecutor:
         self._compiled_cache.clear()
         self._graph_cache.clear()
 
-    # -------------------------
-    # Public run
-    # -------------------------
     def run(
         self,
         m: Model,
@@ -102,7 +76,7 @@ class CudaExecutor:
         *,
         stream: Optional[int] = None,
         use_cuda_graph: bool = True,
-        mode: str = "inference",  # "inference" | "train"
+        mode: str = "inference",
         warmup: int = 2,
     ) -> Dict[str, torch.Tensor]:
         prog = self.compile_cached(m)
@@ -116,9 +90,6 @@ class CudaExecutor:
             warmup=warmup,
         )
 
-    # -------------------------
-    # Graph cache key
-    # -------------------------
     def _cache_key(
         self,
         m: Model,
@@ -133,9 +104,6 @@ class CudaExecutor:
         plan_key = getattr(prog.plan, "plan_id", None) or id(prog.plan)
         return (mode, plan_key, static_roles, copy_roles, _feed_signature(b, feed))
 
-    # -------------------------
-    # Core execution
-    # -------------------------
     def run_compiled(
         self,
         m: Model,
@@ -144,7 +112,7 @@ class CudaExecutor:
         *,
         stream: Optional[int] = None,
         use_cuda_graph: bool = True,
-        mode: str = "inference",  # "inference" | "train"
+        mode: str = "inference",
         warmup: int = 2,
     ) -> Dict[str, torch.Tensor]:
         b: Builder = m.b
@@ -162,13 +130,12 @@ class CudaExecutor:
             for out_vid, in_vid in plan.alias.items():
                 slots[out_vid] = slots[in_vid]
 
-            # execute lowered ops
             for lop in plan.lowered:
                 ins = [slots[v] for v in lop.in_vids]
                 outs = [slots[v] for v in lop.out_vids]
 
-                # FIX: ABI shim (adam_step bc1/bc2 rank fix)
-                ins = _fixup_inputs_for_backend(lop.kind, ins)
+                # ✅ ABI fixups via hints (no kind hardcode)
+                ins = _apply_abi_fixups(lop, ins)
 
                 op_call(
                     lop.kind_id,
@@ -178,7 +145,6 @@ class CudaExecutor:
                     stream=stream_u64,
                 )
 
-            # outputs
             out: Dict[str, torch.Tensor] = {}
             if getattr(b, "outputs", None):
                 for oname, vid in b.outputs.items():
@@ -191,7 +157,6 @@ class CudaExecutor:
         # -------------------------
         # CUDA Graph path
         # -------------------------
-        # FIX: be explicit (capture_cuda_graph currently rejects stream!=None)
         if stream is not None:
             raise NotImplementedError("use_cuda_graph=True with explicit stream is not supported yet")
 

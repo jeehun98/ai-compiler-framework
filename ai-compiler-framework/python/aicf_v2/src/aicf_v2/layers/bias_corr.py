@@ -1,6 +1,10 @@
 from __future__ import annotations
+
 from .base import Layer
 from ..tensor_spec import TensorSpec
+
+from ..emitters.cuda.context import CudaEmitContext
+from ..emitters.cuda.bias_corr import bias_corr as emit_bias_corr
 
 
 class BiasCorr(Layer):
@@ -20,7 +24,7 @@ class BiasCorr(Layer):
         self.beta1 = float(beta1)
         self.beta2 = float(beta2)
 
-    def emit(self, b, step: int) -> tuple[int, int]:
+    def emit(self, b, step: int, *, ctx: CudaEmitContext) -> tuple[int, int]:
         ss = b.values[step].spec
         if ss.dtype != "i32":
             raise ValueError(f"BiasCorr expects step dtype i32; got {ss.dtype}")
@@ -32,11 +36,14 @@ class BiasCorr(Layer):
         bc1 = b.value(f"{self.name}.bc1_inv", o_spec)
         bc2 = b.value(f"{self.name}.bc2_inv", o_spec)
 
-        b.emit(
-            "bias_corr",
-            inputs=[step],
-            outputs=[bc1, bc2],
+        # ✅ emitter가 schema/blob/ids까지 채움
+        emit_bias_corr(
+            b, ctx,
+            step=step,
+            out_bc1_inv=bc1,
+            out_bc2_inv=bc2,
+            beta1=self.beta1,
+            beta2=self.beta2,
             name=f"{self.name}.bias_corr",
-            attrs={"beta1": self.beta1, "beta2": self.beta2},
         )
         return bc1, bc2

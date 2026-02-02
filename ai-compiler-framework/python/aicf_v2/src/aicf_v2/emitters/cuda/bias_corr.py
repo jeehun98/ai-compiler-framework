@@ -1,8 +1,10 @@
 from __future__ import annotations
 import struct
+
 from ...builder import Builder
 from .context import CudaEmitContext
 from .base import emit_resolved
+
 
 def bias_corr(
     b: Builder,
@@ -14,6 +16,8 @@ def bias_corr(
     beta1: float = 0.9,
     beta2: float = 0.999,
     name: str = "bias_corr",
+    constraints: dict | None = None,
+    hints: dict | None = None,
 ) -> int:
     b1 = float(beta1)
     b2 = float(beta2)
@@ -29,4 +33,6 @@ def bias_corr(
         attr_schema=ctx.SCHEMA_BCOR,
         attr_blob=blob,
         attrs={"beta1": b1, "beta2": b2},
+        constraints=constraints,
+        hints=hints,
     )

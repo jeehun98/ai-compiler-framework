@@ -1,5 +1,6 @@
 from __future__ import annotations
 import struct
+
 from ...builder import Builder
 from .context import CudaEmitContext
 from .base import emit_resolved
@@ -10,11 +11,12 @@ def gemm(
     *,
     A: int,
     B: int,
-    C: int,
     out: int,
     transA: bool = False,
     transB: bool = False,
     name: str = "gemm",
+    constraints: dict | None = None,
+    hints: dict | None = None,
 ) -> int:
     ta = 1 if bool(transA) else 0
     tb = 1 if bool(transB) else 0
@@ -24,10 +26,12 @@ def gemm(
         b,
         kind="gemm",
         name=name,
-        inputs=[A, B, C],
+        inputs=[A, B],          # ✅ FIX: only 2 inputs
         outputs=[out],
         kind_id=ctx.Gemm,
         attr_schema=0,
         attr_blob=blob,
         attrs={"transA": bool(transA), "transB": bool(transB)},
+        constraints=constraints,
+        hints=hints,
     )

@@ -1,28 +1,32 @@
 from __future__ import annotations
+
 from ...builder import Builder
 from .context import CudaEmitContext
 from .base import emit_resolved
 
-def batchnorm_bwd(
+
+def relu_bwd(
     b: Builder,
     ctx: CudaEmitContext,
     *,
-    x: int,
-    gamma: int,
     dy: int,
+    y: int,
     out_dx: int,
-    out_dgamma: int,
-    out_dbeta: int,
-    name: str = "batchnorm_bwd",
+    name: str = "relu_bwd",
+    constraints: dict | None = None,
+    hints: dict | None = None,
 ) -> int:
+    # typical contract: dx = dy * (y > 0)
     return emit_resolved(
         b,
-        kind="batchnorm_bwd",
+        kind="relu_bwd",
         name=name,
-        inputs=[x, gamma, dy],
-        outputs=[out_dx, out_dgamma, out_dbeta],
-        kind_id=ctx.BatchNormBwd,
+        inputs=[dy, y],
+        outputs=[out_dx],
+        kind_id=ctx.ReluBwd,
         attr_schema=0,
         attr_blob=b"",
         attrs={},
+        constraints=constraints,
+        hints=hints,
     )

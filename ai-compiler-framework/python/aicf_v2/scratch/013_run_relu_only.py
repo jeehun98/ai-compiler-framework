@@ -22,6 +22,8 @@ feed = {
 ref = torch.relu(feed["x"])
 
 out = exe.run(m, feed)
-Y = out["r.out"]
+print("out keys =", list(out.keys()))
+
+Y = out["y"]
 
 print("max|delta| =", (Y - ref).abs().max().item())

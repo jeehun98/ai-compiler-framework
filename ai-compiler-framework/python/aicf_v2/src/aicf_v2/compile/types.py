@@ -1,5 +1,5 @@
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
 
@@ -15,6 +15,7 @@ class LoweredOp:
     in_vids: List[int]
     out_vids: List[int]
     constraints: Dict[str, Any]
+    hints: Dict[str, Any] = field(default_factory=dict)  # ✅ NEW
 
 
 @dataclass

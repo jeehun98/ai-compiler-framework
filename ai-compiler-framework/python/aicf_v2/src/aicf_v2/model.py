@@ -4,6 +4,7 @@ from typing import Any
 from .tensor_spec import TensorSpec
 from .builder import Builder
 from .layers.base import Layer
+from .emitters.cuda.context import CudaEmitContext
 
 
 class Model:
@@ -11,6 +12,8 @@ class Model:
         self.dtype = str(dtype)
         self.device = str(device)
         self.b = Builder(dtype=self.dtype, device=self.device)
+        self.ctx = CudaEmitContext()
+
 
     def input(self, name: str, spec: TensorSpec) -> int:
         if spec.dtype is None or spec.device is None:
@@ -39,8 +42,9 @@ class Model:
             )
         return self.b.state(name, spec)
 
-    def add(self, layer: Layer, *xs: int) -> int | tuple[int, ...]:
-        return layer.emit(self.b, *xs)
+    def add(self, layer, *args, **kwargs):
+        # 기존 호출이 layer.emit(self.b, ...) 였다면:
+        return layer.emit(self.b, *args, ctx=self.ctx, **kwargs)
 
     def output(self, name: str, vid: int) -> None:
         self.b.output(name, vid)

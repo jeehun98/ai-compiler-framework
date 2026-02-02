@@ -67,6 +67,7 @@ def lower_ir_cuda(
                 in_vids=list(op.inputs),
                 out_vids=list(op.outputs),
                 constraints=dict(getattr(op, "constraints", {}) or {}),
+                hints=dict(getattr(op, "hints", {}) or {}),  # ✅ NEW
             )
         )
 

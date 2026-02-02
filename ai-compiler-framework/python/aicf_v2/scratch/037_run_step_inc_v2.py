@@ -19,34 +19,32 @@ def maxabs_delta(a: torch.Tensor, b: torch.Tensor) -> float:
 
 
 @torch.no_grad()
-def run(shape):
+def run():
     device = "cuda"
     m = aicf.Model(dtype="i32", device=device)
 
-    s = m.input("S", aicf.TensorSpec(shape, "i32", device))
+    # v2 contract: step is rank-1 scalar (1,)
+    s = m.input("S", aicf.TensorSpec((1,), "i32", device))
     so = m.add(aicf.StepInc(name="step"), s)
     m.output("SO", so)
 
-    S = torch.zeros(*shape, device=device, dtype=torch.int32).contiguous()
+    S = torch.zeros((1,), device=device, dtype=torch.int32).contiguous()
     ref = S + 1
 
     exe = aicf.CudaExecutor()
     out = exe.run(m, {"S": S})["SO"]
 
     d = maxabs_delta(out, ref)
-    print(f"[oop] shape={tuple(shape)} max|delta|={d:.3e}")
+    print(f"[oop] shape={(1,)} max|delta|={d:.3e}")
     return d
 
 
 def main():
     torch.manual_seed(0)
 
-    worst = 0.0
-    for shape in [(1,), (1024,), (64, 256)]:
-        worst = max(worst, run(shape))
-
+    worst = run()
     print("[OK] worst =", worst)
-    print("[note] 0-d scalar + inplace/neg tests: keep in _C-only probe until TensorSpec allows 0d and alias planning exists.")
+    print("[note] StepInc is an optimizer step-counter op; only (1,) i32 is supported in v2.")
 
 
 if __name__ == "__main__":

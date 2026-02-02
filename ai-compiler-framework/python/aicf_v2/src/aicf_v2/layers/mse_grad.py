@@ -1,12 +1,17 @@
 from __future__ import annotations
+
 from .base import Layer
 from ..tensor_spec import TensorSpec
+
+from ..emitters.cuda.context import CudaEmitContext
+from ..emitters.cuda.mse_grad import mse_grad as emit_mse_grad
 
 
 class MseGrad(Layer):
     """
     MseGrad:
       g = (pred - target) * scale
+
     scale:
       - None: kernel default scale = 2/numel (schema=0)
       - float: explicit scale via schema 'MSEG' + payload <f scale>
@@ -19,7 +24,7 @@ class MseGrad(Layer):
         super().__init__(name)
         self.scale = None if scale is None else float(scale)
 
-    def emit(self, b, pred: int, target: int) -> int:
+    def emit(self, b, pred: int, target: int, *, ctx: CudaEmitContext) -> int:
         p = b.values[pred].spec
         t = b.values[target].spec
 
@@ -32,18 +37,13 @@ class MseGrad(Layer):
 
         g = b.value(f"{self.name}.g", TensorSpec(shape=p.shape, dtype=p.dtype, device=p.device))
 
-        if self.scale is None:
-            kind = "mse_grad"
-            attrs = {}
-        else:
-            kind = "mse_grad_scaled"
-            attrs = {"scale": self.scale}
-
-        b.emit(
-            kind,
-            inputs=[pred, target],
-            outputs=[g],
-            name=f"{self.name}.{kind}",
-            attrs=attrs,
+        # ✅ kind/schema/blob 결정은 emitter로 위임
+        emit_mse_grad(
+            b, ctx,
+            pred=pred,
+            target=target,
+            out=g,
+            scale=self.scale,
+            name=f"{self.name}.mse_grad",
         )
         return g

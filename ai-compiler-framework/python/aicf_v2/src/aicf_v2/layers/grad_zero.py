@@ -1,43 +1,35 @@
 from __future__ import annotations
+
 from .base import Layer
 from ..tensor_spec import TensorSpec
+
+from ..emitters.cuda.context import CudaEmitContext
+from ..emitters.cuda.grad_zero import grad_zero as emit_grad_zero
 
 
 class GradZero(Layer):
     """
-    GradZero:
-      y = 0 (same shape/dtype/device)
+    Zero out gradient buffer.
 
-    Kernel contract:
+    Contract:
       inputs : [x]
-      outputs: [y]
-      schema : 0
-      payload: empty
-
-    Note:
-      kernel supports in-place (y aliases x), but v2 builder currently tracks
-      producer_op per Value; true in-place would require 'last_writer' semantics.
-      So we keep it out-of-place for now.
+      outputs: [y]   (planner may alias/inplace later)
     """
 
-    def __init__(self, name: str, *, inplace: bool = False):
+    def __init__(self, name: str):
         super().__init__(name)
-        self.inplace = bool(inplace)
 
-    def emit(self, b, x: int) -> int:
+    def emit(self, b, x: int, *, ctx: CudaEmitContext) -> int:
         xs = b.values[x].spec
 
-        if self.inplace:
-            raise NotImplementedError(
-                "GradZero(inplace=True) requires last-writer tracking (producer_op overwrite issue). "
-                "Use inplace=False for now."
-            )
-
+        # keep as separate value; plan may alias if inplace is allowed
         y = b.value(f"{self.name}.out", TensorSpec(shape=xs.shape, dtype=xs.dtype, device=xs.device))
-        b.emit(
-            "grad_zero",
-            inputs=[x],
-            outputs=[y],
+
+        emit_grad_zero(
+            b, ctx,
+            x=x,
+            out=y,
             name=f"{self.name}.grad_zero",
+            constraints={"inplace_ok": True},
         )
         return y

@@ -1,8 +1,10 @@
 from __future__ import annotations
 import struct
+
 from ...builder import Builder
 from .context import CudaEmitContext
 from .base import emit_resolved
+
 
 def gemm_epilogue(
     b: Builder,
@@ -16,6 +18,8 @@ def gemm_epilogue(
     transB: bool = False,
     relu: bool = True,
     name: str = "gemm_epilogue",
+    constraints: dict | None = None,
+    hints: dict | None = None,
 ) -> int:
     ta = 1 if bool(transA) else 0
     tb = 1 if bool(transB) else 0
@@ -32,4 +36,6 @@ def gemm_epilogue(
         attr_schema=ctx.SCHEMA_GMEP,
         attr_blob=blob,
         attrs={"transA": bool(transA), "transB": bool(transB), "relu": bool(relu)},
+        constraints=constraints,
+        hints=hints,
     )

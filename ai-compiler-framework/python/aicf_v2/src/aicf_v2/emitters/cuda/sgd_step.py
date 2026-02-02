@@ -1,8 +1,10 @@
 from __future__ import annotations
 import struct
+
 from ...builder import Builder
 from .context import CudaEmitContext
 from .base import emit_resolved
+
 
 def sgd_step(
     b: Builder,
@@ -14,6 +16,7 @@ def sgd_step(
     lr: float = 1e-3,
     name: str = "sgd_step",
     constraints: dict | None = None,
+    hints: dict | None = None,
 ) -> int:
     lr_f = float(lr)
     blob = struct.pack("<f", lr_f)
@@ -28,5 +31,6 @@ def sgd_step(
         attr_schema=ctx.SCHEMA_SGDS,
         attr_blob=blob,
         attrs={"lr": lr_f},
-        constraints=constraints or {"inplace_ok": True},
+        constraints=constraints,
+        hints=hints,
     )

@@ -1,6 +1,11 @@
 from __future__ import annotations
+
 from .base import Layer
 from ..tensor_spec import TensorSpec
+
+from ..emitters.cuda.context import CudaEmitContext
+from ..emitters.cuda.layernorm_fwd import layernorm_fwd as emit_layernorm_fwd
+from ..emitters.cuda.layernorm_bwd import layernorm_bwd as emit_layernorm_bwd
 
 
 class LayerNormFwd(Layer):
@@ -24,7 +29,7 @@ class LayerNormFwd(Layer):
         self.eps = float(eps)
         self.affine = bool(affine)
 
-    def emit(self, b, x: int, *rest: int):
+    def emit(self, b, x: int, *rest: int, ctx: CudaEmitContext):
         x_spec = b.values[x].spec
         if len(x_spec.shape) != 2:
             raise ValueError(f"LayerNormFwd expects 2D (M,N); got shape={x_spec.shape}")
@@ -52,12 +57,12 @@ class LayerNormFwd(Layer):
                 raise ValueError(f"LayerNormFwd(noaff) expects (x) only; got {1+len(rest)} args")
             ins = [x]
 
-        b.emit(
-            "layernorm_fwd",
+        emit_layernorm_fwd(
+            b, ctx,
             inputs=ins,
             outputs=[y, mean, rstd],
+            eps=self.eps,
             name=f"{self.name}.layernorm_fwd",
-            attrs={"eps": self.eps},
         )
         return y, mean, rstd
 
@@ -79,7 +84,7 @@ class LayerNormBwd(Layer):
         super().__init__(name)
         self.affine = bool(affine)
 
-    def emit(self, b, x: int, dy: int, *rest: int):
+    def emit(self, b, x: int, dy: int, *rest: int, ctx: CudaEmitContext):
         x_spec = b.values[x].spec
         dy_spec = b.values[dy].spec
         if len(x_spec.shape) != 2:
@@ -93,7 +98,6 @@ class LayerNormBwd(Layer):
         dx = b.value(f"{self.name}.dx", TensorSpec(shape=(M, N), dtype=x_spec.dtype, device=x_spec.device))
 
         if self.affine:
-            # rest: gamma, mean, rstd
             if len(rest) != 3:
                 raise ValueError(f"LayerNormBwd(affine) expects (x,dy,gamma,mean,rstd); got {2+len(rest)} args")
             gamma, mean, rstd = rest
@@ -113,10 +117,10 @@ class LayerNormBwd(Layer):
                 raise ValueError("LayerNormBwd mean/rstd device must match x")
 
             dgamma = b.value(f"{self.name}.dgamma", TensorSpec(shape=(N,), dtype="f32", device=x_spec.device))
-            dbeta  = b.value(f"{self.name}.dbeta",  TensorSpec(shape=(N,), dtype="f32", device=x_spec.device))
+            dbeta = b.value(f"{self.name}.dbeta", TensorSpec(shape=(N,), dtype="f32", device=x_spec.device))
 
-            b.emit(
-                "layernorm_bwd",
+            emit_layernorm_bwd(
+                b, ctx,
                 inputs=[x, dy, gamma, mean, rstd],
                 outputs=[dx, dgamma, dbeta],
                 name=f"{self.name}.layernorm_bwd",
@@ -124,7 +128,6 @@ class LayerNormBwd(Layer):
             return dx, dgamma, dbeta
 
         else:
-            # rest: mean, rstd
             if len(rest) != 2:
                 raise ValueError(f"LayerNormBwd(noaff) expects (x,dy,mean,rstd); got {2+len(rest)} args")
             mean, rstd = rest
@@ -137,8 +140,8 @@ class LayerNormBwd(Layer):
             if m_spec.device != x_spec.device or r_spec.device != x_spec.device:
                 raise ValueError("LayerNormBwd mean/rstd device must match x")
 
-            b.emit(
-                "layernorm_bwd",
+            emit_layernorm_bwd(
+                b, ctx,
                 inputs=[x, dy, mean, rstd],
                 outputs=[dx],
                 name=f"{self.name}.layernorm_bwd",

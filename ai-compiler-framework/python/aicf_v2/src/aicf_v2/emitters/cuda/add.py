@@ -1,25 +1,31 @@
 from __future__ import annotations
+
 from ...builder import Builder
 from .context import CudaEmitContext
 from .base import emit_resolved
 
-def relu_bwd(
+
+def add(
     b: Builder,
     ctx: CudaEmitContext,
     *,
-    x: int,
-    dy: int,
-    out_dx: int,
-    name: str = "relu_bwd",
+    a: int,
+    c: int,
+    out: int,
+    name: str = "add",
+    constraints: dict | None = None,
+    hints: dict | None = None,
 ) -> int:
     return emit_resolved(
         b,
-        kind="relu_bwd",
+        kind="add",
         name=name,
-        inputs=[x, dy],
-        outputs=[out_dx],
-        kind_id=ctx.ReluBwd,
+        inputs=[a, c],
+        outputs=[out],
+        kind_id=ctx.EltwiseAdd,
         attr_schema=0,
         attr_blob=b"",
         attrs={},
+        constraints=constraints,
+        hints=hints,
     )

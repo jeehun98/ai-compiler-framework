@@ -1,6 +1,12 @@
 from __future__ import annotations
+
 from .base import Layer
 from ..tensor_spec import TensorSpec
+
+from ..emitters.cuda.context import CudaEmitContext
+from ..emitters.cuda.gemm import gemm as emit_gemm
+from ..emitters.cuda.bias_add import bias_add as emit_bias_add
+
 
 class Linear(Layer):
     def __init__(self, in_features: int, out_features: int, name: str, bias: bool = True):
@@ -9,7 +15,7 @@ class Linear(Layer):
         self.out_features = int(out_features)
         self.bias = bool(bias)
 
-    def emit(self, b, x: int) -> int:
+    def emit(self, b, x: int, *, ctx: CudaEmitContext) -> int:
         x_spec = b.values[x].spec
         if x_spec.shape[-1] != self.in_features:
             raise ValueError(f"Linear({self.in_features}->{self.out_features}) got x.shape[-1]={x_spec.shape[-1]}")
@@ -25,12 +31,14 @@ class Linear(Layer):
         )
 
         # y = x @ W^T
-        b.emit(
-            "gemm",
-            inputs=[x, W],
-            outputs=[y],
+        emit_gemm(
+            b, ctx,
+            A=x,
+            B=W,
+            out=y,
+            transA=False,
+            transB=True,
             name=f"{self.name}.gemm",
-            attrs={"transA": False, "transB": True},
             hints={"prefer_epilogue_fusion": True},
         )
 
@@ -42,16 +50,16 @@ class Linear(Layer):
             TensorSpec(shape=(self.out_features,), dtype=b.dtype, device=b.device),
         )
 
-        # 여기서 "inplace로 y에 더해라"를 박지 않고,
-        # 플래너가 alias/inplace를 결정할 수 있도록 out을 분리해 둠.
+        # out 분리: planner가 alias/inplace 결정
         y2 = b.value(f"{self.name}.out_bias", y_spec)
 
-        b.emit(
-            "bias_add",
-            inputs=[y, bias],
-            outputs=[y2],
+        emit_bias_add(
+            b, ctx,
+            x=y,
+            bias=bias,
+            out=y2,
+            broadcast_axis=-1,
             name=f"{self.name}.bias_add",
-            attrs={"broadcast_axis": -1},
             constraints={"inplace_ok": True},
             hints={"prefer_epilogue_fusion": True},
         )

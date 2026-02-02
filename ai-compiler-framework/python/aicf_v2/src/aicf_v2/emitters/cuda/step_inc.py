@@ -1,7 +1,9 @@
 from __future__ import annotations
+
 from ...builder import Builder
 from .context import CudaEmitContext
 from .base import emit_resolved
+
 
 def step_inc(
     b: Builder,
@@ -11,6 +13,7 @@ def step_inc(
     out_step: int,
     name: str = "step_inc",
     constraints: dict | None = None,
+    hints: dict | None = None,
 ) -> int:
     return emit_resolved(
         b,
@@ -23,4 +26,5 @@ def step_inc(
         attr_blob=b"",
         attrs={},
         constraints=constraints or {"inplace_ok": True},
+        hints=hints,
     )

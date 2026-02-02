@@ -21,7 +21,7 @@ m = aicf.Model(dtype="f16", device="cuda")
 
 g = m.input("g", aicf.TensorSpec(shape=(256, 128), dtype="f16", device="cuda"))
 w = m.param("w", aicf.TensorSpec(shape=(256, 128), dtype="f16", device="cuda"))
-step = m.state("step", aicf.TensorSpec(shape=(), dtype="i32", device="cuda"))
+step = m.state("step", aicf.TensorSpec(shape=(1,), dtype="i32", device="cuda"))
 
 w2 = m.add(aicf.SgdStep(name="sgd_w", lr=1e-3), w, g)
 if isinstance(w2, tuple):
@@ -53,7 +53,7 @@ def make_feed(seed: int):
     return {
         "g": torch.randn((256, 128), device="cuda", dtype=torch.float16, generator=gen),
         "w": torch.randn((256, 128), device="cuda", dtype=torch.float16, generator=gen),
-        "step": torch.zeros((), device="cuda", dtype=torch.int32),
+        "step": torch.zeros((1,), device="cuda", dtype=torch.int32),
     }
 
 # ----------------------------

@@ -3,7 +3,7 @@ from .model import Model
 
 from .layers.linear import Linear
 from .layers.relu import ReLU
-from .layers.relu_bwd import ReluBwd
+from .layers.relu_bwd import ReLUBwd
 from .layers.add import Add
 from .layers.adam_step import AdamStep
 from .layers.sgd_step import SgdStep
@@ -25,7 +25,7 @@ __all__ = [
     "Linear",
     "GemmEpilogue",
     "ReLU",
-    "ReluBwd",
+    "ReLUBwd",
     "Add",
     "AdamStep",
     "BatchNormFwd",

@@ -1,8 +1,10 @@
 from __future__ import annotations
 import struct
+
 from ...builder import Builder
 from .context import CudaEmitContext
 from .base import emit_resolved
+
 
 def bias_add(
     b: Builder,
@@ -13,6 +15,8 @@ def bias_add(
     out: int,
     broadcast_axis: int = -1,
     name: str = "bias_add",
+    constraints: dict | None = None,
+    hints: dict | None = None,
 ) -> int:
     axis = int(broadcast_axis)
     blob = struct.pack("<q", axis)
@@ -27,4 +31,6 @@ def bias_add(
         attr_schema=ctx.SCHEMA_BADD,
         attr_blob=blob,
         attrs={"broadcast_axis": axis},
+        constraints=constraints,
+        hints=hints,
     )

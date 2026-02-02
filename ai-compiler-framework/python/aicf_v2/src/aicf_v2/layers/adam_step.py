@@ -1,6 +1,9 @@
 from __future__ import annotations
+
 from .base import Layer
-from ..tensor_spec import TensorSpec
+
+from ..emitters.cuda.context import CudaEmitContext
+from ..emitters.cuda.adam_step import adam_step as emit_adam_step
 
 
 class AdamStep(Layer):
@@ -12,6 +15,7 @@ class AdamStep(Layer):
       outputs: Pout, Mout, Vout
       attr_blob: <ffff = lr, beta1, beta2, eps
       schema: 'ADAM'
+
     Notes:
       - bc1, bc2 are scalar tensors (rank0) on same device/dtype as P
       - outputs are separate values; planner may alias/inplace later.
@@ -32,7 +36,7 @@ class AdamStep(Layer):
         self.beta2 = float(beta2)
         self.eps = float(eps)
 
-    def emit(self, b, P: int, G: int, M: int, V: int, bc1: int, bc2: int):
+    def emit(self, b, P: int, G: int, M: int, V: int, bc1: int, bc2: int, *, ctx: CudaEmitContext):
         P_spec = b.values[P].spec
         G_spec = b.values[G].spec
         M_spec = b.values[M].spec
@@ -65,19 +69,23 @@ class AdamStep(Layer):
         Mout = b.value(f"{self.name}.M", M_spec)
         Vout = b.value(f"{self.name}.V", V_spec)
 
-        b.emit(
-            "adam_step",
-            inputs=[P, G, M, V, bc1, bc2],
-            outputs=[Pout, Mout, Vout],
+        # ✅ emitter가 kind_id/schema/blob까지 채움
+        emit_adam_step(
+            b, ctx,
+            P=P,
+            G=G,
+            M=M,
+            V=V,
+            bc1=bc1,
+            bc2=bc2,
+            outP=Pout,
+            outM=Mout,
+            outV=Vout,
+            lr=self.lr,
+            beta1=self.beta1,
+            beta2=self.beta2,
+            eps=self.eps,
             name=f"{self.name}.adam_step",
-            attrs={
-                "lr": self.lr,
-                "beta1": self.beta1,
-                "beta2": self.beta2,
-                "eps": self.eps,
-            },
-            # planner가 inplace/alias를 결정하게 하고 싶으면
-            # 우선 "가능"하다는 힌트만 둠.
             constraints={"inplace_ok": True},
         )
 
