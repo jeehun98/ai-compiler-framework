@@ -6,6 +6,7 @@ from .tensor_spec import TensorSpec
 
 ValueRole = Literal["input", "param", "state", "tmp", "output"]
 
+
 @dataclass
 class Value:
     vid: int
@@ -14,8 +15,9 @@ class Value:
     producer_op: Optional[int] = None
     users: List[int] = field(default_factory=list)
 
-    # ✅ NEW: role for CUDA Graph-friendly policies
+    # role for CUDA Graph-friendly policies
     role: ValueRole = "tmp"
+
 
 @dataclass
 class Op:
@@ -32,3 +34,22 @@ class Op:
 
     # training용: "무엇을 저장해야 하는지"만 선언 (실제 alloc/copy/alias는 compile/plan에서)
     saved: List[int] = field(default_factory=list)
+
+    # -------------------------
+    # NEW: optional ABI/registry cache (emit-time pre-resolve / pre-pack)
+    # -------------------------
+    # - kind_id: C++ enum OpKind value (stable ABI contract if you guarantee it)
+    # - attr_schema: fourcc(...) or 0
+    # - attr_blob: pack_attrs(kind, attrs, ...) result
+    #
+    # These are caches: optimizer passes that change kind/attrs MUST invalidate them.
+    kind_id: Optional[int] = None
+    attr_schema: Optional[int] = None
+    attr_blob: Optional[bytes] = None
+
+
+def invalidate_op_cache(op: Op) -> None:
+    """Invalidate ABI/registry caches when op.kind/op.attrs change."""
+    op.kind_id = None
+    op.attr_schema = None
+    op.attr_blob = None

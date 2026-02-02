@@ -35,7 +35,6 @@ class Builder:
         return vid
 
     def param(self, name: str, spec: TensorSpec) -> int:
-        # params are "externally provided" -> treat as externals
         if name in self._name2vid:
             return self._name2vid[name]
         vid = self._new_value(name, spec, producer_op=None, role="param")
@@ -44,7 +43,6 @@ class Builder:
         return vid
 
     def state(self, name: str, spec: TensorSpec) -> int:
-        # optimizer state, also external (initial value) but then mutated in graph
         if name in self._name2vid:
             return self._name2vid[name]
         vid = self._new_value(name, spec, producer_op=None, role="state")
@@ -53,7 +51,6 @@ class Builder:
         return vid
 
     def value(self, name: str, spec: TensorSpec) -> int:
-        # internal temp by default
         return self._new_value(name, spec, producer_op=None, role="tmp")
 
     def _new_value(self, name: str, spec: TensorSpec, producer_op: Optional[int], role: ValueRole) -> int:
@@ -76,6 +73,10 @@ class Builder:
         constraints: Optional[Dict[str, Any]] = None,
         hints: Optional[Dict[str, Any]] = None,
         saved: Optional[List[int]] = None,
+        # ---- NEW: optional caches ----
+        kind_id: Optional[int] = None,
+        attr_schema: Optional[int] = None,
+        attr_blob: Optional[bytes] = None,
     ) -> int:
         op_index = len(self.ops)
         op = Op(
@@ -87,13 +88,15 @@ class Builder:
             constraints=dict(constraints or {}),
             hints=dict(hints or {}),
             saved=list(saved or []),
+            kind_id=None if kind_id is None else int(kind_id),
+            attr_schema=None if attr_schema is None else int(attr_schema),
+            attr_blob=attr_blob,
         )
         self.ops.append(op)
 
         # book-keeping
         for out_vid in outputs:
             self.values[out_vid].producer_op = op_index
-            # (선택) output role 자동 지정하고 싶으면 여기서 처리 가능
         for in_vid in inputs:
             self.values[in_vid].users.append(op_index)
 
@@ -124,5 +127,5 @@ class Builder:
         if vid not in self.output_vids:
             self.output_vids.append(vid)
 
-        # (선택) output으로 등록된 value의 role을 "output"으로 바꾸고 싶으면:
+        # 선택: output role로 바꾸고 싶으면
         # self.values[vid].role = "output"
