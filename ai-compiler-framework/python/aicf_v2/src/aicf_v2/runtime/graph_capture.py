@@ -7,6 +7,7 @@ import torch
 from ..model import Model
 from ..builder import Builder
 from ..compile.types import CompiledProgram
+from ..graph import Op
 from ..backends.cuda.bridge import op_call, current_stream_u64
 from .alloc import alloc_from_spec, _device_ok, _torch_dtype  # reuse existing helpers
 
@@ -45,6 +46,22 @@ def _all_external_vids(b: Builder) -> List[int]:
     return list(getattr(b, "external_vids", []))
 
 
+def _apply_abi_fixups(op: Op, ins: list[torch.Tensor]) -> list[torch.Tensor]:
+    """
+    Same policy as runtime/cuda_exec.py:
+      hints['view_rank0_inputs'] = [idx...]
+    """
+    hints = getattr(op, "hints", None) or {}
+    idxs = hints.get("view_rank0_inputs", None)
+    if idxs:
+        for i in idxs:
+            if 0 <= i < len(ins):
+                t = ins[i]
+                if t.dim() == 1 and t.numel() == 1:
+                    ins[i] = t.view(())
+    return ins
+
+
 # -----------------------------
 # captured program container
 # -----------------------------
@@ -77,21 +94,18 @@ def capture_cuda_graph(
     Design:
       - all externals must be backed by fixed buffers (ext_bufs) so pointers don't change
       - replay copies only roles in copy_roles into those buffers
-      - alias decisions applied before running lowered ops
+      - alias decisions applied before running ops
 
     NOTE:
       - capture occurs on CURRENT torch stream.
-      - 'stream' (u64) is used only when calling op_call; if you want non-default
-        torch stream capture, wire torch.cuda.Stream into executor first.
+      - 'stream' (u64) is used only when calling op_call.
     """
     if stream is not None:
-        # 현재 구조에서 torch.cuda.CUDAGraph 캡처 스트림과 u64 stream 핸들을
-        # 1:1로 맞추는 배선이 없어서 여기선 막아두는 게 안전함.
         raise NotImplementedError("capture_cuda_graph(stream=...) not supported yet; capture uses current torch stream")
 
     b: Builder = m.b
     plan = prog.plan
-    lowered = plan.lowered
+    ops = plan.ops
 
     static_roles = tuple(static_roles)
     copy_roles = tuple(copy_roles)
@@ -133,13 +147,11 @@ def capture_cuda_graph(
         if slots[v.vid] is None:
             slots[v.vid] = alloc_from_spec(v.spec)
 
-    # cast Optional away
     slots_t: List[torch.Tensor] = [t for t in slots]  # type: ignore
 
     # 3) apply alias decisions (inplace)
     for out_vid, in_vid in plan.alias.items():
         slots_t[out_vid] = slots_t[in_vid]
-        # keep ext_bufs mapping consistent if out_vid is external (rare but possible)
         if out_vid in ext_bufs:
             ext_bufs[out_vid] = slots_t[in_vid]
 
@@ -147,7 +159,7 @@ def capture_cuda_graph(
     stream_u64 = current_stream_u64()
     for _ in range(int(warmup)):
         _copy_roles_into_ext_bufs(b, ext_bufs, feed, copy_roles=copy_roles)
-        _run_lowered_ops(lowered, slots_t, stream_u64)
+        _run_ops(ops, slots_t, stream_u64)
 
     torch.cuda.synchronize()
 
@@ -157,7 +169,7 @@ def capture_cuda_graph(
     torch.cuda.synchronize()
 
     with torch.cuda.graph(graph):
-        _run_lowered_ops(lowered, slots_t, stream_u64)
+        _run_ops(ops, slots_t, stream_u64)
 
     torch.cuda.synchronize()
 
@@ -209,7 +221,6 @@ def _copy_roles_into_ext_bufs(
     *,
     copy_roles: Tuple[str, ...],
 ) -> None:
-    # copy only selected roles (train: inputs only; inference: inputs only by default)
     copy_set = set(copy_roles)
     for role in ("input", "param", "state"):
         if role not in copy_set:
@@ -222,30 +233,30 @@ def _copy_roles_into_ext_bufs(
             src = _check_feed_tensor(name, v.spec, feed[name])
 
             if vid not in ext_bufs:
-                # should not happen: all externals must have buffers
                 raise KeyError(f"internal error: ext buffer missing for vid={vid} name='{name}'")
             ext_bufs[vid].copy_(src)
 
 
-def _run_lowered_ops(lowered, slots: List[torch.Tensor], stream_u64: int) -> None:
-    for lop in lowered:
-        ins = [slots[v] for v in lop.in_vids]
-        outs = [slots[v] for v in lop.out_vids]
+def _run_ops(ops: List[Op], slots: List[torch.Tensor], stream_u64: int) -> None:
+    for op in ops:
+        # emitter must fill caches
+        if getattr(op, "kind_id", None) is None:
+            raise ValueError(f"[graph_capture] missing op.kind_id (kind='{op.kind}', name='{op.name}')")
+        if getattr(op, "attr_schema", None) is None:
+            raise ValueError(f"[graph_capture] missing op.attr_schema (kind='{op.kind}', name='{op.name}')")
+        if getattr(op, "attr_blob", None) is None:
+            raise ValueError(f"[graph_capture] missing op.attr_blob (kind='{op.kind}', name='{op.name}')")
 
-        # FIX: ABI shim (adam_step expects rank0 scalars for bc1/bc2 in current C++ impl)
-        if lop.kind == "adam_step":
-            if len(ins) >= 6:
-                bc1 = ins[4]
-                bc2 = ins[5]
-                if bc1.dim() == 1 and bc1.numel() == 1:
-                    ins[4] = bc1.view(())
-                if bc2.dim() == 1 and bc2.numel() == 1:
-                    ins[5] = bc2.view(())
+        ins = [slots[v] for v in op.inputs]
+        outs = [slots[v] for v in op.outputs]
+
+        # ABI fixups by hints
+        ins = _apply_abi_fixups(op, ins)
 
         op_call(
-            lop.kind_id,
+            int(op.kind_id),
             ins, outs,
-            lop.attr_schema,
-            lop.attr_blob,
+            int(op.attr_schema),
+            op.attr_blob,
             stream=stream_u64,
         )

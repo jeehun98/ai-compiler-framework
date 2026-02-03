@@ -6,7 +6,8 @@ import torch
 from ..model import Model
 from ..builder import Builder
 from ..compile.compile import compile_cuda
-from ..compile.types import CompiledProgram, LoweredOp
+from ..compile.types import CompiledProgram
+from ..graph import Op
 from ..backends.cuda.registry import CudaRegistry
 from ..backends.cuda.bridge import op_call, current_stream_u64
 from .alloc import bind_and_alloc_slots
@@ -28,7 +29,7 @@ def _feed_signature(b: Builder, feed: Dict[str, torch.Tensor]) -> Tuple[Tuple[st
     return tuple(items)
 
 
-def _apply_abi_fixups(lop: LoweredOp, ins: list[torch.Tensor]) -> list[torch.Tensor]:
+def _apply_abi_fixups(op: Op, ins: list[torch.Tensor]) -> list[torch.Tensor]:
     """
     Apply ABI fixups using per-op hints (emitter-provided).
 
@@ -37,7 +38,7 @@ def _apply_abi_fixups(lop: LoweredOp, ins: list[torch.Tensor]) -> list[torch.Ten
           For each input index i, if ins[i] is rank1 scalar (shape (1,), numel==1),
           present it to the backend as rank0 via view(()) without copy.
     """
-    hints = getattr(lop, "hints", None) or {}
+    hints = getattr(op, "hints", None) or {}
     idxs = hints.get("view_rank0_inputs", None)
     if idxs:
         for i in idxs:
@@ -130,18 +131,27 @@ class CudaExecutor:
             for out_vid, in_vid in plan.alias.items():
                 slots[out_vid] = slots[in_vid]
 
-            for lop in plan.lowered:
-                ins = [slots[v] for v in lop.in_vids]
-                outs = [slots[v] for v in lop.out_vids]
+            # ✅ execute ops directly (no LoweredOp)
+            for op in plan.ops:
+                # require emitter-filled caches
+                if getattr(op, "kind_id", None) is None:
+                    raise ValueError(f"[CudaExecutor] missing op.kind_id (kind='{op.kind}', name='{op.name}')")
+                if getattr(op, "attr_schema", None) is None:
+                    raise ValueError(f"[CudaExecutor] missing op.attr_schema (kind='{op.kind}', name='{op.name}')")
+                if getattr(op, "attr_blob", None) is None:
+                    raise ValueError(f"[CudaExecutor] missing op.attr_blob (kind='{op.kind}', name='{op.name}')")
 
-                # ✅ ABI fixups via hints (no kind hardcode)
-                ins = _apply_abi_fixups(lop, ins)
+                ins = [slots[v] for v in op.inputs]
+                outs = [slots[v] for v in op.outputs]
+
+                # ✅ ABI fixups via hints
+                ins = _apply_abi_fixups(op, ins)
 
                 op_call(
-                    lop.kind_id,
+                    int(op.kind_id),
                     ins, outs,
-                    lop.attr_schema,
-                    lop.attr_blob,
+                    int(op.attr_schema),
+                    op.attr_blob,
                     stream=stream_u64,
                 )
 

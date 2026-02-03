@@ -1,30 +1,24 @@
 from __future__ import annotations
-from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from dataclasses import dataclass
+from typing import Dict, List
 
-
-@dataclass
-class LoweredOp:
-    """
-    Backend-ready call spec for _C.op_call(...)
-    """
-    kind: str
-    kind_id: int
-    attr_schema: int
-    attr_blob: bytes
-    in_vids: List[int]
-    out_vids: List[int]
-    constraints: Dict[str, Any]
-    hints: Dict[str, Any] = field(default_factory=dict)  # ✅ NEW
+from ..graph import Op
 
 
 @dataclass
 class ExecPlan:
     """
-    Execution plan = lowered ops + runtime decisions (alias/inplace/etc.)
+    Execution plan = op stream + runtime decisions (alias/inplace/etc.)
+
+    ops:
+      - builder가 만든 Op 리스트를 그대로 들고 간다.
+      - op.kind_id/attr_schema/attr_blob/hints 는 emitter가 채운다.
+
+    alias:
+      - out_vid -> in_vid (slot alias)
     """
-    lowered: List[LoweredOp]
-    alias: Dict[int, int]  # out_vid -> in_vid (slot alias)
+    ops: List[Op]
+    alias: Dict[int, int]
 
 
 @dataclass

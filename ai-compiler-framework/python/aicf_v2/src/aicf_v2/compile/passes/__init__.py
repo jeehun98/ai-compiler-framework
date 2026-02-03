@@ -1,1 +1,3 @@
-from .pipeline import optimize_ir, optimize_plan
+from .pipeline import optimize_ir
+
+__all__ = ["optimize_ir"]

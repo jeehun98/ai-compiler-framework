@@ -1,2 +1,8 @@
-from .types import LoweredOp, ExecPlan, CompiledProgram
-from .compile import compile_cuda
+from __future__ import annotations
+
+from .types import ExecPlan, CompiledProgram
+
+__all__ = [
+    "ExecPlan",
+    "CompiledProgram",
+]
