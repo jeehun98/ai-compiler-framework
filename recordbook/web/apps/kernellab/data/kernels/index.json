@@ -1,9 +1,0 @@
-[
-    "bias_add.json", "adam_step.json", "add.json", 
-    "batchnorm.json", "biascorr.json", "copy.json", 
-    "gemm.json", "gemm_epilogue.json", "grad_zero.json",
-    "layernorm.json", "mse_grad.json", "reduce_sum.json",
-    "relu.json", "relu_bwd.json", "sgd_step.json",
-    "step_inc.json"
-
-]
