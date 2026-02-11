@@ -1,55 +1,60 @@
-// src/data/gemm.js
 export const gemmData = {
   id: "GEMM",
-  category: "Linear Layers",
-
+  category: "Linear Transform / Projection",
+  // 1. 의미론적 본질 (Mathematical & Geometric)
   semantic: {
     formula: "C = \\alpha(A \\times B) + \\beta C",
-    description:
-      "행렬 곱셈의 수학적 본질은 선형 변환의 합성입니다. AICF는 결과 행렬의 각 원소가 독립적으로 계산될 수 있다는 '병렬적 의미'에 집중합니다.",
+    concept: "Semantic Projection & Hypothesis Testing",
+    description: "데이터 샘플(A)이 가설 집합(B)과 얼마나 정렬되는지 평가하고, 과거 상태(C)와 병합하는 과정",
+    // ✅ 추가
     decomposition: [
-      "Blocking: 거대한 행렬을 GPU L1/L2 캐시에 적합한 Tile 단위로 분할",
-      "K-Loop Unrolling: 연산 밀도를 높이기 위해 내부 루프 전개",
-      "Epilogue: 계산 직후 메모리 이동 없이 Activation(ReLU 등) 병합",
+      "Blocking: Tile 단위 분할",
+      "K-Loop Unrolling: 연산 밀도 상승",
+      "Epilogue: Bias/Act 등 병합",
     ],
-    precision_policy: "FP32 (Relative Error < 1e-7 허용)",
+    // 차원 의미 (K차원의 소거)
+    dimensions: {
+      M: "Data Samples",
+      K: "Semantic Search Space (Hypothesis Count)",
+      N: "Feature Extraction Channels"
+    },
+
+    // 의미 보존 속성 (Semantic Attributes)
+    attributes: [
+      { label: "Rank Tolerance", value: "0.05", desc: "Low-rank approximation 허용 오차" },
+      { label: "Order Preserve", value: "Required", desc: "Top-K 순위 보존 필수 (Softmax 민감도)" },
+      { label: "Energy Preserve", value: "99.9%", desc: "SVD 분해 시 정보 보존 임계치" }
+    ],
+
+    // 최적화 규칙 (Semantic Rules)
+    rules: [
+      "Rule 6.5: Semantic Anchor Fusion (Bias+Norm+Act)",
+      "Rule 6.6: Hypothesis Pruning (기여도 낮은 K-axis 제거)",
+      "Rule 8.1: Rank Invariance (순위 보존 하에 극단적 양자화)"
+    ]
   },
 
+  // 2. 커널 최적화 (Physical Mapping)
   optimization: {
     strategy: "2D Hierarchical Tiling",
-    details: [
-      "Shared Memory Bank Conflict 회피를 위한 Padding 적용",
-      "데이터 재사용률 극대화를 위한 Register Blocking (8x8)",
-      "Warp-level Matrix Multiply (WMMA) 구조 모방 구현",
-    ],
-    memory_reuse: "14.2x (Global Mem Access 대비)",
+    memory_reuse: "14.2x",
     throughput: "84.2 TFLOPS",
     occupancy: 92,
+    details: [
+      "K-Loop Unrolling for Hypothesis Testing Speed",
+      "Shared Memory Bank Conflict Avoidance",
+      "Epilogue Fusion (State Merge Logic)"
+    ]
   },
 
-  // ✅ App.jsx가 기대하는 경로: data.performance.latency.{pytorch, torch_compile, ours}
   performance: {
-    latency: {
-      pytorch: 210,
-      torch_compile: 155,
-      ours: 120,
-    },
+    latency: { ours: 120, pytorch: 210, torch_compile: 155 },
   },
 
-  cudaCode: `// Optimized Tiled GEMM Kernel
-__global__ void gemm_optimized(float* A, float* B, float* C, int M, int N, int K) {
-    __shared__ float sA[TILE_K][TILE_M];
-    __shared__ float sB[TILE_K][TILE_N];
-
-    // 1. Thread-local accumulation in Registers
-    float res[8][8] = {0.0f};
-
-    // 2. Main K-loop with Prefetching
-    for (int k = 0; k < K; k += TILE_K) {
-        load_tiles_to_shared(sA, sB);
-        __syncthreads();
-        compute_outer_product(res, sA, sB);
-        __syncthreads();
-    }
-}`,
+  cudaCode: `// AICF Generated: Semantic-fused GEMM
+__global__ void gemm_semantic_fused(...) {
+    // 1. Register Blocking for K-axis (Search Space)
+    // 2. Shared Memory Tiling (Data Reuse)
+    // 3. Epilogue Fusion (State Merge: α, β)
+}`
 };
