@@ -8,15 +8,24 @@ import { batchNormData } from './batch_norm';
 import { reluData } from './relu';
 
 import { gemmDeepDive } from './deepdive/gemm';
+import { biasAddDeepDive } from './deepdive/bias_add';
+import { layerNormDeepDive } from './deepdive/layer_norm';
 
 export const allOpsData = {
   GEMM: {
     ...gemmData,
     ...gemmDeepDive
   },
-  BiasAdd: biasAddData,
+  BiasAdd: {
+    ...biasAddData,
+    ...biasAddDeepDive
+  },
+  LayerNorm : {
+    ...layerNormData,
+    ...layerNormDeepDive
+  },
+  
   ResidualAdd: residualAddData,
-  LayerNorm : layerNormData,
   Softmax : softmaxData,
   Adamstep : adamStepData,
   BatchNorm : batchNormData,
