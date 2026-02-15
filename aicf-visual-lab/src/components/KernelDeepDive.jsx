@@ -1,80 +1,102 @@
 import React from 'react';
-import { X, History, TrendingUp, BarChart3, Target } from 'lucide-react';
+import { X, TrendingUp, Cpu, Activity, Zap, CheckCircle2 } from 'lucide-react';
 
-export default function KernelDeepDive({ isOpen, onClose, data }) {
+const KernelDeepDive = ({ isOpen, onClose, data }) => {
   if (!isOpen || !data) return null;
 
+  // 병합된 데이터에서 필요한 정보 추출
+  const history = data.kernel_evolution || [];
+  const profiling = data.profiling_report || {};
+  const analysis = data.analysis || "";
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 md:p-12 bg-[#0b1120]/95 backdrop-blur-md animate-in fade-in duration-300">
-      <div className="relative w-full max-w-6xl max-h-full bg-[#1e293b] rounded-[3rem] border border-slate-700 shadow-2xl overflow-hidden flex flex-col">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
+      <div className="bg-[#1e293b] w-full max-w-4xl max-h-[90vh] rounded-[2rem] border border-slate-700 shadow-2xl overflow-hidden flex flex-col">
         
-        {/* Modal Header */}
-        <div className="p-10 border-b border-slate-800 flex justify-between items-center bg-[#1e293b]">
+        {/* Header */}
+        <div className="flex items-center justify-between p-8 border-b border-slate-700 bg-[#0f172a]">
           <div>
-            <h3 className="text-4xl font-black italic uppercase text-emerald-400 tracking-tighter">
-              {data.id} Optimization Chronicle
-            </h3>
-            <p className="text-slate-500 text-xs mt-2 uppercase tracking-[0.3em] font-black italic">
-              Hardware Performance & Engineering evolution
-            </p>
+            <div className="flex items-center gap-3 text-emerald-400 mb-2">
+              <Activity size={24} />
+              <h2 className="text-sm font-black uppercase tracking-[0.3em]">Optimization Chronicle</h2>
+            </div>
+            <h1 className="text-3xl font-black text-white italic tracking-tighter">
+              {data.id} Kernel Evolution
+            </h1>
           </div>
-          <button onClick={onClose} className="p-4 hover:bg-slate-800 rounded-full text-slate-400 transition-all">
-            <X size={32} />
+          <button 
+            onClick={onClose}
+            className="p-3 bg-slate-800 rounded-full hover:bg-slate-700 text-slate-400 hover:text-white transition-all"
+          >
+            <X size={24} />
           </button>
         </div>
 
-        {/* Modal Body */}
-        <div className="p-12 overflow-y-auto space-y-16 scrollbar-hide">
-          {/* 최적화 히스토리 섹션 */}
+        {/* Content Scroll Area */}
+        <div className="flex-1 overflow-y-auto p-8 space-y-10 scrollbar-thin scrollbar-thumb-slate-600 scrollbar-track-transparent">
+          
+          {/* 1. Evolution Timeline */}
           <section>
-            <div className="flex items-center gap-3 mb-12 text-slate-300">
-              <History size={24} className="text-emerald-500" />
-              <h4 className="text-xl font-black uppercase tracking-tight italic">Optimization Milestone</h4>
-            </div>
-            <div className="relative space-y-8 pl-10 border-l-2 border-slate-800 ml-4">
-              {data.kernel_evolution?.map((evo, i) => (
-                <div key={i} className="relative p-8 bg-[#0f172a] rounded-[2rem] border border-slate-800 group transition-all shadow-inner">
-                  <div className="absolute -left-[51px] top-1/2 -translate-y-1/2 w-5 h-5 bg-emerald-500 rounded-full border-4 border-[#1e293b]" />
-                  <div className="flex flex-col md:flex-row justify-between mb-4">
-                    <h5 className="text-2xl font-black text-white italic">{evo.tag}</h5>
-                    <span className="text-2xl font-black text-emerald-400 font-mono">{evo.throughput}</span>
+            <h3 className="text-slate-400 font-bold uppercase tracking-widest text-xs mb-6 flex items-center gap-2">
+              <TrendingUp size={16} /> Version History
+            </h3>
+            <div className="space-y-6 relative pl-4 border-l-2 border-slate-700 ml-2">
+              {history.map((ver, idx) => (
+                <div key={idx} className="relative pl-8 group">
+                  {/* Timeline Dot */}
+                  <div className={`absolute -left-[21px] top-1 w-4 h-4 rounded-full border-2 ${idx === history.length - 1 ? 'bg-emerald-500 border-emerald-500 shadow-[0_0_10px_rgba(16,185,129,0.5)]' : 'bg-[#1e293b] border-slate-600'}`} />
+                  
+                  <div className="bg-[#0f172a] p-6 rounded-2xl border border-slate-800 group-hover:border-emerald-500/30 transition-all">
+                    <div className="flex justify-between items-start mb-3">
+                      <div>
+                        <span className={`text-[10px] font-black px-2 py-1 rounded-md mr-3 ${idx === history.length - 1 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-slate-800 text-slate-500'}`}>
+                          {ver.version}
+                        </span>
+                        <span className="text-lg font-bold text-slate-200">{ver.tag}</span>
+                      </div>
+                      <div className="text-right">
+                        <span className="text-2xl font-black text-emerald-400 font-mono block">{ver.throughput}</span>
+                      </div>
+                    </div>
+                    <p className="text-sm text-slate-400 leading-relaxed">
+                      {ver.description}
+                    </p>
                   </div>
-                  <p className="text-sm text-slate-400 leading-relaxed">{evo.description}</p>
                 </div>
               ))}
             </div>
           </section>
 
-          {/* 하드웨어 리소스 분석 섹션 */}
-          <section className="grid grid-cols-1 lg:grid-cols-2 gap-10 pb-10">
-            <div className="bg-[#0f172a] p-10 rounded-[2.5rem] border border-slate-800">
-              <h4 className="text-xs font-black text-slate-500 uppercase mb-10 flex items-center gap-2 tracking-widest">
-                <BarChart3 size={20} /> Compute Unit Utilization
-              </h4>
-              <div className="space-y-8">
-                {Object.entries(data.profiling_report ?? {}).map(([key, val]) => (
-                  <div key={key} className="space-y-2">
-                    <div className="flex justify-between text-[11px] uppercase font-black tracking-widest">
-                      <span className="text-slate-500">{key.replace(/_/g, ' ')}</span>
-                      <span className="text-emerald-400">{val}</span>
-                    </div>
-                    <div className="h-2 bg-slate-900 rounded-full overflow-hidden border border-slate-800">
-                      <div className="h-full bg-emerald-500" style={{ width: val }} />
-                    </div>
-                  </div>
-                ))}
-              </div>
+          {/* 2. Profiling Report Grid */}
+          <section>
+             <h3 className="text-slate-400 font-bold uppercase tracking-widest text-xs mb-6 flex items-center gap-2">
+              <Cpu size={16} /> Profiling Metrics (Latest)
+            </h3>
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+              {Object.entries(profiling).map(([key, value]) => (
+                <div key={key} className="bg-[#0f172a]/50 p-4 rounded-xl border border-slate-800 text-center">
+                  <p className="text-[9px] text-slate-500 font-black uppercase tracking-tight mb-2 truncate" title={key}>
+                    {key.replace(/_/g, ' ')}
+                  </p>
+                  <p className="text-xl font-black text-white font-mono">{value}</p>
+                </div>
+              ))}
             </div>
-            
-            <div className="bg-[#0f172a] p-10 rounded-[2.5rem] border border-slate-800 flex flex-col items-center justify-center">
-              
-              <p className="text-sm text-slate-400 mt-8 max-w-xs text-center italic">
-                "AICF kernel achieves near-peak performance by maximizing TensorCore utilization."
-              </p>
-            </div>
+          </section>
+
+          {/* 3. Analysis Text */}
+          <section className="bg-emerald-900/10 p-6 rounded-2xl border border-emerald-500/20">
+            <h3 className="text-emerald-400 font-bold uppercase tracking-widest text-xs mb-3 flex items-center gap-2">
+              <CheckCircle2 size={16} /> Analysis & Conclusion
+            </h3>
+            <p className="text-emerald-100/80 text-sm leading-relaxed font-medium">
+              {analysis}
+            </p>
           </section>
         </div>
       </div>
     </div>
   );
-}
+};
+
+export default KernelDeepDive;

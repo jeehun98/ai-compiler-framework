@@ -1,6 +1,5 @@
 export const gemmDeepDive = {
-  id: "GEMM",
-  // App.jsx의 KernelDeepDive 컴포넌트가 사용하는 키 이름으로 변경
+  // App.jsx에서 data.kernel_evolution으로 접근
   kernel_evolution: [
     {
       version: "v1.0",
@@ -21,7 +20,7 @@ export const gemmDeepDive = {
       description: "Ampere 아키텍처 WMMA API 사용 및 Float4 벡터 로드 적용. Bank Conflict를 피하기 위한 패딩 기법 도입.",
     }
   ],
-  // App.jsx의 KernelDeepDive 컴포넌트가 사용하는 키 이름으로 변경
+  // App.jsx에서 data.profiling_report로 접근
   profiling_report: {
     "SM_Occupancy": "92.4%",
     "L1_Cache_Hit_Rate": "94.1%",

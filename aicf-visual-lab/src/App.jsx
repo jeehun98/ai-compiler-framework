@@ -6,7 +6,7 @@ import {
   ResponsiveContainer, Cell
 } from 'recharts';
 import {
-  Cpu, ChevronRight, Zap, Share2, Layers, Target, ShieldCheck, Activity,
+  Cpu, ChevronRight, Zap, Share2, Layers, ShieldCheck, Activity,
   Terminal, Scale, Eye, Focus, History
 } from 'lucide-react';
 
@@ -18,6 +18,7 @@ export default function App() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const data = allOpsData[selectedOpId];
 
+  // 데이터 로딩 중 처리
   if (!data) return <div className="p-10 text-red-300 bg-[#0f172a] h-screen text-center font-mono italic">Loading AICF Engine...</div>;
 
   const semantic = data.semantics ?? data.semantic ?? null;
@@ -32,8 +33,12 @@ export default function App() {
   const km = data.kernel?.metrics ?? {};
   const chosenVariant = data.lowering?.chosen?.variant ?? 'Standard_Kernel';
 
+  // Deep Dive 데이터 존재 여부 확인 (버튼 표시용)
+  const hasDeepDive = !!(data.kernel_evolution || data.evolution);
+
   return (
     <div className="flex h-screen bg-[#0f172a] text-slate-200 font-sans overflow-hidden italic-vars">
+      {/* Sidebar */}
       <aside className="w-72 bg-[#1e293b] border-r border-slate-700 p-6 flex flex-col shadow-2xl z-10">
         <h1 className="text-xl font-bold text-blue-400 mb-10 tracking-tight flex items-center gap-2 uppercase">
           <Cpu size={24} className="text-blue-500" /> AICF Lab
@@ -59,7 +64,9 @@ export default function App() {
         </div>
       </aside>
 
+      {/* Main Content */}
       <main className="flex-1 p-10 overflow-y-auto space-y-12 bg-gradient-to-b from-[#0f172a] to-[#1e293b]/20">
+        {/* Header */}
         <header className="flex justify-between items-end border-b border-slate-800 pb-8">
           <div>
             <span className="text-blue-500 font-mono text-xs uppercase tracking-[0.4em] font-black italic">Architecture Trace</span>
@@ -72,6 +79,7 @@ export default function App() {
           </div>
         </header>
 
+        {/* 1. Semantic Deep-Dive Section */}
         <section className="space-y-8">
           <div className="flex items-center gap-3 text-blue-500">
             <Share2 size={28} />
@@ -115,6 +123,7 @@ export default function App() {
           </div>
         </section>
 
+        {/* 2. Contextual Sensitivity Section */}
         <section className="space-y-6">
           <div className="flex items-center gap-3 text-purple-400">
             <Eye size={28} />
@@ -136,14 +145,15 @@ export default function App() {
           </div>
         </section>
 
+        {/* 3. Lowering & Physical Trace Section */}
         <section className="space-y-8 pb-24">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3 text-emerald-400">
               <Zap size={28} />
               <h3 className="text-3xl font-black uppercase tracking-tighter italic">3. Lowering & Physical Trace</h3>
             </div>
-            {/* DeepDive 데이터가 존재할 때만 버튼 노출 */}
-            {(data.kernel_evolution || data.evolution) && (
+            {/* 🟢 Deep Dive 버튼 (데이터가 있을 때만 활성화) */}
+            {hasDeepDive && (
               <button 
                 onClick={() => setIsModalOpen(true)}
                 className="flex items-center gap-2 px-6 py-3 bg-emerald-600/10 hover:bg-emerald-600 border border-emerald-500/30 text-emerald-400 hover:text-white rounded-2xl font-black text-xs uppercase tracking-widest transition-all duration-300 group shadow-lg shadow-emerald-500/10"
@@ -205,6 +215,7 @@ export default function App() {
           </div>
         </section>
 
+        {/* Latency Chart Section */}
         <section className="col-span-12 bg-[#1e293b] p-8 rounded-[2.5rem] border border-slate-800 shadow-xl pb-12">
             <h4 className="text-slate-500 text-xs font-black mb-12 uppercase tracking-widest text-center italic opacity-60">Physical Performance Benchmark (ms)</h4>
             <div className="h-64">
@@ -225,6 +236,7 @@ export default function App() {
         </section>
       </main>
 
+      {/* ✨ Deep Dive 모달 (여기서 렌더링) */}
       <KernelDeepDive 
         isOpen={isModalOpen} 
         onClose={() => setIsModalOpen(false)} 

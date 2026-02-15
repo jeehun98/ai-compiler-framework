@@ -1,7 +1,0 @@
-{
-  "tag": "cuda_binding_gemm_bench_v2",
-  "root": "C:\\Users\\owner\\Desktop\\ai-compiler-framework\\ai-compiler-framework",
-  "script": "ai-compiler-framework\\tests\\cuda_binding_test\\v2_gemm_bench.py",
-  "op_kind": 2,
-  "time": "2026-02-12 13:39:43"
-}
