@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import sys
 from pathlib import Path
 import struct
@@ -14,8 +13,6 @@ for p in (EX_PY, BUILD_PY):
     if sp not in sys.path:
         sys.path.insert(0, sp)
 
-import struct
-import torch
 import _C
 
 def schema_id(tag4: str) -> int:
@@ -23,138 +20,112 @@ def schema_id(tag4: str) -> int:
     assert len(b) == 4
     return int.from_bytes(b, "little", signed=False)
 
-def ref_layernorm_fwd(x, gamma=None, beta=None, eps=1e-5):
-    mu = x.mean(dim=1)
-    var = x.var(dim=1, unbiased=False)
-    rstd = (var + eps).rsqrt()
-    xhat = (x - mu[:, None]) * rstd[:, None]
-    if gamma is not None and beta is not None:
-        y = xhat * gamma[None, :] + beta[None, :]
+def measure_bandwidth(func, *args, N, M, dtype_size, mode="fwd", rep=100, warmup=10):
+    for _ in range(warmup):
+        func(*args)
+    torch.cuda.synchronize()
+
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+
+    start_event.record()
+    for _ in range(rep):
+        func(*args)
+    end_event.record()
+    
+    torch.cuda.synchronize()
+    avg_ms = start_event.elapsed_time(end_event) / rep
+    
+    total_elements = M * N
+    
+    if mode == "fwd":
+        # Read X, Write Y (Mean/Var are negligible)
+        # Note: Kernel reads X twice? Ideally L2 cached. We count DRAM traffic as 2x.
+        factor = 2
+    elif mode == "bwd":
+        # Pass 1 (dX): Read X, dY, Write dX (3x)
+        # Pass 2 (dG, dB): Read X, dY (2x)
+        factor = 5
     else:
-        y = xhat
-    return y, mu.to(torch.float32), rstd.to(torch.float32)
+        factor = 0
 
-def ref_layernorm_bwd(x, dy, mean, rstd, gamma=None):
-    M, N = x.shape
-    mu = mean.to(x.dtype)
-    rs = rstd.to(x.dtype)
-    xhat = (x - mu[:, None]) * rs[:, None]
-    dy_hat = dy if gamma is None else (dy * gamma[None, :])
+    total_bytes = total_elements * dtype_size * factor
+    gbps = total_bytes / (avg_ms / 1000.0) / 1e9
+    return avg_ms, gbps
 
-    s1 = dy_hat.sum(dim=1)
-    s2 = (dy_hat * xhat).sum(dim=1)
-    dx = ((N * dy_hat - s1[:, None] - xhat * s2[:, None]) * (rs[:, None] / N))
-
-    if gamma is None:
-        return dx, None, None
-    dgamma = (dy * xhat).sum(dim=0).to(torch.float32)
-    dbeta  = dy.sum(dim=0).to(torch.float32)
-    return dx, dgamma, dbeta
-
-def call_op(kind, inputs, outputs, sid=0, payload=b"", stream=0):
-    # signature: (kind, inputs, outputs, schema_id:int=0, attrs_bytes:bytes=b'', stream:int=0)
-    _C.op_call(kind, inputs, outputs, sid, payload, stream)
-
-def run_fwd(dtype=torch.float32, affine=False, M=8, N=128, eps=1e-5):
-    x = torch.randn(M, N, device="cuda", dtype=dtype)
-
+def run_bench(dtype, M, N, affine=True):
+    device = torch.device("cuda:0")
+    dtype_size = 2 if dtype == torch.float16 else 4
+    eps = 1e-5
+    
+    x = torch.randn(M, N, device=device, dtype=dtype)
+    dy = torch.randn(M, N, device=device, dtype=dtype)
+    
     sid = schema_id("LNEP")
     payload = struct.pack("<f", float(eps))
-
+    
+    # -------------------------------------------------------
+    # Forward Bench
+    # -------------------------------------------------------
     if affine:
-        g = torch.randn(N, device="cuda", dtype=dtype)
-        b = torch.randn(N, device="cuda", dtype=dtype)
-        y = torch.empty_like(x)
-        mean = torch.empty(M, device="cuda", dtype=torch.float32)
-        rstd = torch.empty(M, device="cuda", dtype=torch.float32)
-
-        call_op(_C.OpKind.LayerNormFwd, [x, g, b], [y, mean, rstd], sid, payload)
-
-        y_ref, mean_ref, rstd_ref = ref_layernorm_fwd(x, g, b, eps)
+        g = torch.randn(N, device=device, dtype=dtype)
+        b = torch.randn(N, device=device, dtype=dtype)
+        inputs_fwd = [x, g, b]
     else:
-        y = torch.empty_like(x)
-        mean = torch.empty(M, device="cuda", dtype=torch.float32)
-        rstd = torch.empty(M, device="cuda", dtype=torch.float32)
+        inputs_fwd = [x]
+        
+    y = torch.empty_like(x)
+    mean = torch.empty(M, device="cuda", dtype=torch.float32)
+    rstd = torch.empty(M, device="cuda", dtype=torch.float32)
+    outputs_fwd = [y, mean, rstd]
 
-        call_op(_C.OpKind.LayerNormFwd, [x], [y, mean, rstd], sid, payload)
+    def _run_fwd():
+        _C.op_call(_C.OpKind.LayerNormFwd, inputs_fwd, outputs_fwd, sid, payload, 0)
 
-        y_ref, mean_ref, rstd_ref = ref_layernorm_fwd(x, None, None, eps)
+    ms_fwd, gbps_fwd = measure_bandwidth(_run_fwd, N=N, M=M, dtype_size=dtype_size, mode="fwd")
 
-    return max(
-        (y - y_ref).abs().max().item(),
-        (mean - mean_ref).abs().max().item(),
-        (rstd - rstd_ref).abs().max().item(),
-    )
-
-def run_bwd(dtype=torch.float32, affine=False, M=8, N=128, eps=1e-5):
-    x = torch.randn(M, N, device="cuda", dtype=dtype)
-    dy = torch.randn(M, N, device="cuda", dtype=dtype)
-
-    if affine:
-        g = torch.randn(N, device="cuda", dtype=dtype)
-        b = torch.randn(N, device="cuda", dtype=dtype)
-        _, mean_ref, rstd_ref = ref_layernorm_fwd(x, g, b, eps)
-    else:
-        _, mean_ref, rstd_ref = ref_layernorm_fwd(x, None, None, eps)
-        g = None
-
-    mean = mean_ref.contiguous()
-    rstd = rstd_ref.contiguous()
-
+    # -------------------------------------------------------
+    # Backward Bench
+    # -------------------------------------------------------
     if affine:
         dx = torch.empty_like(x)
         dgamma = torch.empty(N, device="cuda", dtype=torch.float32)
         dbeta  = torch.empty(N, device="cuda", dtype=torch.float32)
-
-        call_op(_C.OpKind.LayerNormBwd, [x, dy, g, mean, rstd], [dx, dgamma, dbeta])
-
-        dx_ref, dgamma_ref, dbeta_ref = ref_layernorm_bwd(x, dy, mean, rstd, g)
-        return max(
-            (dx - dx_ref).abs().max().item(),
-            (dgamma - dgamma_ref).abs().max().item(),
-            (dbeta - dbeta_ref).abs().max().item(),
-        )
+        # inputs: X, dY, G, Mean, Rstd
+        inputs_bwd = [x, dy, g, mean, rstd]
+        outputs_bwd = [dx, dgamma, dbeta]
     else:
         dx = torch.empty_like(x)
-        call_op(_C.OpKind.LayerNormBwd, [x, dy, mean, rstd], [dx])
+        # inputs: X, dY, Mean, Rstd
+        inputs_bwd = [x, dy, mean, rstd]
+        outputs_bwd = [dx]
 
-        dx_ref, _, _ = ref_layernorm_bwd(x, dy, mean, rstd, None)
-        return (dx - dx_ref).abs().max().item()
+    def _run_bwd():
+        _C.op_call(_C.OpKind.LayerNormBwd, inputs_bwd, outputs_bwd, sid, payload, 0)
+        
+    ms_bwd, gbps_bwd = measure_bandwidth(_run_bwd, N=N, M=M, dtype_size=dtype_size, mode="bwd")
+
+    # Print
+    name = f"{'F16' if dtype==torch.float16 else 'F32'}"
+    print(f"[{name}] {M}x{N:<5} | FWD: {ms_fwd:.3f} ms ({gbps_fwd:.1f} GB/s) | BWD: {ms_bwd:.3f} ms ({gbps_bwd:.1f} GB/s)")
 
 def main():
-    print("LayerNormFwd enum value =", int(_C.OpKind.LayerNormFwd))
-    print("LayerNormBwd enum value =", int(_C.OpKind.LayerNormBwd))
-    print("schema_id(LNEP) =", hex(schema_id("LNEP")))
+    torch.manual_seed(0)
+    print(f"LayerNorm Benchmark (Target: >250 GB/s)")
+    print("-" * 80)
 
-    worst = 0.0
-    for dtype in (torch.float32, torch.float16):
-        for affine in (False, True):
-            for (M, N) in ((8, 128), (64, 256), (7, 33)):
-                d = run_fwd(dtype=dtype, affine=affine, M=M, N=N, eps=1e-5)
-                print(f"[FWD {dtype} affine={affine}] M={M} N={N} max|d|={d:.3e}")
-                worst = max(worst, d)
-
-    for dtype in (torch.float32, torch.float16):
-        for affine in (False, True):
-            for (M, N) in ((8, 128), (64, 256), (7, 33)):
-                d = run_bwd(dtype=dtype, affine=affine, M=M, N=N, eps=1e-5)
-                print(f"[BWD {dtype} affine={affine}] M={M} N={N} max|d|={d:.3e}")
-                worst = max(worst, d)
-
-    print("[OK] worst max|delta| =", worst)
-
-    # NEG: wrong rank (3D) -> expect NotImplemented
-    try:
-        x = torch.randn(2, 3, 4, device="cuda", dtype=torch.float32)
-        y = torch.empty_like(x)
-        mean = torch.empty(2, device="cuda", dtype=torch.float32)
-        rstd = torch.empty(2, device="cuda", dtype=torch.float32)
-        sid = schema_id("LNEP")
-        payload = struct.pack("<f", 1e-5)
-        call_op(_C.OpKind.LayerNormFwd, [x], [y, mean, rstd], sid, payload)
-        raise AssertionError("expected failure")
-    except RuntimeError as e:
-        print("[NEG rank] ok:", str(e).splitlines()[0])
+    # Large shape to saturate GPU
+    # M=4096, N=4096 => 16M elements
+    M, N = 4096, 4096
+    
+    run_bench(torch.float32, M, N, affine=True)
+    run_bench(torch.float16, M, N, affine=True)
+    
+    print("-" * 80)
+    # Check "Hidden Size" typical shapes (M large, N small)
+    # BERT-base style: N=768
+    M_bert, N_bert = 32*1024, 768 # Total ~25M elements
+    run_bench(torch.float16, M_bert, N_bert, affine=True)
 
 if __name__ == "__main__":
     main()

@@ -9,6 +9,7 @@ import { reluData } from './relu';
 
 // Deep Dive 데이터 Import
 import { gemmDeepDive } from './deepdive/gemm';
+import { biasAddDeepDive } from './deepdive/bias_add';
 // import { biasAddDeepDive } from './deepdive/bias_add'; // (필요 시 주석 해제)
 // import { layerNormDeepDive } from './deepdive/layer_norm'; // (필요 시 주석 해제)
 
@@ -20,7 +21,7 @@ export const allOpsData = {
   // 아직 Deep Dive 데이터가 없는 경우는 기존 데이터만 사용
   BiasAdd: {
     ...biasAddData,
-    // ...biasAddDeepDive 
+    ...biasAddDeepDive 
   },
   LayerNorm : {
     ...layerNormData,

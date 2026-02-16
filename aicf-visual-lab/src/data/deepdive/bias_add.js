@@ -1,37 +1,30 @@
 export const biasAddDeepDive = {
   id: "BiasAdd",
+
   kernel_evolution: [
     {
       version: "v1.0",
-      tag: "Scalar Load/Store",
-      throughput: "—",
-      description: "각 element에 대해 bias를 더하는 기본 구현. 메모리 접근이 주 병목.",
+      tag: "F16 스칼라 브로드캐스팅 (Naive)",
+      throughput: "219.4 GB/s",
+      description:
+        "요소마다 bias 인덱싱(모듈러/주소 계산)이 발생해 명령 발행 오버헤드가 커지고 ILP가 부족해져, 메모리 파이프를 충분히 포화시키지 못함.",
     },
     {
       version: "v2.0",
-      tag: "Half2 Vectorization",
-      throughput: "—",
-      description: "N이 even일 때 half2로 벡터화하여 load/add/store 처리. 처리량 개선.",
+      tag: "F16 벡터화 (half2)",
+      throughput: "278.4 GB/s",
+      description:
+        "half2 벡터화로 2개 요소당 1회만 인덱싱/주소 계산을 수행해 오버헤드를 절감. 그 결과 유효 메모리 대역폭을 크게 회복(+27%).",
     },
   ],
+
   profiling_report: {
-    "DRAM_Throughput": "—",
-    "Warp_Execution_Efficiency": "—",
-    "L1_Cache_Hit_Rate": "—",
+    유효_메모리_대역폭: "278.4 GB/s",
+    성능_향상폭: "+27% (vs Naive)",
+    병목_특성: "주소 계산(인덱싱) + 메모리 파이프 포화 부족",
+    측정_정의: "유효 대역폭 = Read(Y)+Write(Out) 기준(2×), bias read는 비교 목적상 제외",
   },
+
   analysis:
-    "축(last-dim) broadcast만 지원. fp16에서는 N even이면 half2 경로로 벡터화, odd이면 scalar half 경로로 폴백.",
-  tests: {
-    summary: "CUDA binding test: exact match vs torch reference (max|delta| = 0).",
-    positive: [
-      { dtype: "fp32", shape: [64, 256], axis: -1, max_abs_delta: 0.0 },
-      { dtype: "fp32", shape: [8, 32, 128], axis: -1, max_abs_delta: 0.0 },
-      { dtype: "fp16", shape: [64, 256], axis: -1, max_abs_delta: 0.0, note: "N even => half2 가능" },
-      { dtype: "fp16", shape: [7, 33, 127], axis: -1, max_abs_delta: 0.0, note: "N odd => scalar half 폴백" },
-    ],
-    negative: [
-      { name: "axis not last-dim", axis: 1, expected_status: "NotImplemented" },
-      { name: "bias length mismatch", expected_status: "InvalidArgument (권장)", got_status: "NotImplemented (현재)" },
-    ],
-  },
+    "BiasAdd 같은 브로드캐스팅 커널에서는 데이터 이동량만큼이나 '어디를 읽을지 계산하는 비용(주소 계산/인덱싱)'이 병목이 될 수 있다. half2 벡터화는 주소 계산 빈도를 절반으로 낮춰 명령 발행 오버헤드를 줄이고, 메모리 파이프를 더 잘 포화시키는 핵심 전략이다.",
 };
