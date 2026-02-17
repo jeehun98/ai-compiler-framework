@@ -1,162 +1,81 @@
 export const gemmData = {
   id: "GEMM",
-  category: "Linear Transform / Projection",
+  category: "선형 변환 / 특징 투영 (Linear Projection)",
 
   canonical: {
     formula: "C = \\alpha(A \\times B) + \\beta C",
-    shapes: {
-      A: "M\\times K",
-      B: "K\\times N",
-      C: "M\\times N",
-    },
+    shapes: { A: "M\\times K", B: "K\\times N", C: "M\\times N" },
     interpretation: {
-      rowA: "sample i (A_i)",
-      colB: "hypothesis j (B_j)",
-      cij: "alignment score <A_i, B_j>",
+      rowA: "샘플 i (입력 질의)",
+      colB: "가설 j (비교 특징)",
+      cij: "샘플 i와 가설 j의 연관성 점수",
     },
   },
 
-  // 1) 의미론: '무엇을 보존해야 하는가'
   semantics: {
-    thesis: "Semantic projection operator that evaluates relational hypotheses and merges state.",
+    thesis: "관계 가설을 평가하고 이전 상태를 병합하는 의미론적 투영 연산자",
     axes: {
-      M: { name: "Samples", role: "batch of queries" },
-      K: { name: "Hypothesis Search Space", role: "semantic channel / evidence accumulation" },
-      N: { name: "Feature Channels", role: "projection outputs / logits" },
+      M: { name: "샘플 (Samples)", role: "질의 배치 (Batch)" },
+      K: { name: "가설 탐색 공간 (Hypothesis Space)", role: "의미론적 근거 축적 공간" },
+      N: { name: "특징 채널 (Features)", role: "투영 결과값" },
     },
 
     invariants: [
       {
         id: "INV_TOPK_ORDER",
-        name: "Top-K / Rank Invariance",
-        metric: "rowwise\\_argsort\\_preserve",
-        threshold: "TopK@k=1..k_0\\ preserved",
-        allows: ["low_bit_quant", "approx_dot", "early_exit"],
-      },
-      {
-        id: "INV_SUBSPACE",
-        name: "Subspace Projection Invariance",
-        metric: "span\\_similarity(col(B), col(B'))",
-        threshold: "\\ge 0.999\\ (cos-subspace)",
-        allows: ["low_rank_factorization", "basis_compression"],
+        name: "순위 보존성 (Rank Invariance)",
+        metric: "행 단위 순서(argsort) 일치도",
+        threshold: "상위 K개 결과의 순서 유지",
+        allows: ["저정밀도 양자화", "근사 행렬곱", "조기 종료"],
       },
       {
         id: "INV_BOUNDARY",
-        name: "Decision Boundary Invariance",
-        metric: "sign\\_consistency",
-        threshold: "\\ge 99.99\\%",
-        allows: ["aggressive_rewrite_if_verified"],
+        name: "결정 경계 보존성 (Decision Boundary)",
+        metric: "부호 일치성 (Sign Consistency)",
+        threshold: "99.99% 이상 일치",
+        allows: ["검증된 범위 내의 과감한 연산 재작성"],
       },
     ],
-
-    stateMerge: {
-      enabled: true,
-      meaning: "C_{old} as state, AB as observation; epilogue merges them.",
-      params: { alpha: "\\alpha", beta: "\\beta", ratio: "\\alpha/\\beta" },
-      state_types: ["residual", "optimizer_update", "running_stats"],
-    },
 
     sensitivity: {
       downstream: [
         {
-          name: "ReLU Sensitivity",
-          rule: "if C_{ij} \\ll 0 then precision can drop / early negative certainty",
-          hint: "negative_region_low_priority",
+          name: "ReLU 민감도",
+          rule: "결과값이 0보다 훨씬 작으면 정밀도를 낮추거나 계산 조기 중단 가능",
+          hint: "음수 영역 연산 우선순위 낮춤",
         },
         {
-          name: "Softmax Sensitivity",
-          rule: "if (max - C_{ij}) large then exp \\to 0, allow pruning/low precision",
-          hint: "tail_prune_allowed",
+          name: "Softmax 민감도",
+          rule: "최댓값과의 차이가 크면 지수값이 0에 수렴하므로 가지치기 허용",
+          hint: "꼬리 부분(Tail) 연산 생략 가능",
         },
       ],
-      tilePriority: "semantic_sparsity_predict",
     },
   },
 
-  // 2) 허용 변형: '무엇을 바꿀 수 있는가'
-  rewrites: {
-    candidates: [
-      {
-        id: "RW_LOWRANK_B",
-        name: "Low-Rank Factorization",
-        transform: "B \\approx U V \\Rightarrow A(UV)",
-        preconditions: ["energy_preserve >= 0.999", "subspace_invariant passes"],
-      },
-      {
-        id: "RW_SPARSE_PRUNE",
-        name: "Sparse Pruning",
-        transform: "mask(B_{ij})\\ if\\ |B_{ij}| < \\epsilon",
-        preconditions: ["semantic_density low", "order_invariant passes"],
-      },
-      {
-        id: "RW_EARLY_EXIT_K",
-        name: "Incremental Accumulation",
-        transform: "stop\\ K\\ traversal\\ when\\ margin\\ sufficient",
-        preconditions: ["topk_margin >= margin_0", "order_invariant passes"],
-      },
-      {
-        id: "RW_ANCHOR_FUSION",
-        name: "Semantic Anchor Fusion",
-        transform: "GEMM + Bias + Norm + Act \\Rightarrow Anchor",
-        preconditions: ["same semantic unit", "no externally observed intermediate"],
-      },
-    ],
-  },
-
-  // 3) 비용함수
-  costModel: {
-    compute: ["FLOPs", "bandwidth", "occupancy"],
-    semanticLoss: "\\lambda_1 RankLoss + \\lambda_2 OrderViolation + \\lambda_3 BoundaryDrift",
-    weights_hint: {
-      default: { RankLoss: 1.0, OrderViolation: 5.0, BoundaryDrift: 3.0 },
-      safety_critical: { RankLoss: 5.0, OrderViolation: 20.0, BoundaryDrift: 20.0 },
-    },
-  },
-
-  // 4) Lowering 선택 (실측 기반 이유 추가)
   lowering: {
     chosen: {
       variant: "TensorCore_GEMM_EpilogueFused",
       reason: [
-        "downstream=Softmax detected: enforcing Top-K order invariant",
-        "Profile shows tail prune safe in 78% of tiles (3.1 TFLOPS regime)",
-        "Epilogue stateMerge enabled: avoiding C_intermediate materialization",
+        "후속 Softmax 연산 감지: 순위 보존 불변성 강제 적용",
+        "프로파일링 결과: 타일의 78%에서 조기 종료 안전 확인 (성능 최적화)",
+        "에필로그 상태 병합 활성화: 중간 데이터 생성 없이 즉시 융합",
       ],
-      applied_rewrites: ["RW_ANCHOR_FUSION", "RW_EARLY_EXIT_K"],
+      applied_rewrites: ["연산 앵커 결합 (Anchor Fusion)", "누적 연산 조기 종료 (Early Exit)"],
     },
-    options: [
-      "Full GEMM",
-      "Low-rank GEMM",
-      "Sparse GEMM",
-      "Tensor Core variant",
-      "Fused epilogue variant",
-    ],
   },
 
-  // 5) 물리 최적화 & 커널 실측치
   kernel: {
-    strategy: "2D Hierarchical Tiling (Optimized for Strided Access)",
+    strategy: "2단계 계층적 타일링 (스트라이드 접근 최적화)",
     details: [
-      { technique: "Shared-memory tiling", semantic_link: "reuse evidence across hypotheses (K-axis)" },
-      { technique: "K-loop unroll", semantic_link: "accelerate hypothesis testing throughput" },
-      { technique: "Epilogue fusion", semantic_link: "state merge is a semantic unit; avoid intermediate write" },
+      { technique: "공유 메모리 타일링", semantic_link: "K축(가설 공간) 데이터 재사용 극대화" },
+      { technique: "K-루프 언롤링", semantic_link: "가설 검증 처리량 가속" },
+      { technique: "에필로그 융합", semantic_link: "상태 병합은 하나의 의미 단위이므로 쓰기 지연 방지" },
     ],
     metrics: { 
-      memory_reuse: "14.2x", 
-      throughput: "3,188.9 GF/s", // v2_gemm_bench 실측 피크치
-      occupancy: 92 
+      memory_reuse: "14.2배", 
+      throughput: "3,188.9 GF/s (실측치)", 
+      occupancy: "92%" 
     },
   },
-
-  performance: {
-    latency: { ours: 0.0842, pytorch: 0.152, torch_compile: 0.115 }, // 실측 ms 반영
-  },
-
-  cudaCode: `// AICF Generated: Semantic-aware TensorCore GEMM
-__global__ void gemm_semantic_fused(half* A, half* B, float* C, ...) {
-  // 1. Register blocking for K-axis (hypothesis search space)
-  // 2. WMMA fragment load & mma sync
-  // 3. Epilogue fusion (Bias + Residual merge: α, β)
-  // 4. Semantic early-exit guard implemented
-}`,
 };
