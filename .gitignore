@@ -89,5 +89,4 @@ Thumbs.db
 *.tmp
 
 # MNIST raw files
-raw/*.ubyte
-raw/*.gz
+data/MNIST/

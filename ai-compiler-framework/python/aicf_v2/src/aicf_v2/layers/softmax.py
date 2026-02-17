@@ -1,46 +1,54 @@
-# python/aicf_v2/src/aicf_v2/layers/softmax.py
 from __future__ import annotations
+from typing import List, Dict
 
 from .base import Layer
 from ..tensor_spec import TensorSpec
 from ..emitters.cuda.context import CudaEmitContext
 from ..emitters.cuda.softmax import softmax as emit_softmax
+from ..emitters.cuda.softmax_bwd import softmax_bwd as emit_softmax_bwd
 
 class Softmax(Layer):
     def __init__(self, axis: int = -1, name: str = "softmax"):
-        """
-        Softmax Layer
-        :param axis: Softmax를 적용할 차원 (기본값: 마지막 차원)
-        :param name: 레이어 이름
-        """
         super().__init__(name)
         self.axis = axis
 
     def emit(self, b, x: int, *, ctx: CudaEmitContext) -> int:
-        """
-        그래프 빌더(b)를 사용하여 Softmax Op를 IR에 등록합니다.
-        """
-        x_val = b.values[x]
-        x_spec = x_val.spec
-
-        # Output Tensor 정의 (Softmax는 입력과 출력의 Shape/Dtype이 동일함)
-        y_spec = TensorSpec(
-            shape=x_spec.shape, 
-            dtype=x_spec.dtype, 
-            device=x_spec.device
-        )
+        """Forward: y = softmax(x)"""
+        x_spec = b.values[x].spec
+        y_spec = TensorSpec(shape=x_spec.shape, dtype=x_spec.dtype, device=x_spec.device)
         y = b.value(f"{self.name}.out", y_spec)
 
-        # Emitter를 호출하여 실제 Op를 그래프에 삽입
         emit_softmax(
             b, ctx,
             x=x,
             out=y,
             axis=self.axis,
-            name=self.name,
-            # Softmax는 메모리 효율을 위해 Inplace가 가능하도록 제약 조건 부여 가능
-            constraints={"inplace_ok": False},
-            hints={"prefer_fused_reduction": True} # 커널 최적화 힌트
+            name=self.name
+        )
+        return y
+
+    def emit_backward(self, b, ctx: CudaEmitContext, inputs: List[int], outputs: List[int], 
+                      grad_y: int, params: List[int] = None, **kwargs) -> Dict[str, int]:
+        """
+        Softmax Backward (Emitter 인자명 매핑 완료):
+        - out: Forward의 출력 y (outputs[0])
+        - grad_out: 상위 레이어의 미분값 dy (grad_y)
+        - grad_in: 계산되어 나갈 미분값 dx
+        """
+        y_vid = outputs[0]      # Forward 시의 softmax 결과
+        dy_vid = grad_y         # Loss로부터 온 미분값
+        
+        y_spec = b.values[y_vid].spec
+        dx_vid = b.value(f"{self.name}.dx", y_spec)
+
+        # 이미터 인자 규격에 맞춰 호출: out, grad_out, grad_in
+        emit_softmax_bwd(
+            b, ctx,
+            out=y_vid,          # 이미터의 'out' 인자에 y 주입
+            grad_out=dy_vid,    # 이미터의 'grad_out' 인자에 dy 주입
+            grad_in=dx_vid,     # 이미터의 'grad_in' 인자에 결과 dx 주입
+            axis=self.axis,
+            name=f"{self.name}.bwd"
         )
 
-        return y
+        return {"input": dx_vid}

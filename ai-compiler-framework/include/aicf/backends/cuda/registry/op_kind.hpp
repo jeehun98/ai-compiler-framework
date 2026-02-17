@@ -20,19 +20,20 @@ enum class OpKind : int {
   LayerNormFwd  = 13,
   LayerNormBwd  = 14,
 
-  // ---- NEW ----
   BatchNormFwd  = 15,
   BatchNormBwd  = 16,
 
-  
-  GemmEpilogue  = 17,   // ✅ ADD: (A,B,bias)->C with optional relu in epilogue
+  GemmEpilogue  = 17,
   Softmax       = 18,
   SoftmaxBwd    = 19,
 
   MseLoss       = 20,
-  
-  _Count        = 21
 
+  // ---- NEW ----
+  CrossEntropyFwd = 21,
+  CrossEntropyBwd = 22,
+
+  _Count        = 23
 };
 
-}  // namespace aicf::cuda
+} // namespace aicf::cuda

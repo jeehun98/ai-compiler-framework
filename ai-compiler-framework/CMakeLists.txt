@@ -38,6 +38,9 @@ add_library(aicf
   src/backends/cuda/ops/softmax/launcher.cu
   src/backends/cuda/ops/softmax_bwd/launcher.cu
   src/backends/cuda/ops/mse_loss/launcher.cu
+  src/backends/cuda/ops/cross_entropy_loss/launcher.cu
+
+
 
   # registry
   src/backends/cuda/registry/registry.cpp

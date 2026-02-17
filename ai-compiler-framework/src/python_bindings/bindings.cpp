@@ -216,6 +216,8 @@ static inline const char* opkind_to_name(aicf::cuda::OpKind k) {
     case aicf::cuda::OpKind::Softmax:      return "softmax";
     case aicf::cuda::OpKind::SoftmaxBwd:   return "softmaxbwd";
     case aicf::cuda::OpKind::MseLoss:      return "mse_loss";
+    case aicf::cuda::OpKind::CrossEntropyFwd:      return "cross_entropy_fwd";
+    case aicf::cuda::OpKind::CrossEntropyBwd:      return "cross_entropy_bwd";
 
 
     default: return "unknown";
@@ -400,6 +402,8 @@ PYBIND11_MODULE(_C, m) {
       .value("Softmax",      aicf::cuda::OpKind::Softmax)
       .value("SoftmaxBwd",   aicf::cuda::OpKind::SoftmaxBwd)
       .value("MseLoss",      aicf::cuda::OpKind::MseLoss)
+      .value("CrossEntropyFwd", aicf::cuda::OpKind::CrossEntropyFwd)
+      .value("CrossEntropyBwd", aicf::cuda::OpKind::CrossEntropyBwd)
 
 
       .export_values();

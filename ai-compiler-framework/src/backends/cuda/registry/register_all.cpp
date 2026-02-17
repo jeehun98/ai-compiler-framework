@@ -94,6 +94,11 @@ KernelVariant make_softmax_bwd_f16_variant();
 KernelVariant make_mse_loss_f32_variant();
 KernelVariant make_mse_loss_f16_variant();
 
+// CrossEntropyLoss
+KernelVariant make_cross_entropy_loss_fwd_f32_variant();
+KernelVariant make_cross_entropy_loss_bwd_f32_variant();
+
+
 }  // namespace aicf::cuda
 
 extern "C" void aicf_cuda_register_all_kernels() {
@@ -332,5 +337,19 @@ extern "C" void aicf_cuda_register_all_kernels() {
       kid(setp(make_mse_loss_f32_variant(), 0),
           "mse_loss_f32_v0"));
   }
+
+// CrossEntropyLossFwd
+{
+  R.register_kernel(OpKind::CrossEntropyFwd,
+    kid(setp(make_cross_entropy_loss_fwd_f32_variant(), 0),
+        "cross_entropy_loss_fwd_f32_v0"));
+}
+
+// CrossEntropyLossBwd
+{
+  R.register_kernel(OpKind::CrossEntropyBwd,
+    kid(setp(make_cross_entropy_loss_bwd_f32_variant(), 0),
+        "cross_entropy_loss_bwd_f32_v0"));
+}
 
 }

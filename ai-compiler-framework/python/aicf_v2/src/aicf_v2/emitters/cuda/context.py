@@ -10,9 +10,6 @@ def fourcc(s: str) -> int:
 class CudaEmitContext:
     """
     Backend-resolved constants used by emitters.
-    
-    - kind_id는 이제 _C.OpKind를 직접 참조하여 C++ Enum과 항상 일치합니다.
-    - schema ids는 _C.op_call ABI에서 사용하는 속성 레이아웃 식별자입니다.
     """
 
     # ---- kind ids (C++ OpKind Enum과 자동 동기화) ----
@@ -34,9 +31,13 @@ class CudaEmitContext:
     BatchNormFwd: int = int(_C.OpKind.BatchNormFwd)
     BatchNormBwd: int = int(_C.OpKind.BatchNormBwd)
     GemmEpilogue: int = int(_C.OpKind.GemmEpilogue)
-    Softmax: int = int(_C.OpKind.Softmax)        # 오타 수정 완료
+    Softmax: int = int(_C.OpKind.Softmax)
     SoftmaxBwd: int = int(_C.OpKind.SoftmaxBwd)
     MseLoss: int = int(_C.OpKind.MseLoss)
+    
+    # [신규] CrossEntropy 관련 Kind IDs
+    CrossEntropyFwd: int = int(_C.OpKind.CrossEntropyFwd) # KID=21
+    CrossEntropyBwd: int = int(_C.OpKind.CrossEntropyBwd) # KID=22
 
     # ---- schema ids (ABI) ----
     SCHEMA_BADD: int = fourcc("BADD")
@@ -48,3 +49,6 @@ class CudaEmitContext:
     SCHEMA_LNEP: int = fourcc("LNEP")
     SCHEMA_BNEP: int = fourcc("BNEP")
     SCHEMA_GMEP: int = fourcc("GMEP")
+    
+    # [신규] CrossEntropy Schema ID
+    SCHEMA_XENT: int = fourcc("XENT")
