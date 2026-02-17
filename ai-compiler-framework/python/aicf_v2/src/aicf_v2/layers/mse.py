@@ -18,19 +18,20 @@ class MSELoss(Layer):
 
 
 
-    def emit_backward(self, b, y_pred, y_true, grad_y, *, ctx):
+    def emit_backward(self, b, ctx, inputs, outputs, grad_y, **kwargs):
         """
-        MSE 미분: 2/N * (y_pred - y_true)
-        이미터(mse_grad)의 인자명인 pred, target에 맞춰서 전달합니다.
+        새로운 표준 규격 적용:
+        - inputs[0]: y_pred (Forward 입력 1)
+        - inputs[1]: y_true (Forward 입력 2)
         """
+        y_pred = inputs[0]
+        y_true = inputs[1]
+        
+        # 출력 미분값(dy)을 입력 미분값(dx)으로 변환
         g_pred = b.value(f"{self.name}.grad_input", b.values[y_pred].spec)
         
-        # [Fix] y_pred -> pred, y_true -> target 으로 매핑
-        emit_mse_grad(
-            b, ctx, 
-            pred=y_pred,    # 이미터의 pred 인자에 y_pred vid 전달
-            target=y_true,  # 이미터의 target 인자에 y_true vid 전달
-            out=g_pred
-        )
+        # 이미 정의된 mse_grad 이미터 호출 (인자명: pred, target)
+        from ..emitters.cuda.mse_grad import mse_grad as emit_mse_grad
+        emit_mse_grad(b, ctx, pred=y_pred, target=y_true, out=g_pred)
         
         return {"input": g_pred}

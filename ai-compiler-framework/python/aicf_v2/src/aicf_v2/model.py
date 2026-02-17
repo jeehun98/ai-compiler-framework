@@ -45,9 +45,8 @@ class Model:
         spec = self._fill_spec_defaults(spec)
         vid = self.b.param(name, spec)
         
-        # [중요] 레이어 내부에서 param을 생성할 때 이 메서드를 거치도록 유도하거나 
-        # 호출 시점에 텐서를 즉시 생성합니다.
         if name not in self.parameters:
+            # 기본 초기화: 가중치는 randn, 바이어스는 zero
             t = torch.randn(spec.shape, dtype=torch.float32, device=self.device)
             if "bias" in name or ".b" in name:
                 t.zero_()
@@ -66,24 +65,22 @@ class Model:
         """레이어를 IR에 추가하고 파라미터 변화를 감지하여 테이프에 기록합니다."""
         prev_param_vids = set(self.b.param_vids)
         
-        # 레이어 emit 시 내부에서 b.param을 호출하면 
-        # 우리는 Model.param을 거치도록 설계하거나 사후에 등록해야 합니다.
+        # 레이어 emit 수행
         out_vids = layer.emit(self.b, *args, ctx=self.ctx, **kwargs)
         
-        # [신규] 레이어 emit 도중 Builder에 새로 추가된 파라미터들을 
-        # 모델의 실제 텐서 저장소(self.parameters)에 자동으로 바인딩합니다.
+        # 레이어 emit 도중 Builder에 새로 추가된 파라미터 자동 바인딩
         for vid in self.b.param_vids:
             val = self.b.values[vid]
             if val.name not in self.parameters:
-                # Model.param 로직을 재활용하여 텐서 생성
                 self.param(val.name, val.spec)
 
         new_params = [vid for vid in self.b.param_vids if vid not in prev_param_vids]
 
+        # [중요] 테이프에 Forward 시의 입력(args)과 출력(out_vids)을 모두 저장
         self._tape.append({
             "type": "layer", 
             "layer": layer, 
-            "inputs": args,
+            "inputs": list(args),
             "outputs": [out_vids] if isinstance(out_vids, int) else list(out_vids),
             "params": new_params
         })
@@ -105,6 +102,7 @@ class Model:
         return out_vid
 
     def build_backward(self, loss_vid: int) -> Dict[int, int]:
+        """Tape를 역순으로 순회하며 미분 그래프를 자동 생성합니다."""
         loss_spec = self.b.values[loss_vid].spec
         initial_grad_spec = self._fill_spec_defaults(loss_spec)
         grad_map = {loss_vid: self.b.input("grad_initial", initial_grad_spec)}
@@ -116,33 +114,30 @@ class Model:
                 
             grad_y = grad_map[outs[0]]
             ins = entry["inputs"]
+            params = entry["params"]
 
             if entry["type"] == "layer":
                 layer = entry["layer"]
-                params = entry["params"]
                 
                 if hasattr(layer, "emit_backward"):
-                    layer_name = layer.__class__.__name__
-                    
-                    if layer_name == "Linear":
-                        bwd_args = {
-                            "b": self.b, "x": ins[0], "W": params[0], 
-                            "grad_y": grad_y, "ctx": self.ctx
-                        }
-                        if len(params) > 1: bwd_args["bias"] = params[1]
-                    elif layer_name == "MSELoss":
-                        bwd_args = {
-                            "b": self.b, "y_pred": ins[0], "y_true": ins[1],
-                            "grad_y": grad_y, "ctx": self.ctx
-                        }
-                    else:
-                        bwd_args = {"b": self.b, "ctx": self.ctx, "grad_y": grad_y}
+                    # [핵심 수정] 모든 레이어에게 공통된 규격으로 인자 전달
+                    # 레이어는 이제 자율적으로 inputs[0] (x)나 outputs[0] (y)를 골라 씁니다.
+                    bwd_args = {
+                        "b": self.b,
+                        "ctx": self.ctx,
+                        "inputs": ins,    # Forward 입력 Vid들
+                        "outputs": outs,  # Forward 출력 Vid들 (ReLU 등에서 활용)
+                        "grad_y": grad_y, # 상위에서 넘어온 미분값
+                        "params": params  # 파라미터 Vid들 (Linear 등에서 활용)
+                    }
 
                     layer_grads = layer.emit_backward(**bwd_args)
                     
+                    # 1. 입력(x)에 대한 미분값 전파 (보통 첫 번째 입력)
                     if "input" in layer_grads:
                         grad_map[ins[0]] = layer_grads["input"]
                     
+                    # 2. 파라미터 미분값 저장 (Optimizer용)
                     if "weight" in layer_grads and len(params) > 0:
                         self.parameter_grads[params[0]] = layer_grads["weight"]
                     if "bias" in layer_grads and len(params) > 1:
@@ -183,13 +178,10 @@ class Sequential(Model):
         if not self._is_built:
             raise RuntimeError("Model must be built before compilation.")
 
-        # 1. 통합 피드 생성 (이때 fc1.W 등이 확실히 포함됩니다)
         full_sample_feed = self.get_full_feed(sample_feed or {})
-
         self.compiled_program = self.executor.compile_cached(self)
 
         if capture:
-            # 2. 캡처 수행
             self.executor.capture_prebuilt(self, self.compiled_program, full_sample_feed, mode=mode)
             print(f"[Model] CUDA Graph captured for mode='{mode}'")
 
