@@ -1,12 +1,14 @@
 from __future__ import annotations
-from typing import Any, List, Optional, Dict
+from typing import Any, List, Optional, Dict, TYPE_CHECKING
 
 import torch
 from .tensor_spec import TensorSpec
 from .builder import Builder
 from .layers.base import Layer
 from .emitters.cuda.context import CudaEmitContext
-from .runtime.cuda_exec import CudaExecutor  # 추가
+
+if TYPE_CHECKING:
+    from .runtime.cuda_exec import CudaExecutor
 
 class Model:
     def __init__(self, dtype: str = "f32", device: str = "cuda"):
@@ -15,70 +17,108 @@ class Model:
         self.b = Builder(dtype=self.dtype, device=self.device)
         self.ctx = CudaEmitContext()
         
-        # 순환 참조 방지를 위한 로컬 임포트
         from .runtime.cuda_exec import CudaExecutor
         self.executor = CudaExecutor() 
         self.compiled_program = None
 
-    def input(self, name: str, spec: TensorSpec) -> int:
-        """입력 텐서를 등록하고 Vid를 반환합니다."""
-        spec = self._fill_spec_defaults(spec)
-        return self.b.input(name, spec)
-
-    def param(self, name: str, spec: TensorSpec) -> int:
-        """학습 가능한 파라미터(Weight 등)를 등록합니다."""
-        spec = self._fill_spec_defaults(spec)
-        return self.b.param(name, spec)
-
-    def state(self, name: str, spec: TensorSpec) -> int:
-        """상태 값(Optimizer state, Step count 등)을 등록합니다."""
-        spec = self._fill_spec_defaults(spec)
-        return self.b.state(name, spec)
-
-    def add(self, layer: Layer, *args, **kwargs) -> Any:
-        """
-        레이어의 emit 메서드를 호출하여 IR 그래프에 연산을 추가합니다.
-        """
-        return layer.emit(self.b, *args, ctx=self.ctx, **kwargs)
-
-    def output(self, name: str, vid: int) -> None:
-        """최종 출력 Vid를 지정합니다."""
-        self.b.output(name, vid)
+        self._tape: List[Dict[str, Any]] = [] 
+        self.parameter_grads: Dict[int, int] = {} 
+        self.parameters: Dict[str, torch.Tensor] = {}
+        self.states: Dict[str, torch.Tensor] = {}
 
     def _fill_spec_defaults(self, spec: TensorSpec) -> TensorSpec:
-        """TensorSpec에 누락된 dtype/device를 모델 기본값으로 채웁니다."""
-        if spec.dtype is None or spec.device is None:
-            return TensorSpec(
-                shape=spec.shape,
-                dtype=spec.dtype or self.dtype,
-                device=spec.device or self.device,
-            )
-        return spec
+        """TensorSpec의 None인 필드를 모델의 기본값(cuda, f32)으로 채웁니다."""
+        return TensorSpec(
+            shape=spec.shape,
+            dtype=spec.dtype or self.dtype,
+            device=spec.device or self.device,
+        )
 
-    def dump(self) -> str:
-        """현재 IR 그래프의 상태를 문자열로 출력합니다."""
-        b = self.b
-        in_names = [b.values[v].name for v in b.external_vids]
-        out_names = [b.values[v].name for v in b.output_vids]
+    def input(self, name: str, spec: TensorSpec) -> int:
+        return self.b.input(name, self._fill_spec_defaults(spec))
 
-        lines = [f"[Graph] externals={in_names} outputs={out_names} ops={len(b.ops)}"]
+    def param(self, name: str, spec: TensorSpec) -> int:
+        spec = self._fill_spec_defaults(spec)
+        vid = self.b.param(name, spec)
+        if name not in self.parameters:
+            self.parameters[name] = torch.randn(spec.shape, dtype=torch.float32, device=self.device)
+            if "bias" in name or ".b" in name: self.parameters[name].zero_()
+        return vid
 
-        for i, op in enumerate(b.ops, start=1):
-            ins = ", ".join(b.values[v].name for v in op.inputs)
-            outs = ", ".join(b.values[v].name for v in op.outputs)
+    def state(self, name: str, spec: TensorSpec) -> int:
+        spec = self._fill_spec_defaults(spec)
+        vid = self.b.state(name, spec)
+        if name not in self.states:
+            self.states[name] = torch.zeros(spec.shape, dtype=torch.float32, device=self.device)
+        return vid
 
-            extras = []
-            if op.attrs: extras.append(f"attrs={op.attrs}")
-            if op.constraints: extras.append(f"constraints={op.constraints}")
-            if op.saved:
-                saved_names = [b.values[v].name for v in op.saved]
-                extras.append(f"saved={saved_names}")
-            
-            extra_str = ("  " + " ".join(extras)) if extras else ""
-            lines.append(f"  o{i}: {op.kind}({ins}) -> {outs}{extra_str}")
+    def add(self, layer: Layer, *args, **kwargs) -> Any:
+        prev_param_vids = set(self.b.param_vids)
+        out_vids = layer.emit(self.b, *args, ctx=self.ctx, **kwargs)
+        new_params = [vid for vid in self.b.param_vids if vid not in prev_param_vids]
 
-        return "\n".join(lines)
+        self._tape.append({
+            "type": "layer", "layer": layer, "inputs": args,
+            "outputs": [out_vids] if isinstance(out_vids, int) else list(out_vids),
+            "params": new_params
+        })
+        return out_vids
 
+    def op(self, kind: str, inputs: List[int], outputs: Any, name: Optional[str] = None) -> int:
+        # [수정] outputs가 Spec인 경우 장치 정보를 자동으로 채움
+        filled_outputs = []
+        if isinstance(outputs, list):
+            for o in outputs:
+                filled_outputs.append(self._fill_spec_defaults(o) if isinstance(o, TensorSpec) else o)
+        else:
+            filled_outputs = self._fill_spec_defaults(outputs) if isinstance(outputs, TensorSpec) else outputs
+
+        out_vid = self.b.op(kind, inputs, filled_outputs, name)
+        self._tape.append({
+            "type": "op", "kind": kind, "inputs": inputs,
+            "outputs": [out_vid] if isinstance(out_vid, int) else list(out_vid)
+        })
+        return out_vid
+
+    def build_backward(self, loss_vid: int) -> Dict[int, int]:
+        # [수정] grad_initial 생성 시 장치 정보 강제 할당
+        loss_spec = self.b.values[loss_vid].spec
+        initial_grad_spec = self._fill_spec_defaults(loss_spec)
+        
+        grad_map = {loss_vid: self.b.input("grad_initial", initial_grad_spec)}
+
+        for entry in reversed(self._tape):
+            outs = entry["outputs"]
+            if outs[0] not in grad_map: continue
+            grad_y = grad_map[outs[0]]
+            ins = entry["inputs"]
+
+            if entry["type"] == "layer":
+                layer = entry["layer"]
+                params = entry["params"]
+                if hasattr(layer, "emit_backward"):
+                    bwd_args = {"b": self.b, "x": ins[0], "W": params[0], "grad_y": grad_y, "ctx": self.ctx}
+                    if len(params) > 1: bwd_args["bias"] = params[1]
+                    layer_grads = layer.emit_backward(**bwd_args)
+                    
+                    if "input" in layer_grads: grad_map[ins[0]] = layer_grads["input"]
+                    self.parameter_grads[params[0]] = layer_grads["weight"]
+                    if "bias" in layer_grads and len(params) > 1:
+                        self.parameter_grads[params[1]] = layer_grads["bias"]
+            elif entry["type"] == "op":
+                if entry["kind"] in ["sum", "sub"]: grad_map[ins[0]] = grad_y
+
+        return grad_map
+
+    def get_full_feed(self, user_feed: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        full_feed = {}
+        full_feed.update(self.parameters)
+        full_feed.update(self.states)
+        full_feed.update(user_feed)
+        return full_feed
+
+    def output(self, name: str, vid: int) -> None:
+        self.b.output(name, vid)
 
 class Sequential(Model):
     def __init__(self, layers: List[Layer], dtype: str = "f32", device: str = "cuda"):
@@ -94,50 +134,16 @@ class Sequential(Model):
         self._is_built = True
         return curr_vid
 
-    def compile(
-        self, 
-        registry: Optional[Any] = None, 
-        capture: bool = False, 
-        sample_feed: Optional[Dict[str, torch.Tensor]] = None,
-        mode: str = "train"
-    ):
-        """
-        [수정] capture=True 일 경우 컴파일 직후 CUDA Graph를 미리 생성합니다.
-        """
-        if not self._is_built:
-            raise RuntimeError("Model must be built before compilation. Call build() first.")
-
-        # 1. IR 수준 컴파일 (Plan 수립)
+    def compile(self, registry: Optional[Any] = None, capture: bool = False, 
+                sample_feed: Optional[Dict[str, torch.Tensor]] = None, mode: str = "train"):
+        if not self._is_built: raise RuntimeError("Model must be built before compilation.")
+        full_sample_feed = self.get_full_feed(sample_feed or {})
         self.compiled_program = self.executor.compile_cached(self)
-
-        # 2. CUDA Graph 사전 캡처 (Pre-warmup)
         if capture:
-            if sample_feed is None:
-                raise ValueError("Graph capture를 위해선 sample_feed가 필요합니다.")
-            
-            # Executor를 통해 사전 캡처 수행
-            # 이 과정에서 GPU 메모리 주소가 고정(Binding)됩니다.
-            self.executor.capture_prebuilt(
-                self, 
-                self.compiled_program, 
-                sample_feed, 
-                mode=mode
-            )
+            self.executor.capture_prebuilt(self, self.compiled_program, full_sample_feed, mode=mode)
             print(f"[Model] CUDA Graph captured for mode='{mode}'")
-
         return self.compiled_program
 
     def run(self, feed: Dict[str, torch.Tensor], use_cuda_graph: bool = True, mode: str = "train"):
-        """
-        [신규] 캡처된 그래프를 사용하여 즉시 실행합니다.
-        """
-        if self.compiled_program is None:
-            raise RuntimeError("Model must be compiled before running.")
-
-        return self.executor.run_compiled(
-            self,
-            self.compiled_program,
-            feed,
-            use_cuda_graph=use_cuda_graph,
-            mode=mode
-        )
+        if self.compiled_program is None: raise RuntimeError("Model must be compiled before running.")
+        return self.executor.run_compiled(self, self.compiled_program, feed, use_cuda_graph=use_cuda_graph, mode=mode)
