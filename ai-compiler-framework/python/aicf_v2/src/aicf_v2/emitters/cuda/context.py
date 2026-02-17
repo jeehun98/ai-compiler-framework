@@ -36,6 +36,7 @@ class CudaEmitContext:
     GemmEpilogue: int = int(_C.OpKind.GemmEpilogue)
     Softmax: int = int(_C.OpKind.Softmax)        # 오타 수정 완료
     SoftmaxBwd: int = int(_C.OpKind.SoftmaxBwd)
+    MseLoss: int = int(_C.OpKind.MseLoss)
 
     # ---- schema ids (ABI) ----
     SCHEMA_BADD: int = fourcc("BADD")

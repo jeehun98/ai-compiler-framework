@@ -27,9 +27,11 @@ enum class OpKind : int {
   
   GemmEpilogue  = 17,   // ✅ ADD: (A,B,bias)->C with optional relu in epilogue
   Softmax       = 18,
-  SoftmaxBwd   = 19,
+  SoftmaxBwd    = 19,
+
+  MseLoss       = 20,
   
-  _Count        = 20
+  _Count        = 21
 
 };
 

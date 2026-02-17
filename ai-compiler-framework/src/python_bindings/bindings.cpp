@@ -215,6 +215,8 @@ static inline const char* opkind_to_name(aicf::cuda::OpKind k) {
     case aicf::cuda::OpKind::GemmEpilogue: return "gemm_epilogue";   // ✅ ADD
     case aicf::cuda::OpKind::Softmax:      return "softmax";
     case aicf::cuda::OpKind::SoftmaxBwd:   return "softmaxbwd";
+    case aicf::cuda::OpKind::MseLoss:      return "mse_loss";
+
 
     default: return "unknown";
   }
@@ -396,7 +398,9 @@ PYBIND11_MODULE(_C, m) {
       .value("BatchNormBwd", aicf::cuda::OpKind::BatchNormBwd)
       .value("GemmEpilogue", aicf::cuda::OpKind::GemmEpilogue)  // ✅ ADD
       .value("Softmax",      aicf::cuda::OpKind::Softmax)
-      .value("SoftmaxBwd",      aicf::cuda::OpKind::SoftmaxBwd)
+      .value("SoftmaxBwd",   aicf::cuda::OpKind::SoftmaxBwd)
+      .value("MseLoss",      aicf::cuda::OpKind::MseLoss)
+
 
       .export_values();
 

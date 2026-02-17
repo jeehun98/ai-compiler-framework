@@ -90,6 +90,9 @@ KernelVariant make_softmax_f16_variant();
 KernelVariant make_softmax_bwd_f32_variant();
 KernelVariant make_softmax_bwd_f16_variant();
 
+// MseLoss
+KernelVariant make_mse_loss_f32_variant();
+KernelVariant make_mse_loss_f16_variant();
 
 }  // namespace aicf::cuda
 
@@ -318,6 +321,16 @@ extern "C" void aicf_cuda_register_all_kernels() {
     R.register_kernel(OpKind::SoftmaxBwd,
       kid(setp(make_softmax_bwd_f32_variant(), 0),
           "softmax_bwd_lastdim_f32_v0"));
+  }
+
+    // MseLoss
+  {
+    R.register_kernel(OpKind::MseLoss,
+      kid(setp(make_mse_loss_f16_variant(), 10),
+          "mse_loss_f16_to_f32_v0"));
+    R.register_kernel(OpKind::MseLoss,
+      kid(setp(make_mse_loss_f32_variant(), 0),
+          "mse_loss_f32_v0"));
   }
 
 }
