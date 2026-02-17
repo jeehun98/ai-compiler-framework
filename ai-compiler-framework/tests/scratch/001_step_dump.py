@@ -1,7 +1,21 @@
-import sys, os
-sys.path.append(os.path.abspath(os.path.join(__file__, "..", "..", "src")))
+import sys
+from pathlib import Path
+
+p = Path(__file__).resolve()
+root = None
+for parent in [p] + list(p.parents):
+    if (parent / "pyproject.toml").exists():
+        root = parent
+        break
+if root is None:
+    raise RuntimeError("pyproject.toml not found")
+
+py_src = root / "python" / "aicf_v2" / "src"
+sys.path.insert(0, str(py_src))
 
 import aicf_v2 as aicf
+print("Imported:", aicf.__file__)
+
 
 def step(title: str, m: aicf.Model):
     print("\n" + "=" * 80)

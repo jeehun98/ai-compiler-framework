@@ -10,6 +10,7 @@ _ALIAS_OUT0_IN0 = {
     "bias_add",
     "step_inc",
     "sgd_step",
+    # "softmax",
     # 필요하면 추가: "copy", "grad_zero" 등은 의미가 다르니 정책 확정 후
 }
 

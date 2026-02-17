@@ -1,15 +1,20 @@
+# python/aicf_v2/src/aicf_v2/runtime/graph_capture.py
+
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple, TYPE_CHECKING
 
 import torch
 
-from ..model import Model
+# 순환 참조 방지: TYPE_CHECKING 일 때만 Model 임포트
+if TYPE_CHECKING:
+    from ..model import Model
+
 from ..builder import Builder
 from ..compile.types import CompiledProgram
 from ..graph import Op
 from ..backends.cuda.bridge import op_call, current_stream_u64
-from .alloc import alloc_from_spec, _device_ok, _torch_dtype  # reuse existing helpers
+from .alloc import alloc_from_spec, _device_ok, _torch_dtype
 
 
 # -----------------------------
@@ -47,10 +52,6 @@ def _all_external_vids(b: Builder) -> List[int]:
 
 
 def _apply_abi_fixups(op: Op, ins: list[torch.Tensor]) -> list[torch.Tensor]:
-    """
-    Same policy as runtime/cuda_exec.py:
-      hints['view_rank0_inputs'] = [idx...]
-    """
     hints = getattr(op, "hints", None) or {}
     idxs = hints.get("view_rank0_inputs", None)
     if idxs:
@@ -68,8 +69,8 @@ def _apply_abi_fixups(op: Op, ins: list[torch.Tensor]) -> list[torch.Tensor]:
 @dataclass
 class GraphCapturedProgram:
     prog: CompiledProgram
-    slots: List[torch.Tensor]                     # slots[vid] -> Tensor
-    ext_bufs: Dict[int, torch.Tensor]             # external vid -> fixed buffer tensor
+    slots: List[torch.Tensor]                 # slots[vid] -> Tensor
+    ext_bufs: Dict[int, torch.Tensor]         # external vid -> fixed buffer tensor
     graph: torch.cuda.CUDAGraph
     static_roles: Tuple[str, ...]
     copy_roles: Tuple[str, ...]
@@ -89,19 +90,10 @@ def capture_cuda_graph(
     copy_roles: Iterable[str] = ("input",),
 ) -> GraphCapturedProgram:
     """
-    Capture CUDA Graph with fixed pointer policy.
-
-    Design:
-      - all externals must be backed by fixed buffers (ext_bufs) so pointers don't change
-      - replay copies only roles in copy_roles into those buffers
-      - alias decisions applied before running ops
-
-    NOTE:
-      - capture occurs on CURRENT torch stream.
-      - 'stream' (u64) is used only when calling op_call.
+    고정 포인터 정책을 사용하여 CUDA Graph를 캡처합니다.
     """
     if stream is not None:
-        raise NotImplementedError("capture_cuda_graph(stream=...) not supported yet; capture uses current torch stream")
+        raise NotImplementedError("capture uses current torch stream; stream=... not supported yet")
 
     b: Builder = m.b
     plan = prog.plan
@@ -110,7 +102,7 @@ def capture_cuda_graph(
     static_roles = tuple(static_roles)
     copy_roles = tuple(copy_roles)
 
-    # 1) externals must be covered by static_roles, otherwise pointers could change
+    # 1) 모든 외부 변수(externals)는 static_roles에 포함되어야 함 (포인터 고정 보장)
     static_vids: List[int] = []
     for r in static_roles:
         static_vids += _role_vids(b, r)
@@ -125,9 +117,7 @@ def capture_cuda_graph(
             f"Missing from static_roles: {names}  static_roles={static_roles}"
         )
 
-    # 2) allocate slots
-    #    - externals: allocate fixed buffers and copy feed into them once
-    #    - internals: allocate by spec
+    # 2) 메모리 슬롯 할당 (Fixed Buffers)
     slots: List[Optional[torch.Tensor]] = [None] * len(b.values)
     ext_bufs: Dict[int, torch.Tensor] = {}
 
@@ -138,7 +128,8 @@ def capture_cuda_graph(
             raise KeyError(f"Missing feed for external '{name}'")
         src = _check_feed_tensor(name, v.spec, feed[name])
 
-        buf = alloc_from_spec(v.spec)     # fixed address for graph lifetime
+        # 그래프 수명 동안 고정될 주소 할당
+        buf = alloc_from_spec(v.spec)
         buf.copy_(src)
         slots[vid] = buf
         ext_bufs[vid] = buf
@@ -149,13 +140,13 @@ def capture_cuda_graph(
 
     slots_t: List[torch.Tensor] = [t for t in slots]  # type: ignore
 
-    # 3) apply alias decisions (inplace)
+    # 3) Alias 결정 사항 적용 (In-place)
     for out_vid, in_vid in plan.alias.items():
         slots_t[out_vid] = slots_t[in_vid]
         if out_vid in ext_bufs:
             ext_bufs[out_vid] = slots_t[in_vid]
 
-    # 4) warmup (eager launches, same buffers)
+    # 4) Warmup (동일 버퍼를 사용한 사전 실행)
     stream_u64 = current_stream_u64()
     for _ in range(int(warmup)):
         _copy_roles_into_ext_bufs(b, ext_bufs, feed, copy_roles=copy_roles)
@@ -163,7 +154,7 @@ def capture_cuda_graph(
 
     torch.cuda.synchronize()
 
-    # 5) capture
+    # 5) Graph Capture
     graph = torch.cuda.CUDAGraph()
     _copy_roles_into_ext_bufs(b, ext_bufs, feed, copy_roles=copy_roles)
     torch.cuda.synchronize()
@@ -189,21 +180,21 @@ def replay_cuda_graph(
     feed: Dict[str, torch.Tensor],
 ) -> Dict[str, torch.Tensor]:
     """
-    Replay captured graph.
-
-    Policy:
-      - copy feed tensors for roles in gprog.copy_roles into ext_bufs
-      - graph.replay()
-      - return outputs
+    캡처된 그래프를 실행(Replay)합니다.
     """
     b: Builder = m.b
 
+    # copy_roles에 해당하는 텐서들만 내부 버퍼로 복사 (예: 새로운 입력 데이터)
     _copy_roles_into_ext_bufs(b, gprog.ext_bufs, feed, copy_roles=gprog.copy_roles)
+    
+    # GPU 하드웨어 가속 실행
     gprog.graph.replay()
 
+    # 출력 추출
     out: Dict[str, torch.Tensor] = {}
-    if getattr(b, "outputs", None):
-        for oname, vid in b.outputs.items():
+    output_map = getattr(b, "outputs", None)
+    if output_map:
+        for oname, vid in output_map.items():
             out[oname] = gprog.slots[vid]
     else:
         for vid in b.output_vids:
@@ -239,7 +230,7 @@ def _copy_roles_into_ext_bufs(
 
 def _run_ops(ops: List[Op], slots: List[torch.Tensor], stream_u64: int) -> None:
     for op in ops:
-        # emitter must fill caches
+        # 필수 캐시 체크 (Emitter가 채웠어야 함)
         if getattr(op, "kind_id", None) is None:
             raise ValueError(f"[graph_capture] missing op.kind_id (kind='{op.kind}', name='{op.name}')")
         if getattr(op, "attr_schema", None) is None:
@@ -250,7 +241,7 @@ def _run_ops(ops: List[Op], slots: List[torch.Tensor], stream_u64: int) -> None:
         ins = [slots[v] for v in op.inputs]
         outs = [slots[v] for v in op.outputs]
 
-        # ABI fixups by hints
+        # ABI fixups (hints 적용)
         ins = _apply_abi_fixups(op, ins)
 
         op_call(

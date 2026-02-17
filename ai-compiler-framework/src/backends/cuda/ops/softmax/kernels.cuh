@@ -1,52 +1,23 @@
+#pragma once
 #include <cuda_runtime.h>
-#include <device_launch_parameters.h>
-#include <float.h>
+#include <cuda_fp16.h>
+#include <cstdint>
 
-namespace aicf {
-namespace cuda {
-namespace ops {
+namespace aicf::cuda::softmax_impl {
 
-template <typename T>
-__device__ __forceinline__ T warpReduceMax(T val) {
-    for (int offset = 16; offset > 0; offset /= 2)
-        val = max(val, __shfl_down_sync(0xffffffff, val, offset));
-    return val;
-}
+// Softmax over last dimension.
+// Interpret X as [rows, cols] where cols = last_dim, rows = numel/cols.
+//
+// f32: X->Y
+__global__ void softmax_lastdim_f32_kernel(const float* __restrict__ x,
+                                          float* __restrict__ y,
+                                          int64_t rows,
+                                          int64_t cols);
 
-template <typename T>
-__device__ __forceinline__ T warpReduceSum(T val) {
-    for (int offset = 16; offset > 0; offset /= 2)
-        val += __shfl_down_sync(0xffffffff, val, offset);
-    return val;
-}
+// f16: X->Y (accumulate in f32)
+__global__ void softmax_lastdim_f16_kernel(const __half* __restrict__ x,
+                                          __half* __restrict__ y,
+                                          int64_t rows,
+                                          int64_t cols);
 
-template <typename T>
-__global__ void softmax_fwd_kernel(const T* x, T* y, int rows, int cols) {
-    int row = blockIdx.x;
-    int tid = threadIdx.x;
-
-    // 1. Max Reduction
-    float max_val = -FLT_MAX;
-    for (int i = tid; i < cols; i += blockDim.x) {
-        max_val = max(max_val, (float)x[row * cols + i]);
-    }
-    max_val = warpReduceMax(max_val); // 단순화를 위해 blockDim을 32로 가정하거나 shared mem 사용
-
-    // 2. Exp and Sum Reduction
-    float sum = 0.0f;
-    for (int i = tid; i < cols; i += blockDim.x) {
-        float val = expf((float)x[row * cols + i] - max_val);
-        y[row * cols + i] = (T)val;
-        sum += val;
-    }
-    sum = warpReduceSum(sum);
-
-    // 3. Final Division
-    for (int i = tid; i < cols; i += blockDim.x) {
-        y[row * cols + i] = (T)((float)y[row * cols + i] / sum);
-    }
-}
-
-} // namespace ops
-} // namespace cuda
-} // namespace aicf
+} // namespace aicf::cuda::softmax_impl

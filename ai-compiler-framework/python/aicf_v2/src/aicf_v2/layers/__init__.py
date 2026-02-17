@@ -14,6 +14,7 @@ from .grad_zero import GradZero
 from .reduce_sum import ReduceSum
 from .copy import Copy
 from .bias_corr import BiasCorr
+from .softmax import Softmax
 
 __all__ = [
     "Layer",
@@ -34,4 +35,5 @@ __all__ = [
     "StepInc",
     "GradZero",
     "BiasCorr",
+    "Softmax",
 ]

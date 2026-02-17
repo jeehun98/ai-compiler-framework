@@ -82,6 +82,14 @@ KernelVariant make_batchnorm_bwd_f16_variant();
 KernelVariant make_gemm_bias_relu_f32_naive_variant();
 KernelVariant make_gemm_bias_relu_f16_tc_wmma_out_f16_variant();
 
+// Softmax
+KernelVariant make_softmax_f32_variant();
+KernelVariant make_softmax_f16_variant();
+
+// SoftmaxBwd
+KernelVariant make_softmax_bwd_f32_variant();
+KernelVariant make_softmax_bwd_f16_variant();
+
 
 }  // namespace aicf::cuda
 
@@ -289,4 +297,27 @@ extern "C" void aicf_cuda_register_all_kernels() {
       kid(setp(make_batchnorm_bwd_f16_variant(), 10),
           "batchnorm_bwd_f16_v0"));
   }
+
+  // Softmax
+  {
+    R.register_kernel(OpKind::Softmax,
+      kid(setp(make_softmax_f16_variant(), 20),
+          "softmax_lastdim_f16_v0"));
+
+    R.register_kernel(OpKind::Softmax,
+      kid(setp(make_softmax_f32_variant(), 0),
+          "softmax_lastdim_f32_v0"));
+  }
+
+  // SoftmaxBwd
+  {
+    R.register_kernel(OpKind::SoftmaxBwd,
+      kid(setp(make_softmax_bwd_f16_variant(), 10),
+          "softmax_bwd_lastdim_f16_v0"));
+
+    R.register_kernel(OpKind::SoftmaxBwd,
+      kid(setp(make_softmax_bwd_f32_variant(), 0),
+          "softmax_bwd_lastdim_f32_v0"));
+  }
+
 }

@@ -1,11 +1,15 @@
+# python/aicf_v2/src/aicf_v2/runtime/cuda_exec.py
+
 from __future__ import annotations
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING, Set, List
 
 import torch
 
-from ..model import Model
+# 순환 참조 방지: TYPE_CHECKING 일 때만 Model 임포트
+if TYPE_CHECKING:
+    from ..model import Model
+
 from ..builder import Builder
-from ..compile.compile import compile_cuda
 from ..compile.types import CompiledProgram
 from ..graph import Op
 from ..backends.cuda.registry import CudaRegistry
@@ -13,30 +17,32 @@ from ..backends.cuda.bridge import op_call, current_stream_u64
 from .alloc import bind_and_alloc_slots
 from .graph_capture import GraphCapturedProgram, capture_cuda_graph, replay_cuda_graph
 
+def _role_vids(b: Builder, role: str) -> List[int]:
+    """Builder에서 특정 역할의 vid 리스트를 추출하는 헬퍼 함수"""
+    if role == "input": return list(getattr(b, "input_vids", []))
+    if role == "param": return list(getattr(b, "param_vids", []))
+    if role == "state": return list(getattr(b, "state_vids", []))
+    return []
 
 def _tensor_sig(t: torch.Tensor) -> Tuple[Tuple[int, ...], str, str]:
     return (tuple(t.shape), str(t.dtype), str(t.device))
 
-
-def _feed_signature(b: Builder, feed: Dict[str, torch.Tensor]) -> Tuple[Tuple[str, Tuple[Tuple[int, ...], str, str]], ...]:
+def _feed_signature(b: Builder, feed: Dict[str, torch.Tensor], copy_names: set[str]) -> Tuple:
+    """실제로 복사될(copy_roles) 텐서들에 대해서만 시그니처를 생성합니다."""
     items = []
-    for vid in getattr(b, "external_vids", []):
-        name = b.values[vid].name
+    for name in copy_names:
         if name not in feed:
-            raise KeyError(f"Missing feed for external '{name}'")
-        items.append((name, _tensor_sig(feed[name])))
+            # Replay 시점에 입력 데이터(g 등)가 없으면 에러
+            raise KeyError(f"Missing feed for required input '{name}'")
+        t = feed[name]
+        items.append((name, (tuple(t.shape), str(t.dtype), str(t.device))))
     items.sort(key=lambda x: x[0])
     return tuple(items)
 
 
 def _apply_abi_fixups(op: Op, ins: list[torch.Tensor]) -> list[torch.Tensor]:
     """
-    Apply ABI fixups using per-op hints (emitter-provided).
-
-    Supported hints:
-      - view_rank0_inputs: list[int]
-          For each input index i, if ins[i] is rank1 scalar (shape (1,), numel==1),
-          present it to the backend as rank0 via view(()) without copy.
+    ABI fixups: 스칼라(rank-1, numel-1) 입력을 백엔드가 기대하는 rank-0으로 변환합니다.
     """
     hints = getattr(op, "hints", None) or {}
     idxs = hints.get("view_rank0_inputs", None)
@@ -56,6 +62,8 @@ class CudaExecutor:
         self._graph_cache: Dict[Any, GraphCapturedProgram] = {}
 
     def compile(self, m: Model) -> CompiledProgram:
+        """모델을 IR 수준에서 컴파일합니다. (런타임 임포트로 순환 참조 해결)"""
+        from ..compile.compile import compile_cuda
         return compile_cuda(m, self.registry)
 
     def compile_cached(self, m: Model) -> CompiledProgram:
@@ -66,44 +74,55 @@ class CudaExecutor:
             self._compiled_cache[key] = prog
         return prog
 
-    def clear_cache(self) -> None:
-        self._compiled_cache.clear()
-        self._graph_cache.clear()
+    def capture_prebuilt(
+        self, 
+        m: Model, 
+        prog: CompiledProgram, 
+        sample_feed: Dict[str, torch.Tensor],
+        mode: str = "train"
+    ) -> GraphCapturedProgram:
+        """
+        [Pre-capture] 실제 실행 루프 진입 전, 컴파일 단계에서 CUDA Graph를 미리 캡처합니다.
+        """
+        static_roles, copy_roles = self._get_roles(mode)
+        key = self._cache_key(m, prog, sample_feed, mode=mode, 
+                               static_roles=static_roles, copy_roles=copy_roles)
+        
+        if key not in self._graph_cache:
+            # warmup=1로 설정하여 즉시 캡처를 수행합니다.
+            gprog = capture_cuda_graph(
+                m, prog, sample_feed,
+                stream=None, warmup=1,
+                static_roles=static_roles,
+                copy_roles=copy_roles,
+            )
+            self._graph_cache[key] = gprog
+            
+        return self._graph_cache[key]
 
-    def run(
-        self,
-        m: Model,
-        feed: Dict[str, torch.Tensor],
-        *,
-        stream: Optional[int] = None,
-        use_cuda_graph: bool = True,
-        mode: str = "inference",
-        warmup: int = 2,
-    ) -> Dict[str, torch.Tensor]:
-        prog = self.compile_cached(m)
-        return self.run_compiled(
-            m,
-            prog,
-            feed,
-            stream=stream,
-            use_cuda_graph=use_cuda_graph,
-            mode=mode,
-            warmup=warmup,
-        )
+    def _get_roles(self, mode: str) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
+        """모드에 따른 메모리 고정/복사 정책 결정"""
+        if mode == "train":
+            # 학습 모드: 가중치(param)와 상태(state)의 GPU 주소를 고정하여 보존합니다.
+            return ("input", "param", "state"), ("input",)
+        # 추론 모드: 파라미터만 고정합니다.
+        return ("input", "param"), ("input",)
 
-    def _cache_key(
-        self,
-        m: Model,
-        prog: CompiledProgram,
-        feed: Dict[str, torch.Tensor],
-        *,
-        mode: str,
-        static_roles: Tuple[str, ...],
-        copy_roles: Tuple[str, ...],
-    ):
+
+
+    def _cache_key(self, m: Model, prog: CompiledProgram, feed: Dict[str, torch.Tensor], 
+                   mode: str, static_roles: Tuple[str, ...], copy_roles: Tuple[str, ...]):
         b = m.b
         plan_key = getattr(prog.plan, "plan_id", None) or id(prog.plan)
-        return (mode, plan_key, static_roles, copy_roles, _feed_signature(b, feed))
+        
+        # 1. 이번 모드에서 실제로 외부에서 주입(copy)받아야 할 이름들 추출
+        copy_names = set()
+        for r in copy_roles:
+            for vid in _role_vids(b, r): # self._role_vids가 아닌 외부 함수 호출
+                copy_names.add(b.values[vid].name)
+        
+        # 2. copy_names에 대해서만 피드 체크 수행 (w, m, v 등 static은 무시)
+        return (mode, plan_key, static_roles, copy_roles, _feed_signature(b, feed, copy_names))
 
     def run_compiled(
         self,
@@ -120,81 +139,57 @@ class CudaExecutor:
         plan = prog.plan
 
         # -------------------------
-        # Eager (no cuda graph)
+        # 1. CUDA Graph Path
         # -------------------------
-        if not use_cuda_graph:
-            stream_u64 = int(stream) if stream is not None else current_stream_u64()
+        if use_cuda_graph:
+            if stream is not None:
+                raise NotImplementedError("CUDA Graph with explicit stream is not supported yet")
 
-            slots = bind_and_alloc_slots(b, feed)
+            static_roles, copy_roles = self._get_roles(mode)
+            key = self._cache_key(m, prog, feed, mode=mode, 
+                                   static_roles=static_roles, copy_roles=copy_roles)
 
-            # apply alias decisions (inplace)
-            for out_vid, in_vid in plan.alias.items():
-                slots[out_vid] = slots[in_vid]
-
-            # ✅ execute ops directly (no LoweredOp)
-            for op in plan.ops:
-                # require emitter-filled caches
-                if getattr(op, "kind_id", None) is None:
-                    raise ValueError(f"[CudaExecutor] missing op.kind_id (kind='{op.kind}', name='{op.name}')")
-                if getattr(op, "attr_schema", None) is None:
-                    raise ValueError(f"[CudaExecutor] missing op.attr_schema (kind='{op.kind}', name='{op.name}')")
-                if getattr(op, "attr_blob", None) is None:
-                    raise ValueError(f"[CudaExecutor] missing op.attr_blob (kind='{op.kind}', name='{op.name}')")
-
-                ins = [slots[v] for v in op.inputs]
-                outs = [slots[v] for v in op.outputs]
-
-                # ✅ ABI fixups via hints
-                ins = _apply_abi_fixups(op, ins)
-
-                op_call(
-                    int(op.kind_id),
-                    ins, outs,
-                    int(op.attr_schema),
-                    op.attr_blob,
-                    stream=stream_u64,
-                )
-
-            out: Dict[str, torch.Tensor] = {}
-            if getattr(b, "outputs", None):
-                for oname, vid in b.outputs.items():
-                    out[oname] = slots[vid]
-            else:
-                for vid in b.output_vids:
-                    out[b.values[vid].name] = slots[vid]
-            return out
+            gprog = self._graph_cache.get(key)
+            if gprog is None:
+                # 미리 캡처되지 않은 경우 실행 시점에 캡처를 수행합니다.
+                gprog = self.capture_prebuilt(m, prog, feed, mode=mode)
+            
+            return replay_cuda_graph(m, gprog, feed)
 
         # -------------------------
-        # CUDA Graph path
+        # 2. Eager Path (Fallback)
         # -------------------------
-        if stream is not None:
-            raise NotImplementedError("use_cuda_graph=True with explicit stream is not supported yet")
+        stream_u64 = int(stream) if stream is not None else current_stream_u64()
+        slots = bind_and_alloc_slots(b, feed)
 
-        if mode == "train":
-            static_roles = ("input", "param", "state")
-            copy_roles = ("input",)
-        else:
-            static_roles = ("input", "param")
-            copy_roles = ("input",)
+        # In-place 최적화 적용
+        for out_vid, in_vid in plan.alias.items():
+            slots[out_vid] = slots[in_vid]
 
-        key = self._cache_key(
-            m, prog, feed,
-            mode=mode,
-            static_roles=static_roles,
-            copy_roles=copy_roles,
-        )
+        # 연산 실행
+        for op in plan.ops:
+            if getattr(op, "kind_id", None) is None:
+                raise ValueError(f"[CudaExecutor] missing op.kind_id for {op.kind}")
 
-        gprog = self._graph_cache.get(key)
-        if gprog is None:
-            gprog = capture_cuda_graph(
-                m,
-                prog,
-                feed,
-                stream=None,
-                warmup=warmup,
-                static_roles=static_roles,
-                copy_roles=copy_roles,
+            ins = _apply_abi_fixups(op, [slots[v] for v in op.inputs])
+            outs = [slots[v] for v in op.outputs]
+
+            op_call(
+                int(op.kind_id), ins, outs,
+                int(op.attr_schema), op.attr_blob,
+                stream=stream_u64,
             )
-            self._graph_cache[key] = gprog
 
-        return replay_cuda_graph(m, gprog, feed)
+        return self._extract_outputs(b, slots)
+
+    def _extract_outputs(self, b: Builder, slots: Dict[int, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """최종 Vid 슬롯에서 출력 명칭에 맞춰 텐서들을 추출합니다."""
+        out: Dict[str, torch.Tensor] = {}
+        output_map = getattr(b, "outputs", None)
+        if output_map:
+            for name, vid in output_map.items():
+                out[name] = slots[vid]
+        else:
+            for vid in b.output_vids:
+                out[b.values[vid].name] = slots[vid]
+        return out
