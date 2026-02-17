@@ -87,3 +87,7 @@ Thumbs.db
 # =========================
 *.log
 *.tmp
+
+# MNIST raw files
+raw/*.ubyte
+raw/*.gz
