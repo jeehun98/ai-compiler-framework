@@ -4,11 +4,11 @@ export const gemmData = {
 
   canonical: {
     formula: "C = \\alpha(A \\times B) + \\beta C",
-    shapes: { A: "M\\times K", B: "K\\times N", C: "M\\times N" },
+    shapes: { A: "M x K", B: "K x N", C: "M x N" },
     interpretation: {
-      rowA: "샘플 i (입력 질의)",
-      colB: "가설 j (비교 특징)",
-      cij: "샘플 i와 가설 j의 연관성 점수",
+      row_A: "샘플 i (입력 질의)",
+      col_B: "가설 j (비교 특징)",
+      c_ij: "샘플 i와 가설 j의 연관성 점수",
     },
   },
 
@@ -40,14 +40,14 @@ export const gemmData = {
     sensitivity: {
       downstream: [
         {
-          name: "ReLU 민감도",
-          rule: "결과값이 0보다 훨씬 작으면 정밀도를 낮추거나 계산 조기 중단 가능",
-          hint: "음수 영역 연산 우선순위 낮춤",
+          name: "ReLU 기반 조기 종료", // 명확한 액션 중심
+          rule: "음수 확정 영역(C << 0) 감지 시, 정밀도 포기 및 연산 즉시 중단",
+          hint: "불필요한 음수 정밀도 제거",
         },
         {
-          name: "Softmax 민감도",
-          rule: "최댓값과의 차이가 크면 지수값이 0에 수렴하므로 가지치기 허용",
-          hint: "꼬리 부분(Tail) 연산 생략 가능",
+          name: "Softmax 기반 데이터 가지치기",
+          rule: "최댓값과 격차가 큰 하위 확률 요소는 지수 계산(Exp) 전 생략",
+          hint: "무의미한 하위 확률 연산 생략",
         },
       ],
     },

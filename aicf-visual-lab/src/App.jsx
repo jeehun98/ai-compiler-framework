@@ -7,7 +7,7 @@ import {
 } from 'recharts';
 import {
   Cpu, ChevronRight, Zap, Share2, Layers, ShieldCheck, Activity,
-  Terminal, Scale, Eye, Focus, History
+  Terminal, Scale, Eye, Focus, History, Boxes
 } from 'lucide-react';
 
 import { allOpsData } from './data/index.js';
@@ -18,7 +18,7 @@ export default function App() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const data = allOpsData[selectedOpId];
 
-  // 데이터 로딩 중 처리 (분석 엔진의 느낌을 살린 로딩 화면)
+  // 데이터 로딩 중 처리
   if (!data) return (
     <div className="p-10 text-blue-300 bg-[#0f172a] h-screen flex flex-col items-center justify-center font-mono italic">
       <div className="animate-pulse mb-4 text-2xl">AICF Engine Analyzing...</div>
@@ -28,6 +28,8 @@ export default function App() {
 
   const semantic = data.semantics ?? data.semantic ?? null;
   const formula = data.canonical?.formula ?? '';
+  const shapes = data.canonical?.shapes ?? {};
+  const interpretation = data.canonical?.interpretation ?? {};
   const latency = data.performance?.latency ?? {};
   
   const latencyData = [
@@ -38,8 +40,6 @@ export default function App() {
 
   const km = data.kernel?.metrics ?? {};
   const chosenVariant = data.lowering?.chosen?.variant ?? 'Standard_Kernel';
-
-  // Deep Dive 데이터 존재 여부 확인
   const hasDeepDive = !!(data.kernel_evolution || data.evolution);
 
   return (
@@ -52,7 +52,7 @@ export default function App() {
         </h1>
         
         <div className="space-y-2 flex-1 overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-slate-700">
-          <p className="text-[10px] text-slate-500 font-black uppercase tracking-widest mb-4 px-4">컴파일러 추적 목록</p>
+          <p className="text-[10px] text-slate-500 font-black uppercase tracking-widest mb-4 px-4 font-mono">Graph Trace</p>
           {Object.keys(allOpsData).map(id => (
             <button
               key={id}
@@ -78,86 +78,185 @@ export default function App() {
       {/* 메인 콘텐츠 영역 */}
       <main className="flex-1 p-10 overflow-y-auto space-y-12 bg-gradient-to-b from-[#0f172a] to-[#1e293b]/20">
         
-        {/* 헤더 섹션: 분석 결과 및 앵커 상태 */}
+        {/* 헤더 섹션 */}
         <header className="flex justify-between items-end border-b border-slate-800 pb-8">
           <div>
             <span className="text-blue-500 font-mono text-xs uppercase tracking-[0.4em] font-black italic">Architecture Trace Report</span>
             <h2 className="text-6xl font-black mt-2 tracking-tighter italic">
-              {data.id} <span className="text-slate-700 font-light not-italic text-4xl ml-2 text-blue-400/50">Trace</span>
+              {data.id} <span className="text-slate-700 font-light not-italic text-4xl ml-2 text-blue-400/30">Trace</span>
             </h2>
           </div>
-          <div className="flex items-center gap-2 text-emerald-400 font-black bg-emerald-400/5 px-4 py-2 rounded-xl border border-emerald-400/10 text-xs uppercase tracking-widest shadow-lg animate-pulse">
+          <div className="flex items-center gap-2 text-emerald-400 font-black bg-emerald-400/5 px-4 py-2 rounded-xl border border-emerald-400/10 text-xs uppercase tracking-widest shadow-lg">
             <ShieldCheck size={16} /> 수학적 불변성 확정 (Semantic Anchored)
           </div>
         </header>
 
-        {/* 1. 연산 본질 정의 섹션 */}
+        {/* 1. 연산 본질 및 데이터 정의 섹션 (통합형) */}
         <section className="space-y-8">
           <div className="flex items-center gap-3 text-blue-500">
             <Share2 size={28} />
-            <h3 className="text-3xl font-black uppercase tracking-tighter italic">1. 연산 본질 정의 (Operator Essence Mapping)</h3>
+            <h3 className="text-3xl font-black uppercase tracking-tighter italic">1. 연산 본질 및 데이터 정의 (Operator Essence Mapping)</h3>
           </div>
           
           <div className="grid grid-cols-12 gap-6">
             <div className="col-span-12 lg:col-span-8 bg-[#1e293b] p-8 rounded-[2.5rem] border border-slate-800 shadow-xl">
+              
+              {/* 상단: 수식 및 형태(Shapes) */}
               <div className="bg-[#0b1120] p-12 rounded-3xl border border-slate-800/50 w-full text-center shadow-inner mb-8">
                 <div className="text-5xl text-blue-400 drop-shadow-[0_0_15px_rgba(96,165,250,0.3)]">
                   <BlockMath math={formula} />
                 </div>
+                <div className="mt-8 flex justify-center gap-8 text-slate-500 font-mono text-xs">
+                  {Object.entries(shapes).map(([tensor, shape]) => (
+                    <div key={tensor} className="flex gap-2 items-center bg-[#0f172a] px-4 py-2 rounded-xl border border-slate-800">
+                      <Boxes size={14} className="text-blue-500/40" />
+                      <span className="text-blue-400 font-bold">{tensor}:</span>
+                      <span className="italic">{shape}</span>
+                    </div>
+                  ))}
+                </div>
               </div>
-              
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
-                {Object.entries(semantic?.axes ?? {}).map(([key, axis]) => (
-                  <div key={key} className="p-5 bg-[#0f172a] rounded-2xl border border-slate-800 hover:border-blue-500/30 transition-all group">
-                    <p className="text-blue-500 font-black text-[10px] uppercase mb-1 tracking-widest group-hover:text-blue-400">{key} 축 (Axis)</p>
-                    <p className="text-sm font-bold text-slate-200">{axis?.name}</p>
-                    <p className="text-[10px] text-slate-500 italic mt-1 leading-tight">역할: "{axis?.role}"</p>
-                  </div>
-                ))}
+
+              {/* 중앙: 데이터 및 축 통합 해석 */}
+              <div className="space-y-4">
+                <p className="text-[10px] text-slate-500 uppercase font-black tracking-[0.2em] border-l-2 border-blue-500 pl-3 mb-6">데이터 흐름 및 축별 의미 (Data & Axis Mapping)</p>
+                
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+                  {Object.keys(semantic?.axes ?? {}).map((axisKey) => {
+                    const axisInfo = semantic.axes[axisKey];
+                    // interpretation 데이터와 축(Axis) 매핑 로직
+                    const interpretKey = axisKey === 'M' ? 'row_A' : axisKey === 'K' ? 'col_B' : 'c_ij';
+                    const interpretValue = interpretation[interpretKey] || interpretation[axisKey] || "정의되지 않음";
+
+                    return (
+                      <div key={axisKey} className="relative p-6 bg-[#0f172a] rounded-2xl border border-slate-800 group hover:border-blue-500/40 transition-all shadow-lg overflow-hidden">
+                        {/* 배경 축 기호 */}
+                        <div className="absolute -bottom-2 -right-2 text-6xl font-black text-blue-500/5 group-hover:text-blue-500/10 transition-colors uppercase italic font-mono pointer-events-none">
+                          {axisKey}
+                        </div>
+                        
+                        <div className="mb-4 relative z-10">
+                          <p className="text-blue-500 font-black text-[10px] uppercase tracking-widest mb-1">{axisInfo.name}</p>
+                          <p className="text-sm font-bold text-slate-200 leading-snug">{interpretValue}</p>
+                        </div>
+                        
+                        <div className="pt-3 border-t border-slate-800/50 relative z-10">
+                          <p className="text-[10px] text-slate-500 leading-tight">
+                            <span className="text-slate-400 font-black uppercase mr-1">Role:</span>
+                            "{axisInfo.role}"
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
             </div>
 
+            {/* 우측: 수학적 불변성 리스트 (Invariants) */}
             <div className="col-span-12 lg:col-span-4 space-y-4">
-               {semantic?.invariants?.map(inv => (
-                 <div key={inv.id} className="bg-[#1e293b] p-6 rounded-3xl border border-slate-800 hover:border-blue-500/50 transition-all hover:bg-slate-800/40">
-                    <p className="text-sm font-black text-blue-400 uppercase tracking-tight mb-3 italic">{inv.name}</p>
-                    <div className="bg-[#0f172a] px-3 py-2 rounded-xl border border-slate-800 mb-4">
-                       <p className="text-[9px] text-slate-600 font-black uppercase tracking-widest mb-1">불변성 측정 지표</p>
-                       <div className="text-xs text-blue-200"><InlineMath math={inv.metric} /></div>
+              <p className="text-[10px] text-slate-500 uppercase font-black tracking-[0.2em] border-l-2 border-blue-500 pl-3 mb-4 font-mono">
+                Optimization Constraints
+              </p>
+              
+              {semantic?.invariants?.map(inv => (
+                <div key={inv.id} className="bg-[#1e293b] p-6 rounded-3xl border border-slate-800 hover:border-blue-500/50 transition-all hover:bg-slate-800/40 shadow-xl group">
+                    <div className="flex justify-between items-start mb-4">
+                      <p className="text-sm font-black text-blue-400 uppercase tracking-tight italic group-hover:text-blue-300">
+                        {inv.name}
+                      </p>
+                      <ShieldCheck size={14} className="text-emerald-500/50" />
                     </div>
-                    <div className="flex flex-wrap gap-1.5">
-                       {inv.allows?.map(a => (
-                        <span key={a} className="text-[9px] font-bold bg-slate-900 text-blue-400/80 px-2.5 py-1 rounded-lg border border-slate-800 uppercase tracking-tighter">
-                          허용: {a}
+
+                    {/* 측정 지표 */}
+                    <div className="bg-[#0f172a] px-3 py-2 rounded-xl border border-slate-800 mb-3">
+                      <p className="text-[9px] text-slate-600 font-black uppercase tracking-widest mb-1">Monitoring Metric</p>
+                      <div className="text-xs text-blue-200/70 italic font-mono">{inv.metric}</div>
+                    </div>
+
+                    {/* ✨ 핵심: 최적화 허용 한계 (Threshold) */}
+                    <div className="bg-emerald-500/5 px-3 py-3 rounded-xl border border-emerald-500/20 mb-4 border-dashed relative overflow-hidden">
+                      <div className="absolute top-0 right-0 p-1">
+                          <Zap size={10} className="text-emerald-500/30" />
+                      </div>
+                      <p className="text-[9px] text-emerald-500/70 font-black uppercase tracking-widest mb-1">Safety Threshold</p>
+                      <div className="text-[11px] text-emerald-400 font-bold">
+                        {inv.threshold}
+                      </div>
+                    </div>
+
+                    {/* 적용 가능한 기법 */}
+                    <div className="flex flex-wrap gap-1.5 pt-3 border-t border-slate-800/50">
+                      {inv.allows?.map(a => (
+                        <span key={a} className="text-[9px] font-bold bg-slate-900 text-slate-500 px-2.5 py-1 rounded-lg border border-slate-800 uppercase group-hover:text-blue-400/80 transition-colors">
+                          + {a}
                         </span>
-                       ))}
+                      ))}
                     </div>
-                 </div>
-               ))}
+                </div>
+              ))}
             </div>
           </div>
         </section>
 
-        {/* 2. 연쇄 최적화 전략 섹션 */}
-        <section className="space-y-6">
+        {/* 2. 연쇄 최적화 전략 섹션 (Chained Optimization Strategy) */}
+        <section className="space-y-8">
           <div className="flex items-center gap-3 text-purple-400">
             <Eye size={28} />
             <h3 className="text-3xl font-black uppercase tracking-tighter italic">2. 연쇄 최적화 전략 (Chained Optimization Strategy)</h3>
           </div>
           
+          <p className="text-slate-500 text-sm ml-10 -mt-6 italic leading-relaxed max-w-3xl">
+            인접한 후행 연산(Downstream)의 특성을 분석하여, 데이터 흐름상에서 손실 없이 생략 가능한 연산 구간을 포착하고 실행 전략을 동적으로 조절합니다.
+          </p>
+
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 text-slate-300">
-             {semantic?.sensitivity?.downstream?.map((ds, i) => (
-               <div key={i} className="bg-gradient-to-br from-[#1e293b] to-[#0f172a] p-8 rounded-[2rem] border border-slate-800 flex gap-6 items-center shadow-lg hover:border-purple-500/30 transition-all">
-                  <div className="bg-purple-500/10 p-5 rounded-2xl border border-purple-500/20 text-purple-400 shadow-inner">
-                     <Focus size={32} />
+            {semantic?.sensitivity?.downstream?.map((ds, i) => (
+              <div key={i} className="bg-[#1e293b] p-8 rounded-[2.5rem] border border-slate-800 flex gap-8 items-start shadow-xl hover:border-purple-500/40 transition-all group relative overflow-hidden">
+                  
+                  {/* 장식용 흐름 아이콘 (배경) */}
+                  <div className="absolute -right-6 -top-6 text-purple-500/5 group-hover:text-purple-500/10 transition-colors pointer-events-none">
+                    <Share2 size={160} />
                   </div>
-                  <div className="flex-1 space-y-2">
-                     <h4 className="text-xl font-black text-white italic uppercase tracking-tighter">{ds.name}</h4>
-                     <p className="text-sm text-slate-400 leading-relaxed font-medium">최적화 규칙: <span className="text-slate-200 italic">"{ds.rule}"</span></p>
-                     <div className="inline-block px-3 py-1 bg-slate-900 border border-slate-800 rounded-lg text-[10px] font-mono text-purple-300 uppercase font-bold tracking-widest">전략 가이드: {ds.hint}</div>
+
+                  {/* 왼쪽 아이콘 영역 */}
+                  <div className="bg-purple-500/10 p-5 rounded-2xl border border-purple-500/20 text-purple-400 shadow-inner group-hover:scale-110 transition-transform duration-500">
+                    <Focus size={32} />
                   </div>
-               </div>
-             ))}
+                  
+                  {/* 오른쪽 상세 전략 영역 */}
+                  <div className="flex-1 space-y-5 relative z-10">
+                    <div>
+                        <h4 className="text-2xl font-black text-white italic uppercase tracking-tighter">{ds.name}</h4>
+                        <div className="flex items-center gap-2 mt-1">
+                          <div className="w-2 h-2 rounded-full bg-purple-500 animate-pulse" />
+                          <span className="text-[10px] text-purple-400 font-black uppercase tracking-[0.2em]">Context-Aware Decision</span>
+                        </div>
+                    </div>
+                    
+                    <div className="space-y-3">
+                        {/* 조건 (Rule) */}
+                        <div className="relative">
+                          <p className="text-[9px] text-slate-600 font-black uppercase tracking-widest mb-1.5 ml-1">Detection Rule</p>
+                          <p className="text-sm text-slate-200 leading-relaxed bg-[#0f172a] p-4 rounded-2xl border border-slate-800 italic shadow-inner">
+                            "{ds.rule}"
+                          </p>
+                        </div>
+
+                        {/* 결과 (Hint/Strategy) */}
+                        <div className="flex items-center gap-3 bg-emerald-500/5 px-4 py-3 rounded-2xl border border-emerald-500/10 w-full group-hover:border-emerald-500/30 transition-colors">
+                          <div className="bg-emerald-500/20 p-1.5 rounded-lg text-emerald-400">
+                            <Zap size={14} />
+                          </div>
+                          <div>
+                            <p className="text-[9px] text-emerald-500/60 font-black uppercase tracking-widest">Optimization Strategy</p>
+                            <p className="text-xs font-bold text-emerald-400">{ds.hint}</p>
+                          </div>
+                        </div>
+                    </div>
+                  </div>
+              </div>
+            ))}
           </div>
         </section>
 
@@ -168,67 +267,59 @@ export default function App() {
               <Zap size={28} />
               <h3 className="text-3xl font-black uppercase tracking-tighter italic">3. 하드웨어 매핑 및 최적화 구현 (Hardware Mapping & Realization)</h3>
             </div>
-            
             {hasDeepDive && (
               <button 
                 onClick={() => setIsModalOpen(true)}
-                className="flex items-center gap-2 px-6 py-3 bg-emerald-600/10 hover:bg-emerald-600 border border-emerald-500/30 text-emerald-400 hover:text-white rounded-2xl font-black text-xs uppercase tracking-widest transition-all duration-300 group shadow-lg shadow-emerald-500/10"
+                className="flex items-center gap-2 px-6 py-3 bg-emerald-600/10 hover:bg-emerald-600 border border-emerald-500/30 text-emerald-400 hover:text-white rounded-2xl font-black text-xs uppercase tracking-widest transition-all duration-300 group shadow-lg"
               >
                 <History size={16} className="group-hover:rotate-[-45deg] transition-transform" />
-                최적화 히스토리 보기 (Optimization Chronicle)
+                최적화 히스토리 보기 (Chronicle)
               </button>
             )}
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-             {/* 의사결정 엔진 결과 */}
              <div className="lg:col-span-5 bg-[#1e293b] p-10 rounded-[2.5rem] border border-slate-800 shadow-2xl flex flex-col relative overflow-hidden">
                 <div className="flex items-center gap-2 mb-8 text-emerald-400">
                    <Terminal size={20} />
                    <h4 className="text-[10px] font-black uppercase tracking-[0.2em]">Lowering Decision Engine</h4>
                 </div>
-                
                 <div className="flex-1 space-y-10">
                    <div className="relative">
                       <div className="absolute -left-4 top-0 bottom-0 w-1.5 bg-emerald-500/40 rounded-full" />
-                      <p className="text-[10px] text-slate-500 uppercase font-black mb-3 ml-2 tracking-widest opacity-60">최종 선택된 커널 변형 (Selected Variant)</p>
+                      <p className="text-[10px] text-slate-500 uppercase font-black mb-3 ml-2 tracking-widest opacity-60">Selected Variant</p>
                       <p className="text-2xl font-black text-white italic ml-2 tracking-tight">"{chosenVariant}"</p>
                    </div>
-                   
-                   <div className="space-y-4">
+                   <div className="space-y-4 text-sm">
                       {data.lowering?.chosen?.reason?.map((r, i) => (
-                        <div key={i} className="flex gap-4 p-4 bg-[#0f172a] rounded-2xl border border-slate-800 text-[11px] text-slate-400 leading-relaxed font-bold border-l-4 border-l-emerald-600/50 shadow-sm">
-                           <span className="text-emerald-500 font-mono">0{i+1}</span>
-                           <span>{r}</span>
+                        <div key={i} className="flex gap-4 p-4 bg-[#0f172a] rounded-2xl border border-slate-800 text-slate-400 leading-relaxed font-bold border-l-4 border-l-emerald-600/50">
+                           <span className="text-emerald-500 font-mono text-xs">0{i+1}</span>
+                           <span className="text-[11px]">{r}</span>
                         </div>
                       ))}
                    </div>
                 </div>
              </div>
 
-             {/* 하드웨어 실측 지표 */}
              <div className="lg:col-span-7 grid grid-cols-2 gap-6">
                 <MetricCard title="최대 처리량 (Throughput)" value={km.throughput} color="text-emerald-400" icon={<Activity size={16}/>} />
                 <MetricCard title="메모리 재사용률" value={km.memory_reuse} color="text-purple-400" icon={<Layers size={16}/>} />
-                
                 <div className="col-span-2 bg-[#1e293b] p-8 rounded-3xl border border-slate-700 shadow-xl">
-                   <div className="flex items-center justify-between mb-8 text-center sm:text-left">
-                      <div className="flex items-center gap-2 text-slate-500">
-                         <Scale size={18} />
-                         <p className="text-[10px] font-black uppercase tracking-widest">의미론적 비용 모델 (Semantic Cost Model)</p>
+                   <div className="flex items-center justify-between mb-8">
+                      <div className="flex items-center gap-2 text-slate-500 font-mono text-[10px] font-black uppercase tracking-widest">
+                         <Scale size={18} /> Semantic Cost Model
                       </div>
                       {data.costModel?.semanticLoss && (
-                        <div className="text-xs font-mono text-blue-400 font-bold bg-blue-500/5 px-4 py-1.5 rounded-full border border-blue-500/10 shadow-inner italic">
+                        <div className="text-xs font-mono text-blue-400 font-bold bg-blue-500/5 px-4 py-1.5 rounded-full border border-blue-500/10 italic">
                           <InlineMath math={data.costModel.semanticLoss} />
                         </div>
                       )}
                    </div>
-                   
                    <div className="grid grid-cols-3 gap-4">
                       {Object.entries(data.costModel?.weights_hint?.default ?? {}).map(([k, v]) => (
-                        <div key={k} className="flex flex-col items-center gap-2 p-4 bg-[#0f172a]/50 rounded-2xl border border-slate-800 shadow-inner">
+                        <div key={k} className="flex flex-col items-center gap-2 p-4 bg-[#0f172a]/50 rounded-2xl border border-slate-800 shadow-inner group hover:border-blue-500/30 transition-colors">
                            <div className="text-lg font-black text-slate-100">{v}</div>
-                           <p className="text-[9px] text-slate-600 uppercase font-bold tracking-tighter">{k}</p>
+                           <p className="text-[9px] text-slate-600 uppercase font-black tracking-tighter group-hover:text-blue-400">{k}</p>
                         </div>
                       ))}
                    </div>
@@ -237,9 +328,9 @@ export default function App() {
           </div>
         </section>
 
-        {/* 물리적 성능 벤치마크 차트 */}
+        {/* 하단 성능 비교 차트 */}
         <section className="col-span-12 bg-[#1e293b] p-8 rounded-[2.5rem] border border-slate-800 shadow-xl pb-12">
-            <h4 className="text-slate-500 text-xs font-black mb-12 uppercase tracking-widest text-center italic opacity-60">물리적 성능 비교 벤치마크 (Latency ms)</h4>
+            <h4 className="text-slate-500 text-[10px] font-black mb-12 uppercase tracking-[0.3em] text-center italic opacity-60 font-mono">Physical Performance Comparison (Latency ms)</h4>
             <div className="h-64">
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={latencyData} layout="vertical">
@@ -274,7 +365,7 @@ function MetricCard({ title, value, color, icon }) {
         {icon}
         <p className="text-[10px] uppercase font-black tracking-[0.2em]">{title}</p>
       </div>
-      <p className={`text-4xl font-black font-mono tracking-tighter ${color} drop-shadow-sm`}>{value ?? '측정 중'}</p>
+      <p className={`text-4xl font-black font-mono tracking-tighter ${color} drop-shadow-sm`}>{value ?? '—'}</p>
     </div>
   );
 }
