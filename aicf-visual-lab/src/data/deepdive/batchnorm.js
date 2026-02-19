@@ -1,30 +1,41 @@
-export const batchnormDeepDive = {
+export const batchNormDeepDive = {
   id: "BatchNorm",
 
+  // 1️⃣ 커널 진화 과정
   kernel_evolution: [
     {
-      version: "v0.1 (Baseline)",
-      tag: "Naive Atomic (Inference)",
-      throughput: "183.2 GB/s",
+      version: "v1.0 (Inference)",
+      tag: "Constant-Time Mapping",
+      throughput: "194.87 GB/s",
       description:
-        "기능 구현 중심의 초기 버전. NCHW 레이아웃에서 기본적인 병렬 처리를 수행하나 벡터화 부재 및 디버그 로그 오버헤드로 인해 대역폭 효율이 낮음 (약 60%).",
+        "이미 계산된 Running Stats를 사용하여 단순 Point-wise 연산 수행. 읽기(X)와 쓰기(Y)가 1:1로 매칭되어 FP16 환경에서 높은 효율을 보임.",
     },
     {
-      version: "v0.1 (Baseline)",
-      tag: "Naive Atomic (Training)",
-      throughput: "2.4 GB/s ❌",
+      version: "v1.1 (Forward Train)",
+      tag: "Multi-Pass Atomic",
+      throughput: "2.49 GB/s",
       description:
-        "Global Atomic 연산을 직접 사용. NCHW 특성상 수천 개의 스레드가 동일 주소에 충돌(Contention)하여 심각한 성능 저하 발생. Block Reduction 도입이 시급함.",
+        "평균/분산 계산을 위해 전역 메모리에 대한 atomicAdd를 사용. 수천 개의 쓰레드가 동일한 [C] 주소에 경합(Contention)하면서 성능이 급격히 저하됨.",
+    },
+    {
+      version: "v1.2 (Backward Train)",
+      tag: "Gradient Aggregation",
+      throughput: "3.89 GB/s",
+      description:
+        "dgamma, dbeta를 구하기 위해 다시 한번 Atomic Reduction 수행. Forward Train보다는 복잡하지만 유사한 경합 패턴을 보임.",
     },
   ],
 
+  // 2️⃣ 프로파일링 지표 (32x64x128x128 테스트 결과 기준)
   profiling_report: {
-    유효_메모리_대역폭_Infer: "183.2 GB/s",
-    유효_메모리_대역폭_Train: "2.4 GB/s (Bottleneck)",
-    주요_병목: "Global Atomic Contention",
-    최적화_필요: "Warp/Block Reduction",
+    추론_처리량: "194.87 GB/s",
+    학습_처리량: "2.49 GB/s",
+    연산_정밀도: "Mixed (F16/F32)",
+    리덕션_방식: "Global Atomic",
+    메모리_패턴: "NCHW Contiguous",
   },
 
+  // 3️⃣ 핵심 분석 및 결론
   analysis:
-    "현재 구현은 NCHW 레이아웃에서 Global Atomic을 사용할 때 발생하는 '직렬화(Serialization)' 문제를 적나라하게 보여준다. Training 성능이 2.4GB/s로 곤두박질친 것은 수천 개의 스레드가 하나의 주소에 락을 거는 현상 때문이며, 이를 해결하기 위해 계층적 리덕션(Hierarchical Reduction) 구조로의 변경이 필수적이다.",
+    "현재 BatchNorm 구현은 '정확성 우선(Correctness-first)' 전략을 택하고 있습니다. Inference 모드에서는 약 195 GB/s의 뛰어난 성능을 보여주지만, Training 모드에서는 전역 메모리에 대한 Atomic 연산 경합으로 인해 성능이 크게 제한됩니다. 특히 N*H*W(약 52만 개)의 요소가 단 64개의 채널 슬롯(C)에 동시 접근하려는 병목 현상이 관찰됩니다. 향후 성능 개선을 위해서는 Shared Memory를 활용한 Warp/Block-level Reduction을 도입하여 전역 메모리 원자 연산 횟수를 최소화하는 'Two-pass reduction' 최적화가 필요합니다.",
 };

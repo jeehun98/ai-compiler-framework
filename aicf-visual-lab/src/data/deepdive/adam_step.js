@@ -1,34 +1,41 @@
-javascript
 export const adamStepDeepDive = {
   id: "AdamStep",
 
-  // KernelDeepDive.jsx에서 data.kernel_evolution으로 접근
+  // 1️⃣ 커널 진화 과정: 기본 구현에서 최적화까지
   kernel_evolution: [
     {
-      version: "v1.0 (In-Place)",
-      tag: "단일 커널 퓨전",
-      throughput: "310.1 GB/s",
+      version: "v1.0 (PyTorch Ref)",
+      tag: "Python Reference",
+      throughput: "N/A",
       description:
-        "Momentum, Variance, Parameter 갱신을 하나의 커널로 통합. 28 Bytes의 필수 데이터 이동만 수행하여 하드웨어 대역폭 한계(Saturation)에 도달함.",
+        "Torch 연산자들의 조합으로 구현. 중간 결과값(m_hat, v_hat 등) 생성을 위해 다수의 임시 텐서가 할당되며 메모리 I/O가 매우 빈번함.",
     },
     {
-      version: "v1.1 (OOP)",
-      tag: "Out-of-Place (Safe Mode)",
-      throughput: "235.3 GB/s",
+      version: "v2.0 (OOP)",
+      tag: "Out-of-Place CUDA",
+      throughput: "231.38 GB/s",
       description:
-        "입출력 텐서가 다를 경우 정합성을 위해 선행 복사(Memcpy) 수행. 요소당 8 Bytes의 추가 이동 비용 발생으로 대역폭 효율 하락.",
+        "단일 커널로 퓨전(Fusion)되어 임시 텐서 생성을 제거함. 다만, P에서 Pout으로의 별도 cudaMemcpyAsync 복사 오버헤드가 발생함.",
+    },
+    {
+      version: "v2.1 (In-Place)",
+      tag: "In-Place Optimized",
+      throughput: "292.00 GB/s",
+      description:
+        "데이터 복사 없이 기존 메모리 주소(P, M, V)에서 즉시 업데이트를 수행. OOP 대비 약 26%의 대역폭 향상을 보이며 이론적 최대치에 근접함.",
     },
   ],
 
-  // KernelDeepDive.jsx에서 data.profiling_report로 접근
+  // 2️⃣ 프로파일링 지표 (4096x4096 테스트 결과 기준)
   profiling_report: {
-    유효_메모리_대역폭: "310.1 GB/s",
-    하드웨어_포화도: "98.7%",
-    요소당_데이터_이동: "28 Bytes",
-    병목_지점: "DRAM Interface",
+    메모리_대역폭_효율: "292.0 GB/s",
+    연산_지연_시간: "1.609 ms",
+    데이터_이동량: "~448 MB",
+    I_O_패턴: "7-way Access",
+    커널_퓨전_상태: "Fully Fused",
   },
 
-  // KernelDeepDive.jsx에서 data.analysis로 접근
+  // 3️⃣ 핵심 분석 및 결론
   analysis:
-    "Adam 최적화의 핵심은 수식을 줄이는 것이 아니라, 28 Bytes를 한 번에 처리하는 구조를 만드는 것이다. 커널 퓨전을 통해 메모리 재접근을 제거함으로써, 복잡한 수식에도 불구하고 단순 복사(Copy)에 준하는 대역폭 성능을 달성했다.",
+    "AdamStep 커널은 전형적인 Memory-Bound 연산입니다. 한 번의 연산을 위해 4개 배열(P, G, M, V)을 읽고 3개 배열(P, M, V)을 써야 하는 '7-way Memory Access' 구조를 가집니다. 테스트 결과, In-Place 방식이 OOP 방식보다 빠른 이유는 불필요한 cudaMemcpy 호출을 제거하고 데이터 지역성(Locality)을 극대화했기 때문입니다. 현재 구현된 v2 커널은 Grid-Stride Loop를 통해 다양한 Shape에 유연하게 대응하며, 256 쓰레드 배치를 통해 메모리 Coalescing을 최적으로 활용하고 있습니다.",
 };

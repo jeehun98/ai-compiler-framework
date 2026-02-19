@@ -1,122 +1,41 @@
-// src/data/deepdive/layer_norm.js
-
 export const layerNormDeepDive = {
   id: "LayerNorm",
 
-  // KernelDeepDive.jsx가 쓰는 키
+  // 1️⃣ 커널 진화 과정
   kernel_evolution: [
     {
-      version: "v1.0",
-      tag: "Two-Pass (Mean/Var) Baseline",
-      throughput: "—",
+      version: "v1.0 (Forward F32/F16)",
+      tag: "Warp-Shuffle Reduction",
+      throughput: "226.8 GB/s (F16)",
       description:
-        "mean/var를 별도 패스로 계산한 뒤 normalize. 구현 단순하지만 global traffic + sync 비용이 큼.",
+        "__shfl_down_sync를 활용하여 공유 메모리 접근 없이 워프 내에서 빠르게 합계를 계산. Row-wise 병렬화가 잘 이루어져 높은 대역폭을 달성함.",
     },
     {
-      version: "v2.0",
-      tag: "Fused Reduce + Normalize (Welford/Online)",
-      throughput: "—",
+      version: "v1.1 (Backward DX)",
+      tag: "Two-Pass Calculation",
+      throughput: "118.7 GB/s (F32)",
       description:
-        "한 패스에서 mean/var(또는 Welford) 누적 후 normalize까지 fusion. DRAM 왕복 감소 + latency 개선.",
+        "dx를 구하기 위해 sum(dy_hat)과 sum(dy_hat * xhat) 두 가지 리덕션이 필요함. 연산 복잡도가 증가하며 Forward 대비 처리량이 하락함.",
     },
     {
-      version: "v3.0",
-      tag: "Vectorized IO + Warp Reduce Specialization",
-      throughput: "—",
+      version: "v1.2 (Backward DG/DB)",
+      tag: "Column-wise Bottleneck",
+      throughput: "25.7 GB/s (BERT shape)",
       description:
-        "float4/half2 로드 + warp-level reduction으로 reduce 비용 축소. (가능하면) affine까지 fuse.",
+        "dgamma/dbeta 계산 시 Column-wise로 접근하면서 메모리 Coalescing이 깨짐. 특히 N이 작은 BERT 타입 형상에서 극심한 성능 저하 발생.",
     },
   ],
 
+  // 2️⃣ 프로파일링 지표 (4096x4096 및 BERT-base 기준)
   profiling_report: {
-    // ncu 수치 생기면 채우면 됨
-    SM_Occupancy: "—",
-    DRAM_Throughput: "—",
-    L1_Cache_Hit_Rate: "—",
-    Warp_Execution_Efficiency: "—",
+    최대_처리량: "226.8 GB/s (F16 Fwd)",
+    BERT_Bwd_효율: "25.7 GB/s (매우 낮음)",
+    리덕션_알고리즘: "Warp-level Shuffle",
+    메모리_레이아웃: "Row-major Contiguous",
+    계산_정밀도: "F16/F32 Mixed",
   },
 
+  // 3️⃣ 핵심 분석 및 결론
   analysis:
-    "FP32는 round-off 수준 오차(<=2.861e-06). FP16은 reduction(Σdy, Σdy·xhat) 누적오차 + affine scaling으로 BWD에서 worst가 커짐(<=1.511e-02). 현재 구현은 2D (M,N)만 지원하며 3D 입력은 NotImplemented로 거부.",
-
-  // 바인딩/정확도 검증 결과 요약
-  tests: {
-    schema: {
-      tag4: "LNEP",
-      schema_id_hex: "0x50454e4c",
-      payload: "float eps (little-endian)",
-      ops: [
-        { name: "LayerNormFwd", enum: 13 },
-        { name: "LayerNormBwd", enum: 14 },
-      ],
-    },
-
-    summary:
-      "CUDA binding probe vs torch reference. FP32: ~1e-6, FP16: worst 1.511e-2 (BWD affine, M=64 N=256).",
-
-    positive: [
-      // ---------- FWD ----------
-      { phase: "FWD", dtype: "fp32", affine: false, M: 8, N: 128, eps: 1e-5, max_abs_delta: 2.384e-7 },
-      { phase: "FWD", dtype: "fp32", affine: false, M: 64, N: 256, eps: 1e-5, max_abs_delta: 4.768e-7 },
-      { phase: "FWD", dtype: "fp32", affine: false, M: 7, N: 33, eps: 1e-5, max_abs_delta: 2.384e-7 },
-
-      { phase: "FWD", dtype: "fp32", affine: true, M: 8, N: 128, eps: 1e-5, max_abs_delta: 7.153e-7 },
-      { phase: "FWD", dtype: "fp32", affine: true, M: 64, N: 256, eps: 1e-5, max_abs_delta: 9.537e-7 },
-      { phase: "FWD", dtype: "fp32", affine: true, M: 7, N: 33, eps: 1e-5, max_abs_delta: 9.537e-7 },
-
-      { phase: "FWD", dtype: "fp16", affine: false, M: 8, N: 128, eps: 1e-5, max_abs_delta: 1.953e-3 },
-      { phase: "FWD", dtype: "fp16", affine: false, M: 64, N: 256, eps: 1e-5, max_abs_delta: 3.906e-3 },
-      { phase: "FWD", dtype: "fp16", affine: false, M: 7, N: 33, eps: 1e-5, max_abs_delta: 1.953e-3 },
-
-      { phase: "FWD", dtype: "fp16", affine: true, M: 8, N: 128, eps: 1e-5, max_abs_delta: 3.906e-3 },
-      { phase: "FWD", dtype: "fp16", affine: true, M: 64, N: 256, eps: 1e-5, max_abs_delta: 7.812e-3 },
-      { phase: "FWD", dtype: "fp16", affine: true, M: 7, N: 33, eps: 1e-5, max_abs_delta: 3.906e-3 },
-
-      // ---------- BWD ----------
-      { phase: "BWD", dtype: "fp32", affine: false, M: 8, N: 128, eps: 1e-5, max_abs_delta: 2.384e-7 },
-      { phase: "BWD", dtype: "fp32", affine: false, M: 64, N: 256, eps: 1e-5, max_abs_delta: 4.768e-7 },
-      { phase: "BWD", dtype: "fp32", affine: false, M: 7, N: 33, eps: 1e-5, max_abs_delta: 2.384e-7 },
-
-      { phase: "BWD", dtype: "fp32", affine: true, M: 8, N: 128, eps: 1e-5, max_abs_delta: 9.537e-7 },
-      { phase: "BWD", dtype: "fp32", affine: true, M: 64, N: 256, eps: 1e-5, max_abs_delta: 2.861e-6 },
-      { phase: "BWD", dtype: "fp32", affine: true, M: 7, N: 33, eps: 1e-5, max_abs_delta: 9.537e-7 },
-
-      { phase: "BWD", dtype: "fp16", affine: false, M: 8, N: 128, eps: 1e-5, max_abs_delta: 1.953e-3 },
-      { phase: "BWD", dtype: "fp16", affine: false, M: 64, N: 256, eps: 1e-5, max_abs_delta: 1.953e-3 },
-      { phase: "BWD", dtype: "fp16", affine: false, M: 7, N: 33, eps: 1e-5, max_abs_delta: 1.953e-3 },
-
-      { phase: "BWD", dtype: "fp16", affine: true, M: 8, N: 128, eps: 1e-5, max_abs_delta: 3.486e-3 },
-      {
-        phase: "BWD",
-        dtype: "fp16",
-        affine: true,
-        M: 64,
-        N: 256,
-        eps: 1e-5,
-        max_abs_delta: 1.511e-2,
-        note: "worst (reduction 누적오차 + gamma 스케일 증폭)",
-      },
-      { phase: "BWD", dtype: "fp16", affine: true, M: 7, N: 33, eps: 1e-5, max_abs_delta: 2.006e-3 },
-    ],
-
-    worst: {
-      max_abs_delta: 0.015108108520507812,
-      case: { phase: "BWD", dtype: "fp16", affine: true, M: 64, N: 256, eps: 1e-5 },
-    },
-
-    negative: [
-      {
-        name: "wrong rank (3D input)",
-        op: "LayerNormFwd",
-        input_rank: 3,
-        expected_status: "NotImplemented",
-        got_status: "NotImplemented",
-      },
-    ],
-
-    notes: [
-      "실제 시스템 경로 검증용으로: FWD op가 생성한 mean/rstd를 그대로 BWD op 입력으로 넘기는 e2e 테스트 케이스를 추가하는 걸 권장.",
-      "FP16 비교는 절대오차(max abs)뿐 아니라 상대오차(max rel)도 같이 기록하면 케이스 해석이 쉬움.",
-    ],
-  },
+    "LayerNorm은 행(Row) 방향의 독립성이 강하여 Forward 패스에서는 Warp Shuffle을 통해 DRAM 대역폭의 한계치에 가까운 성능(>200 GB/s)을 냅니다. 하지만 Backward 패스, 특히 dgamma/dbeta를 구하는 과정에서 심각한 병목이 발생합니다. 현재 구현은 한 블록이 한 열(Column)을 담당하는데, 데이터가 Row-major로 저장되어 있어 읽기 시 Coalescing이 이루어지지 않습니다. 32768x768(BERT) 형상에서 처리량이 25.7 GB/s로 급락하는 것이 그 증거입니다. 성능을 개선하려면 dgamma/dbeta 계산 시 Block-wide Reduction을 넘어선 Global Atomic 또는 별도의 Transpose 커널 결합이 필요해 보입니다.",
 };

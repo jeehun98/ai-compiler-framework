@@ -10,12 +10,22 @@ import { reluData } from './relu';
 // Deep Dive 데이터 Import
 import { gemmDeepDive } from './deepdive/gemm';
 import { biasAddDeepDive } from './deepdive/bias_add';
-// import { layerNormDeepDive } from './deepdive/layer_norm';
+import { adamStepDeepDive } from './deepdive/adam_step';
+import { batchNormDeepDive } from './deepdive/batchnorm';
+import { layerNormDeepDive } from './deepdive/layer_norm';
+import { reluDeepDive } from './deepdive/relu';
+import { softmaxDeepDive } from './deepdive/softmax';
 
 export const allOpsData = {
-  AdamStep: adamStepData,
+  AdamStep: {
+    ...adamStepData,
+    ...adamStepDeepDive,
+  },
   
-  BatchNorm: batchNormData,
+  BatchNorm: {
+    ...batchNormData,
+    ...batchNormDeepDive
+  },
   
   BiasAdd: {
     ...biasAddData,
@@ -29,13 +39,19 @@ export const allOpsData = {
   
   LayerNorm: {
     ...layerNormData,
-    // ...layerNormDeepDive,
+    ...layerNormDeepDive,
   },
 
-  ReLU: reluData,
+  ReLU: {
+    ...reluData,
+    ...reluDeepDive,
+  },
 
   ResidualAdd: residualAddData,
   
-  Softmax: softmaxData,
+  Softmax: {
+    ...softmaxData,
+    ...softmaxDeepDive,
+  },
   
 };
