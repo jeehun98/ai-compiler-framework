@@ -2,3 +2,13 @@
 
 /* 만약 위 코드가 안 먹힌다면 기존 3줄을 유지해도 되지만, 
    최신 버전은 위 한 줄로 충분합니다. */
+
+
+/* 스크롤바를 숨기는 유틸리티 클래스 */
+.scrollbar-hide::-webkit-scrollbar {
+    display: none;
+}
+.scrollbar-hide {
+    -ms-overflow-style: none;  /* IE and Edge */
+    scrollbar-width: none;  /* Firefox */
+}

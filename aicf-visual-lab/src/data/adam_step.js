@@ -64,16 +64,19 @@ export const adamStepData = {
       },
     ],
 
+
     sensitivity: {
       downstream: [
         {
           name: "초기 학습 단계 (Early Phase)",
-          rule: "학습 초기($t$ 작음)에는 $m, v$가 0으로 편향되어 있으므로, Bias Correction 생략 불가",
+          // 방법: 수식을 포함한 전체 문장을 LaTeX의 \text{} 기능을 활용해 작성
+          rule: "t \\text{ 가 작을 때 } m, v \\text{ 의 0 편향 방지를 위한 Bias Correction 필수}",
           hint: "정밀 보정 모드 (Full Bias Correction)",
         },
         {
           name: "Epsilon 민감도",
-          rule: "분산($v$)이 0에 가까울 때 $\\epsilon$이 너무 작으면 업데이트가 폭발(Explode)함",
+          // 백슬래시 2개(\\) 사용 주의
+          rule: "v \\to 0 \\text{ 일 때 } \\epsilon \\text{ 이 너무 작으면 업데이트 폭발 위험}",
           hint: "Epsilon Floor 정책 적용",
         },
       ],
@@ -84,10 +87,10 @@ export const adamStepData = {
     chosen: {
       variant: "Fused_AdamW_1Pass",
       reason: [
-        "메모리 대역폭 병목(Memory Bound): $m, v, g, \\theta$를 각각 읽고 쓰는 비용이 연산 비용을 압도함",
-        "커널 융합(Kernel Fusion): 4번의 메모리 접근을 1번의 통합 패스로 처리",
-        "레지스터 재사용: $g$와 $m, v$를 레지스터에서 바로 계산하여 L1/L2 캐시 오염 방지",
-        "AdamW 지원: Weight Decay를 별도 단계가 아닌 업데이트 수식에 통합",
+        "\\text{메모리 대역폭 병목(Memory Bound): } m, v, g, \\theta \\text{ 를 각각 읽고 쓰는 비용이 연산 비용을 압도함}",
+        "\\text{커널 융합(Kernel Fusion): 4번의 메모리 접근을 1번의 통합 패스로 처리}",
+        "\\text{레지스터 재사용: } g \\text{ 와 } m, v \\text{ 를 레지스터에서 바로 계산하여 L1/L2 캐시 오염 방지}",
+        "\\text{AdamW 지원: Weight Decay를 별도 단계가 아닌 업데이트 수식에 통합}",
       ],
       applied_rewrites: ["Multi-Tensor Fusion", "Register Tiling", "Fast Math (rsqrt)"],
     },
