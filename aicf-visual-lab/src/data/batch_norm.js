@@ -60,7 +60,7 @@ export const batchNormData = {
       downstream: [
         {
           name: "배치 크기 위기 (Small Batch Crisis)",
-          rule: "배치 크기가 작으면($B < 8$) 통계가 부정확해져 학습이 파탄남",
+          rule: "\\text{배치 크기가 작으면}(B < 8)\\text{ 통계가 부정확해져 학습이 파탄남}",
           hint: "GroupNorm/LayerNorm으로 대체 권장",
         },
         {
