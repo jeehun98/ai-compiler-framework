@@ -130,18 +130,62 @@ export default function App() {
               </div>
             </div>
 
+            {/* 1. 연산 본질 정의 섹션 우측 - Optimization Constraints 부분 */}
             <div className="col-span-12 lg:col-span-4 space-y-4">
-              <p className="text-[10px] text-slate-500 uppercase font-black tracking-[0.2em] border-l-2 border-blue-500 pl-3 mb-4 font-mono">Optimization Constraints</p>
+              <div className="flex items-center justify-between border-l-2 border-blue-500 pl-3 mb-4">
+                <p className="text-[10px] text-slate-500 uppercase font-black tracking-[0.2em] font-mono">
+                  Optimization Constraints
+                </p>
+                <span className="text-[9px] text-emerald-500 font-bold bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
+                  VERIFIED
+                </span>
+              </div>
+
               {semantic?.invariants?.map(inv => (
-                <div key={inv.id} className="bg-[#1e293b] p-6 rounded-3xl border border-slate-800 hover:border-blue-500/50 transition-all shadow-xl group">
+                <div key={inv.id} className="bg-[#1e293b] p-6 rounded-3xl border border-slate-800 hover:border-blue-500/50 transition-all shadow-xl group relative overflow-hidden">
+                  {/* 배경 장식: 불변성 ID */}
+                  <div className="absolute top-2 right-4 text-[8px] font-mono text-slate-700 opacity-50 uppercase tracking-tighter">
+                    {inv.id}
+                  </div>
+
                   <div className="flex justify-between items-start mb-4">
-                    <p className="text-sm font-black text-blue-400 uppercase tracking-tight italic">{inv.name}</p>
-                    <ShieldCheck size={14} className="text-emerald-500/50" />
+                    <p className="text-sm font-black text-blue-400 uppercase tracking-tight italic group-hover:text-blue-300 transition-colors">
+                      {inv.name}
+                    </p>
                   </div>
-                  <div className="bg-[#0f172a] px-3 py-2 rounded-xl border border-slate-800 mb-3 overflow-x-auto scrollbar-hide">
-                    <div className="text-xs text-blue-200/70 italic font-mono"><InlineMath math={inv.metric} /></div>
+
+                  {/* 수식 지표: 렌더링 최적화 */}
+                  <div className="bg-[#0f172a] px-3 py-2 rounded-xl border border-slate-800 mb-3 shadow-inner">
+                    <p className="text-[8px] text-slate-600 font-black uppercase tracking-widest mb-1 font-mono">Control Metric</p>
+                    <div className="text-xs text-blue-200/80 italic font-mono truncate">
+                      <InlineMath math={inv.metric} />
+                    </div>
                   </div>
-                  <div className="bg-emerald-500/5 px-3 py-3 rounded-xl border border-emerald-500/20 text-[11px] text-emerald-400 font-bold">{inv.threshold}</div>
+
+                  {/* 임계값 및 허용 범위 */}
+                  <div className="flex gap-2 mb-4">
+                    <div className="flex-1 bg-emerald-500/5 px-3 py-2 rounded-xl border border-emerald-500/10">
+                      <p className="text-[8px] text-emerald-600 font-black uppercase tracking-widest mb-1 font-mono text-center">Threshold</p>
+                      <div className="text-[10px] text-emerald-400 font-bold text-center leading-none">
+                        <InlineMath math={inv.threshold} />
+                      </div>
+                    </div>
+                    <div className="flex-1 bg-blue-500/5 px-3 py-2 rounded-xl border border-blue-500/10">
+                      <p className="text-[8px] text-blue-600 font-black uppercase tracking-widest mb-1 font-mono text-center">Allow Range</p>
+                      <div className="text-[10px] text-blue-300 font-bold text-center leading-none">
+                        {inv.allows?.length ?? 0} Strategies
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* 허용된 최적화 전략 태그 */}
+                  <div className="flex flex-wrap gap-1">
+                    {inv.allows?.map(a => (
+                      <span key={a} className="text-[8px] font-bold bg-slate-900 text-slate-500 px-2 py-0.5 rounded border border-slate-800 uppercase tracking-tighter group-hover:text-blue-400/70 transition-colors">
+                        + {a}
+                      </span>
+                    ))}
+                  </div>
                 </div>
               ))}
             </div>
