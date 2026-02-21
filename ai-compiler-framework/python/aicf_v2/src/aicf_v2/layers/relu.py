@@ -1,48 +1,36 @@
 from __future__ import annotations
-from .base import Layer
-from ..tensor_spec import TensorSpec
+from typing import TYPE_CHECKING
 
-from ..emitters.cuda.context import CudaEmitContext
-from ..emitters.cuda.relu import relu as emit_relu
-from ..emitters.cuda.relu_bwd import relu_bwd as emit_relu_bwd
+from .base import Layer
+from ..emitters.cuda import relu  # 통합된 relu 모듈 임포트
+
+if TYPE_CHECKING:
+    from ..emitters.cuda.context import CudaEmitContext
 
 class ReLU(Layer):
+    """
+    ReLU 활성화 함수 레이어.
+    이제 역전파 로직(emit_backward)을 직접 들고 있지 않으며,
+    통합된 relu.emit 규격에 따라 FWD 노드를 생성하는 역할만 수행합니다.
+    """
     def __init__(self, name: str):
         super().__init__(name)
 
     def emit(self, b, x: int, *, ctx: CudaEmitContext) -> int:
         """Forward: y = relu(x)"""
         x_spec = b.values[x].spec
+        
+        # 출력 Vid 생성 (Lattice: x와 동일한 spec)
         y = b.value(f"{self.name}.out", x_spec)
 
-        # ReLU 커널 호출 (KID 자동 매핑)
-        emit_relu(
+        # 통합된 relu.emit 호출
+        # 이 호출은 Builder에 'kind="relu"' 노드를 남기며, 
+        # 나중에 Mirroring BWD의 이정표가 됩니다.
+        relu.emit(
             b, ctx,
             x=x,
             out=y,
             name=f"{self.name}.relu",
         )
-        return y
-
-    def emit_backward(self, b, ctx: CudaEmitContext, inputs: list[int], outputs: list[int], grad_y: int, params: list[int] = None, **kwargs) -> dict[str, int]:
-        """
-        ReLU Bwd: dx = dy * (y > 0)
-        - outputs[0]: Forward 출력 y
-        - grad_y: 상위 미분값 dy
-        """
-        y_vid = outputs[0]
-        dy_vid = grad_y
         
-        dy_spec = b.values[dy_vid].spec
-        dx_vid = b.value(f"{self.name}.dx", dy_spec)
-
-        # 이미 준비된 relu_bwd 이미터 호출
-        emit_relu_bwd(
-            b, ctx,
-            dy=dy_vid,
-            y=y_vid,
-            out_dx=dx_vid,
-            name=f"{self.name}.relu_bwd",
-        )
-
-        return {"input": dx_vid}
+        return y

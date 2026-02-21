@@ -1,23 +1,18 @@
 from __future__ import annotations
+from typing import TYPE_CHECKING
 
 from .base import Layer
 from ..tensor_spec import TensorSpec
+from ..emitters.cuda import reduce_sum  # 통합 모듈 임포트
 
-from ..emitters.cuda.context import CudaEmitContext
-from ..emitters.cuda.reduce_sum import reduce_sum as emit_reduce_sum
-
+if TYPE_CHECKING:
+    from ..emitters.cuda.context import CudaEmitContext
 
 class ReduceSum(Layer):
     """
-    ReduceSum over axis=0 for 2D input (M,N) -> (N,) in f32.
-
-    Kernel contract:
-      inputs : [dY]
-      outputs: [dB]  (f32)
-      schema : 'RSUM'
-      payload: int64 axis
+    ReduceSum 레이어.
+    2D 입력 (M, N)에 대해 axis=0 방향으로 합산하여 (N,) 결과를 생성합니다.
     """
-
     def __init__(self, name: str, *, axis: int = 0):
         super().__init__(name)
         self.axis = int(axis)
@@ -25,21 +20,19 @@ class ReduceSum(Layer):
     def emit(self, b, x: int, *, ctx: CudaEmitContext) -> int:
         x_spec = b.values[x].spec
         if len(x_spec.shape) != 2:
-            raise ValueError(f"ReduceSum expects 2D (M,N); got shape={x_spec.shape}")
+            raise ValueError(f"ReduceSum expects 2D (M, N); got {x_spec.shape}")
 
-        M, N = x_spec.shape  # noqa: F841 (M is unused, kept for clarity)
-
-        # contract: axis must be 0 (sum over M -> N)
+        M, N = x_spec.shape
         if self.axis != 0:
-            raise ValueError(f"ReduceSum only supports axis=0; got axis={self.axis}")
+             # 현재 백엔드 제약 사항 반영
+             raise ValueError(f"ReduceSum only supports axis=0 in this version; got {self.axis}")
 
-        y = b.value(
-            f"{self.name}.out",
-            TensorSpec(shape=(N,), dtype="f32", device=x_spec.device),
-        )
+        # 출력 Spec 정의: (M, N) --axis 0--> (N,)
+        y_spec = TensorSpec(shape=(N,), dtype="f32", device=x_spec.device)
+        y = b.value(f"{self.name}.out", y_spec)
 
-        # ✅ emitter가 schema/blob/ids까지 채움
-        emit_reduce_sum(
+        # 통합된 reduce_sum.emit 호출
+        reduce_sum.emit(
             b, ctx,
             x=x,
             out=y,

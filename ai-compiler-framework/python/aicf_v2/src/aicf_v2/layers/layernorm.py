@@ -1,149 +1,63 @@
 from __future__ import annotations
+from typing import TYPE_CHECKING, Tuple, Union
 
 from .base import Layer
 from ..tensor_spec import TensorSpec
+from ..emitters.cuda import layernorm  # 통합된 layernorm 모듈 임포트
 
-from ..emitters.cuda.context import CudaEmitContext
-from ..emitters.cuda.layernorm_fwd import layernorm_fwd as emit_layernorm_fwd
-from ..emitters.cuda.layernorm_bwd import layernorm_bwd as emit_layernorm_bwd
+if TYPE_CHECKING:
+    from ..emitters.cuda.context import CudaEmitContext
 
-
-class LayerNormFwd(Layer):
+class LayerNorm(Layer):
     """
-    LayerNorm forward (2D only): x shape (M, N)
-
-    affine=False:
-      inputs : [x]
-      outputs: [y, mean(fp32[M]), rstd(fp32[M])]
-
-    affine=True:
-      inputs : [x, gamma(N), beta(N)]
-      outputs: [y, mean, rstd]
-
-    attrs schema: 'LNEP'
-    blob       : <f (eps)
+    Layer Normalization 레이어.
+    2D 입력 (M, N)을 지원하며, 학습 시 미분 가능한 부산물(mean, rstd)을 생성합니다.
     """
 
-    def __init__(self, name: str, *, eps: float = 1e-5, affine: bool = False):
+    def __init__(self, name: str, *, eps: float = 1e-5, affine: bool = True):
         super().__init__(name)
         self.eps = float(eps)
         self.affine = bool(affine)
 
-    def emit(self, b, x: int, *rest: int, ctx: CudaEmitContext):
+    def emit(self, b, x: int, *rest: int, ctx: CudaEmitContext) -> Union[int, Tuple[int, int, int]]:
+        """
+        Forward: LayerNorm 연산을 수행하고 결과를 반환합니다.
+        - affine=True:  inputs=[x, gamma, beta]
+        - affine=False: inputs=[x]
+        """
         x_spec = b.values[x].spec
         if len(x_spec.shape) != 2:
-            raise ValueError(f"LayerNormFwd expects 2D (M,N); got shape={x_spec.shape}")
+            raise ValueError(f"LayerNorm expects 2D (M, N); got shape={x_spec.shape}")
+        
         M, N = x_spec.shape
 
-        y = b.value(f"{self.name}.y", TensorSpec(shape=(M, N), dtype=x_spec.dtype, device=x_spec.device))
-        mean = b.value(f"{self.name}.mean", TensorSpec(shape=(M,), dtype="f32", device=x_spec.device))
-        rstd = b.value(f"{self.name}.rstd", TensorSpec(shape=(M,), dtype="f32", device=x_spec.device))
+        # 1. 출력 Spec 정의
+        y_spec = TensorSpec(shape=(M, N), dtype=x_spec.dtype, device=x_spec.device)
+        # 부산물은 수치 안정성을 위해 fp32[M] 고정
+        stat_spec = TensorSpec(shape=(M,), dtype="f32", device=x_spec.device)
 
+        y = b.value(f"{self.name}.y", y_spec)
+        mean = b.value(f"{self.name}.mean", stat_spec)
+        rstd = b.value(f"{self.name}.rstd", stat_spec)
+
+        # 2. 인자 구성
         if self.affine:
             if len(rest) != 2:
-                raise ValueError(f"LayerNormFwd(affine) expects (x,gamma,beta); got {1+len(rest)} args")
+                raise ValueError(f"LayerNorm(affine=True) expects (x, gamma, beta); got {1+len(rest)} args")
             gamma, beta = rest
-            g_spec = b.values[gamma].spec
-            be_spec = b.values[beta].spec
-            if tuple(g_spec.shape) != (N,) or tuple(be_spec.shape) != (N,):
-                raise ValueError(f"LayerNormFwd gamma/beta must be (N,) where N={N}")
-            if g_spec.dtype != x_spec.dtype or be_spec.dtype != x_spec.dtype:
-                raise ValueError("LayerNormFwd gamma/beta dtype must match x dtype")
-            if g_spec.device != x_spec.device or be_spec.device != x_spec.device:
-                raise ValueError("LayerNormFwd gamma/beta device must match x device")
             ins = [x, gamma, beta]
         else:
-            if len(rest) != 0:
-                raise ValueError(f"LayerNormFwd(noaff) expects (x) only; got {1+len(rest)} args")
             ins = [x]
 
-        emit_layernorm_fwd(
+        # 3. 통합된 layernorm.emit 호출
+        # 이제 emit_backward를 직접 구현하지 않아도 Context가 이 노드를 보고 역연산을 생성합니다.
+        layernorm.emit(
             b, ctx,
             inputs=ins,
             outputs=[y, mean, rstd],
             eps=self.eps,
-            name=f"{self.name}.layernorm_fwd",
+            name=f"{self.name}.fwd",
         )
+
+        # 학습 시에는 부산물까지 반환하여 후속 레이어에서 참조 가능하게 함
         return y, mean, rstd
-
-
-class LayerNormBwd(Layer):
-    """
-    LayerNorm backward (2D only): x,dy shape (M,N)
-
-    affine=False:
-      inputs : [x, dy, mean(fp32[M]), rstd(fp32[M])]
-      outputs: [dx]
-
-    affine=True:
-      inputs : [x, dy, gamma(N), mean, rstd]
-      outputs: [dx, dgamma(fp32[N]), dbeta(fp32[N])]
-    """
-
-    def __init__(self, name: str, *, affine: bool = False):
-        super().__init__(name)
-        self.affine = bool(affine)
-
-    def emit(self, b, x: int, dy: int, *rest: int, ctx: CudaEmitContext):
-        x_spec = b.values[x].spec
-        dy_spec = b.values[dy].spec
-        if len(x_spec.shape) != 2:
-            raise ValueError(f"LayerNormBwd expects 2D (M,N); got shape={x_spec.shape}")
-        if tuple(dy_spec.shape) != tuple(x_spec.shape):
-            raise ValueError(f"LayerNormBwd shape mismatch: x={x_spec.shape} dy={dy_spec.shape}")
-        if dy_spec.dtype != x_spec.dtype or dy_spec.device != x_spec.device:
-            raise ValueError("LayerNormBwd dtype/device mismatch between x and dy")
-
-        M, N = x_spec.shape
-        dx = b.value(f"{self.name}.dx", TensorSpec(shape=(M, N), dtype=x_spec.dtype, device=x_spec.device))
-
-        if self.affine:
-            if len(rest) != 3:
-                raise ValueError(f"LayerNormBwd(affine) expects (x,dy,gamma,mean,rstd); got {2+len(rest)} args")
-            gamma, mean, rstd = rest
-            g_spec = b.values[gamma].spec
-            m_spec = b.values[mean].spec
-            r_spec = b.values[rstd].spec
-
-            if tuple(g_spec.shape) != (N,):
-                raise ValueError(f"LayerNormBwd gamma must be (N,) where N={N}")
-            if g_spec.dtype != x_spec.dtype or g_spec.device != x_spec.device:
-                raise ValueError("LayerNormBwd gamma dtype/device must match x")
-            if tuple(m_spec.shape) != (M,) or tuple(r_spec.shape) != (M,):
-                raise ValueError(f"LayerNormBwd mean/rstd must be (M,) where M={M}")
-            if m_spec.dtype != "f32" or r_spec.dtype != "f32":
-                raise ValueError("LayerNormBwd mean/rstd must be f32")
-            if m_spec.device != x_spec.device or r_spec.device != x_spec.device:
-                raise ValueError("LayerNormBwd mean/rstd device must match x")
-
-            dgamma = b.value(f"{self.name}.dgamma", TensorSpec(shape=(N,), dtype="f32", device=x_spec.device))
-            dbeta = b.value(f"{self.name}.dbeta", TensorSpec(shape=(N,), dtype="f32", device=x_spec.device))
-
-            emit_layernorm_bwd(
-                b, ctx,
-                inputs=[x, dy, gamma, mean, rstd],
-                outputs=[dx, dgamma, dbeta],
-                name=f"{self.name}.layernorm_bwd",
-            )
-            return dx, dgamma, dbeta
-
-        else:
-            if len(rest) != 2:
-                raise ValueError(f"LayerNormBwd(noaff) expects (x,dy,mean,rstd); got {2+len(rest)} args")
-            mean, rstd = rest
-            m_spec = b.values[mean].spec
-            r_spec = b.values[rstd].spec
-            if tuple(m_spec.shape) != (M,) or tuple(r_spec.shape) != (M,):
-                raise ValueError(f"LayerNormBwd mean/rstd must be (M,) where M={M}")
-            if m_spec.dtype != "f32" or r_spec.dtype != "f32":
-                raise ValueError("LayerNormBwd mean/rstd must be f32")
-            if m_spec.device != x_spec.device or r_spec.device != x_spec.device:
-                raise ValueError("LayerNormBwd mean/rstd device must match x")
-
-            emit_layernorm_bwd(
-                b, ctx,
-                inputs=[x, dy, mean, rstd],
-                outputs=[dx],
-                name=f"{self.name}.layernorm_bwd",
-            )
-            return dx

@@ -1,42 +1,30 @@
 from __future__ import annotations
+from typing import TYPE_CHECKING
 
 from .base import Layer
 from ..tensor_spec import TensorSpec
+from ..emitters.cuda import sgd_step  # 통합 모듈 임포트
 
-from ..emitters.cuda.context import CudaEmitContext
-from ..emitters.cuda.sgd_step import sgd_step as emit_sgd_step
-
+if TYPE_CHECKING:
+    from ..emitters.cuda.context import CudaEmitContext
 
 class SgdStep(Layer):
     """
-    SGD step kernel wrapper.
-
-    Contract:
-      inputs : [P, G]
-      outputs: [Pout]
-      schema : 'SGDS'
-      blob   : <f lr>
+    SGD 가중치 업데이트 레이어.
+    Contract: P_new = P - lr * G
     """
-
     def __init__(self, name: str, *, lr: float = 1e-3):
         super().__init__(name)
         self.lr = float(lr)
 
     def emit(self, b, P: int, G: int, *, ctx: CudaEmitContext) -> int:
         P_spec = b.values[P].spec
-        G_spec = b.values[G].spec
-
-        if tuple(G_spec.shape) != tuple(P_spec.shape):
-            raise ValueError(f"SgdStep shape mismatch: P={P_spec.shape} G={G_spec.shape}")
-        if G_spec.dtype != P_spec.dtype:
-            raise ValueError(f"SgdStep dtype mismatch: P={P_spec.dtype} G={G_spec.dtype}")
-        if G_spec.device != P_spec.device:
-            raise ValueError(f"SgdStep device mismatch: P={P_spec.device} G={G_spec.device}")
-
-        # keep separate; planner may alias/inplace later
+        
+        # 출력 Vid 생성 (Lattice: P와 동일한 spec)
         Pout = b.value(f"{self.name}.P", TensorSpec(shape=P_spec.shape, dtype=P_spec.dtype, device=P_spec.device))
 
-        emit_sgd_step(
+        # 통합된 sgd_step.emit 호출
+        sgd_step.emit(
             b, ctx,
             P=P,
             G=G,

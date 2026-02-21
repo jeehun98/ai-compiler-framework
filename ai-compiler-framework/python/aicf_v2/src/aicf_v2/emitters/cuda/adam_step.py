@@ -1,12 +1,12 @@
 from __future__ import annotations
 import struct
+from typing import Any, Dict
 
 from ...builder import Builder
 from .context import CudaEmitContext
 from .base import emit_resolved
 
-
-def adam_step(
+def emit(
     b: Builder,
     ctx: CudaEmitContext,
     *,
@@ -27,19 +27,19 @@ def adam_step(
     constraints: dict | None = None,
     hints: dict | None = None,
 ) -> int:
+    """Adam Optimizer의 가중치 업데이트 연산을 IR에 기록합니다."""
     lr_f = float(lr)
     b1 = float(beta1)
     b2 = float(beta2)
     eps_f = float(eps)
+    
+    # ADAM Schema: [lr, beta1, beta2, eps] (f32 x 4)
     blob = struct.pack("<ffff", lr_f, b1, b2, eps_f)
 
-    # ABI: backend expects rank0 scalars for bc1/bc2; v2 uses (1,)
+    # ABI: 백엔드는 bc1, bc2를 rank0 스칼라 뷰로 기대함
     abi_hints = {"view_rank0_inputs": [4, 5]}
-
-    # merge optional hints
-    merged_hints = dict(abi_hints)
     if hints:
-        merged_hints.update(hints)
+        abi_hints.update(hints)
 
     return emit_resolved(
         b,
@@ -51,6 +51,11 @@ def adam_step(
         attr_schema=ctx.SCHEMA_ADAM,
         attr_blob=blob,
         attrs={"lr": lr_f, "beta1": b1, "beta2": b2, "eps": eps_f},
+        # 기본적으로 Inplace 업데이트를 선호함 (Lattice Optimization)
         constraints=constraints or {"inplace_ok": True},
-        hints=merged_hints,
+        hints=abi_hints,
     )
+
+def emit_bwd(b: Builder, ctx: CudaEmitContext, fwd_node: Any, grad_y: int) -> Dict[int, int]:
+    """Adam Step은 업데이트의 최종 단계이므로 역전파가 발생하지 않습니다."""
+    return {}

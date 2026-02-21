@@ -1,26 +1,13 @@
 from __future__ import annotations
+from typing import TYPE_CHECKING, Tuple
 
 from .base import Layer
+from ..emitters.cuda import adam_step  # 통합 모듈 임포트
 
-from ..emitters.cuda.context import CudaEmitContext
-from ..emitters.cuda.adam_step import adam_step as emit_adam_step
-
+if TYPE_CHECKING:
+    from ..emitters.cuda.context import CudaEmitContext
 
 class AdamStep(Layer):
-    """
-    Adam step kernel wrapper.
-
-    Contract (matches your _C.op_call test):
-      inputs : P, G, M, V, bc1, bc2
-      outputs: Pout, Mout, Vout
-      attr_blob: <ffff = lr, beta1, beta2, eps
-      schema: 'ADAM'
-
-    Notes:
-      - bc1, bc2 are scalar tensors (rank0) on same device/dtype as P
-      - outputs are separate values; planner may alias/inplace later.
-    """
-
     def __init__(
         self,
         name: str,
@@ -36,57 +23,28 @@ class AdamStep(Layer):
         self.beta2 = float(beta2)
         self.eps = float(eps)
 
-    def emit(self, b, P: int, G: int, M: int, V: int, bc1: int, bc2: int, *, ctx: CudaEmitContext):
+    def emit(self, b, P: int, G: int, M: int, V: int, bc1: int, bc2: int, *, ctx: CudaEmitContext) -> Tuple[int, int, int]:
+        """Adam 업데이트 그래프를 빌드합니다."""
         P_spec = b.values[P].spec
-        G_spec = b.values[G].spec
         M_spec = b.values[M].spec
         V_spec = b.values[V].spec
-        bc1_spec = b.values[bc1].spec
-        bc2_spec = b.values[bc2].spec
 
-        # --- basic checks (keep strict for bring-up) ---
-        if P_spec.dtype != "f32":
-            raise ValueError(f"AdamStep expects f32 params; got P.dtype={P_spec.dtype}")
-        for nm, s in [("G", G_spec), ("M", M_spec), ("V", V_spec)]:
-            if s.dtype != P_spec.dtype:
-                raise ValueError(f"AdamStep dtype mismatch: P={P_spec.dtype} {nm}={s.dtype}")
-            if s.device != P_spec.device:
-                raise ValueError(f"AdamStep device mismatch: P={P_spec.device} {nm}={s.device}")
-            if tuple(s.shape) != tuple(P_spec.shape):
-                raise ValueError(f"AdamStep shape mismatch: P.shape={P_spec.shape} {nm}.shape={s.shape}")
-
-        # bc1/bc2 must be scalar (v2: allow (1,) since 0d is forbidden)
-        for nm, s in [("bc1", bc1_spec), ("bc2", bc2_spec)]:
-            if s.dtype != P_spec.dtype:
-                raise ValueError(f"AdamStep dtype mismatch: P={P_spec.dtype} {nm}={s.dtype}")
-            if s.device != P_spec.device:
-                raise ValueError(f"AdamStep device mismatch: P={P_spec.device} {nm}={s.device}")
-            if tuple(s.shape) not in (tuple(()), (1,)):
-                raise ValueError(f"AdamStep expects {nm} as scalar tensor; got shape={s.shape}")
-
-        # outputs (same spec as P/M/V)
+        # 1. 출력 Vid 생성 (Lattice: spec을 그대로 복사하여 정밀도 유지)
         Pout = b.value(f"{self.name}.P", P_spec)
         Mout = b.value(f"{self.name}.M", M_spec)
         Vout = b.value(f"{self.name}.V", V_spec)
 
-        # ✅ emitter가 kind_id/schema/blob까지 채움
-        emit_adam_step(
+        # 2. 통합된 adam_step.emit 호출
+        adam_step.emit(
             b, ctx,
-            P=P,
-            G=G,
-            M=M,
-            V=V,
-            bc1=bc1,
-            bc2=bc2,
-            outP=Pout,
-            outM=Mout,
-            outV=Vout,
+            P=P, G=G, M=M, V=V,
+            bc1=bc1, bc2=bc2,
+            outP=Pout, outM=Mout, outV=Vout,
             lr=self.lr,
             beta1=self.beta1,
             beta2=self.beta2,
             eps=self.eps,
-            name=f"{self.name}.adam_step",
-            constraints={"inplace_ok": True},
+            name=f"{self.name}.adam_step"
         )
 
         return Pout, Mout, Vout

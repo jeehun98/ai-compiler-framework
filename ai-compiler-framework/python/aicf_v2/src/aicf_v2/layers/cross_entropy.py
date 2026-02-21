@@ -1,37 +1,44 @@
 from __future__ import annotations
+from typing import TYPE_CHECKING
+
 from .base import Layer
 from ..tensor_spec import TensorSpec
-from ..emitters.cuda.cross_entropy import cross_entropy_fwd, cross_entropy_bwd
+from ..emitters.cuda import cross_entropy  # 통합된 모듈 임포트
+
+if TYPE_CHECKING:
+    from ..emitters.cuda.context import CudaEmitContext
+
+# aicf_v2/layers/cross_entropy.py
 
 class CrossEntropyLoss(Layer):
-    def __init__(self, ignore_index: int = -100, reduction: str = "mean", name: str = "xent"):
-        super().__init__(name)
+    def __init__(self, reduction: str = "mean", ignore_index: int = -100, name: str = "xent"):
+        super().__init__(name=name)
+        # 1. 여기서 필드명을 확실히 저장합니다.
+        self.reduction = reduction 
         self.ignore_index = ignore_index
-        self.reduction_id = 0 if reduction == "mean" else 1
 
-    def emit(self, b, logits: int, targets: int, *, ctx) -> int:
-        out_spec = TensorSpec(shape=(1,), dtype="f32", device=b.device)
-        out = b.value(f"{self.name}.out", out_spec)
+    def emit(self, b, logits_vid, targets_vid, ctx, out_spec=None, **kwargs):
+        from ..emitters.cuda import cross_entropy as emit_xent
+        from ..tensor_spec import TensorSpec
 
-        cross_entropy_fwd(
-            b, ctx, logits=logits, targets=targets, out=out,
-            ignore_index=self.ignore_index, reduction=self.reduction_id,
-            name=f"{self.name}.fwd"
-        )
-        return out
-
-    def emit_backward(self, b, ctx, inputs, outputs, grad_y, **kwargs) -> dict[str, int]:
-        logits = inputs[0]
-        targets = inputs[1]
+        # 출력 Spec 설정 (앞서 협의한 대로 [1] 형상 강제)
+        if out_spec is None:
+            out_spec = TensorSpec(shape=(1,), dtype="f32", device=b.device)
         
-        d_logits = b.value(f"{self.name}.d_logits", b.values[logits].spec)
+        out_vid = b.value(f"{self.name}.out", out_spec)
 
-        cross_entropy_bwd(
-            b, ctx, 
-            logits=logits, targets=targets, grad_out=grad_y, 
-            out_dlogits=d_logits,
-            ignore_index=self.ignore_index, reduction=self.reduction_id,
-            name=f"{self.name}.bwd"
+        # 2. self.reduction 값을 읽어 Emitter에 전달
+        # 만약 self.reduction_id 같은 이름을 쓰고 싶다면 아래도 통일해야 합니다.
+        reduction_mode = 0 if self.reduction == "mean" else 1
+
+        emit_xent.emit(
+            b, ctx,
+            logits=logits_vid,
+            targets=targets_vid,
+            out=out_vid,
+            ignore_index=self.ignore_index,
+            reduction=reduction_mode,
+            name=self.name
         )
 
-        return {"input": d_logits}
+        return out_vid
