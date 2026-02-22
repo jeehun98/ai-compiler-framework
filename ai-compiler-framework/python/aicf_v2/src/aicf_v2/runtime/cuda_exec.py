@@ -1,7 +1,7 @@
 # python/aicf_v2/src/aicf_v2/runtime/cuda_exec.py
 
 from __future__ import annotations
-from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING, Set, List
+from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING, List, Set
 
 import torch
 
@@ -17,22 +17,23 @@ from ..backends.cuda.bridge import op_call, current_stream_u64
 from .alloc import bind_and_alloc_slots
 from .graph_capture import GraphCapturedProgram, capture_cuda_graph, replay_cuda_graph
 
+
 def _role_vids(b: Builder, role: str) -> List[int]:
     """Builder에서 특정 역할의 vid 리스트를 추출하는 헬퍼 함수"""
-    if role == "input": return list(getattr(b, "input_vids", []))
-    if role == "param": return list(getattr(b, "param_vids", []))
-    if role == "state": return list(getattr(b, "state_vids", []))
+    if role == "input":
+        return list(getattr(b, "input_vids", []))
+    if role == "param":
+        return list(getattr(b, "param_vids", []))
+    if role == "state":
+        return list(getattr(b, "state_vids", []))
     return []
 
-def _tensor_sig(t: torch.Tensor) -> Tuple[Tuple[int, ...], str, str]:
-    return (tuple(t.shape), str(t.dtype), str(t.device))
 
-def _feed_signature(b: Builder, feed: Dict[str, torch.Tensor], copy_names: set[str]) -> Tuple:
+def _feed_signature(b: Builder, feed: Dict[str, torch.Tensor], copy_names: Set[str]) -> Tuple:
     """실제로 복사될(copy_roles) 텐서들에 대해서만 시그니처를 생성합니다."""
     items = []
     for name in copy_names:
         if name not in feed:
-            # Replay 시점에 입력 데이터(g 등)가 없으면 에러
             raise KeyError(f"Missing feed for required input '{name}'")
         t = feed[name]
         items.append((name, (tuple(t.shape), str(t.dtype), str(t.device))))
@@ -75,29 +76,35 @@ class CudaExecutor:
         return prog
 
     def capture_prebuilt(
-        self, 
-        m: Model, 
-        prog: CompiledProgram, 
+        self,
+        m: Model,
+        prog: CompiledProgram,
         sample_feed: Dict[str, torch.Tensor],
-        mode: str = "train"
+        *,
+        mode: str = "train",
+        warmup: int = 1,
     ) -> GraphCapturedProgram:
         """
         [Pre-capture] 실제 실행 루프 진입 전, 컴파일 단계에서 CUDA Graph를 미리 캡처합니다.
         """
         static_roles, copy_roles = self._get_roles(mode)
-        key = self._cache_key(m, prog, sample_feed, mode=mode, 
-                               static_roles=static_roles, copy_roles=copy_roles)
-        
+        key = self._cache_key(
+            m, prog, sample_feed,
+            mode=mode,
+            static_roles=static_roles,
+            copy_roles=copy_roles,
+        )
+
         if key not in self._graph_cache:
-            # warmup=1로 설정하여 즉시 캡처를 수행합니다.
             gprog = capture_cuda_graph(
                 m, prog, sample_feed,
-                stream=None, warmup=1,
+                stream=None,
+                warmup=warmup,
                 static_roles=static_roles,
                 copy_roles=copy_roles,
             )
             self._graph_cache[key] = gprog
-            
+
         return self._graph_cache[key]
 
     def _get_roles(self, mode: str) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
@@ -108,20 +115,26 @@ class CudaExecutor:
         # 추론 모드: 파라미터만 고정합니다.
         return ("input", "param"), ("input",)
 
-
-
-    def _cache_key(self, m: Model, prog: CompiledProgram, feed: Dict[str, torch.Tensor], 
-                   mode: str, static_roles: Tuple[str, ...], copy_roles: Tuple[str, ...]):
+    def _cache_key(
+        self,
+        m: Model,
+        prog: CompiledProgram,
+        feed: Dict[str, torch.Tensor],
+        *,
+        mode: str,
+        static_roles: Tuple[str, ...],
+        copy_roles: Tuple[str, ...],
+    ):
         b = m.b
         plan_key = getattr(prog.plan, "plan_id", None) or id(prog.plan)
-        
-        # 1. 이번 모드에서 실제로 외부에서 주입(copy)받아야 할 이름들 추출
-        copy_names = set()
+
+        # 이번 모드에서 실제로 외부에서 주입(copy)받아야 할 이름들 추출
+        copy_names: Set[str] = set()
         for r in copy_roles:
-            for vid in _role_vids(b, r): # self._role_vids가 아닌 외부 함수 호출
+            for vid in _role_vids(b, r):
                 copy_names.add(b.values[vid].name)
-        
-        # 2. copy_names에 대해서만 피드 체크 수행 (w, m, v 등 static은 무시)
+
+        # copy_names에 대해서만 피드 체크 수행 (w, m, v 등 static은 무시)
         return (mode, plan_key, static_roles, copy_roles, _feed_signature(b, feed, copy_names))
 
     def run_compiled(
@@ -146,14 +159,19 @@ class CudaExecutor:
                 raise NotImplementedError("CUDA Graph with explicit stream is not supported yet")
 
             static_roles, copy_roles = self._get_roles(mode)
-            key = self._cache_key(m, prog, feed, mode=mode, 
-                                   static_roles=static_roles, copy_roles=copy_roles)
+            key = self._cache_key(
+                m, prog, feed,
+                mode=mode,
+                static_roles=static_roles,
+                copy_roles=copy_roles,
+            )
 
             gprog = self._graph_cache.get(key)
             if gprog is None:
                 # 미리 캡처되지 않은 경우 실행 시점에 캡처를 수행합니다.
-                gprog = self.capture_prebuilt(m, prog, feed, mode=mode)
-            
+                # run_compiled의 warmup 값을 반영합니다.
+                gprog = self.capture_prebuilt(m, prog, feed, mode=mode, warmup=warmup)
+
             return replay_cuda_graph(m, gprog, feed)
 
         # -------------------------
@@ -175,8 +193,11 @@ class CudaExecutor:
             outs = [slots[v] for v in op.outputs]
 
             op_call(
-                int(op.kind_id), ins, outs,
-                int(op.attr_schema), op.attr_blob,
+                int(op.kind_id),
+                ins,
+                outs,
+                int(op.attr_schema),
+                op.attr_blob,
                 stream=stream_u64,
             )
 

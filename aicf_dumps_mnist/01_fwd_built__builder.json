@@ -1,0 +1,275 @@
+{
+  "stage": "01_fwd_built",
+  "values_container_type": "list",
+  "num_values": 12,
+  "num_ops": 6,
+  "input_vids": [
+    0,
+    10
+  ],
+  "param_vids": [
+    1,
+    3,
+    6,
+    8
+  ],
+  "state_vids": [],
+  "external_vids": [
+    0,
+    1,
+    3,
+    6,
+    8,
+    10
+  ],
+  "output_map": {
+    "output": 9,
+    "prob": 9,
+    "loss": 11
+  },
+  "values": {
+    "0": {
+      "vid": 0,
+      "name": "x",
+      "kind": null,
+      "spec": {
+        "shape": [
+          64,
+          784
+        ],
+        "dtype": "f32",
+        "device": "cuda"
+      }
+    },
+    "1": {
+      "vid": 1,
+      "name": "fc1.W",
+      "kind": null,
+      "spec": {
+        "shape": [
+          128,
+          784
+        ],
+        "dtype": "f32",
+        "device": "cuda"
+      }
+    },
+    "2": {
+      "vid": 2,
+      "name": "fc1.out_gemm",
+      "kind": null,
+      "spec": {
+        "shape": [
+          64,
+          128
+        ],
+        "dtype": "f32",
+        "device": "cuda"
+      }
+    },
+    "3": {
+      "vid": 3,
+      "name": "fc1.b",
+      "kind": null,
+      "spec": {
+        "shape": [
+          128
+        ],
+        "dtype": "f32",
+        "device": "cuda"
+      }
+    },
+    "4": {
+      "vid": 4,
+      "name": "fc1.out",
+      "kind": null,
+      "spec": {
+        "shape": [
+          64,
+          128
+        ],
+        "dtype": "f32",
+        "device": "cuda"
+      }
+    },
+    "5": {
+      "vid": 5,
+      "name": "relu1.out",
+      "kind": null,
+      "spec": {
+        "shape": [
+          64,
+          128
+        ],
+        "dtype": "f32",
+        "device": "cuda"
+      }
+    },
+    "6": {
+      "vid": 6,
+      "name": "fc2.W",
+      "kind": null,
+      "spec": {
+        "shape": [
+          10,
+          128
+        ],
+        "dtype": "f32",
+        "device": "cuda"
+      }
+    },
+    "7": {
+      "vid": 7,
+      "name": "fc2.out_gemm",
+      "kind": null,
+      "spec": {
+        "shape": [
+          64,
+          10
+        ],
+        "dtype": "f32",
+        "device": "cuda"
+      }
+    },
+    "8": {
+      "vid": 8,
+      "name": "fc2.b",
+      "kind": null,
+      "spec": {
+        "shape": [
+          10
+        ],
+        "dtype": "f32",
+        "device": "cuda"
+      }
+    },
+    "9": {
+      "vid": 9,
+      "name": "fc2.out",
+      "kind": null,
+      "spec": {
+        "shape": [
+          64,
+          10
+        ],
+        "dtype": "f32",
+        "device": "cuda"
+      }
+    },
+    "10": {
+      "vid": 10,
+      "name": "y_true",
+      "kind": null,
+      "spec": {
+        "shape": [
+          64
+        ],
+        "dtype": "i32",
+        "device": "cuda"
+      }
+    },
+    "11": {
+      "vid": 11,
+      "name": "loss.out",
+      "kind": null,
+      "spec": {
+        "shape": [
+          1
+        ],
+        "dtype": "f32",
+        "device": "cuda"
+      }
+    }
+  },
+  "ops": [
+    {
+      "i": 0,
+      "kind": "gemm",
+      "name": "fc1.gemm",
+      "inputs": [
+        0,
+        1
+      ],
+      "outputs": [
+        2
+      ],
+      "hints": {},
+      "attr_schema": 0,
+      "attr_blob_len": 8
+    },
+    {
+      "i": 1,
+      "kind": "bias_add",
+      "name": "fc1.bias_add",
+      "inputs": [
+        2,
+        3
+      ],
+      "outputs": [
+        4
+      ],
+      "hints": {},
+      "attr_schema": 1145323842,
+      "attr_blob_len": 8
+    },
+    {
+      "i": 2,
+      "kind": "relu",
+      "name": "relu1.relu",
+      "inputs": [
+        4
+      ],
+      "outputs": [
+        5
+      ],
+      "hints": {},
+      "attr_schema": 0,
+      "attr_blob_len": 0
+    },
+    {
+      "i": 3,
+      "kind": "gemm",
+      "name": "fc2.gemm",
+      "inputs": [
+        5,
+        6
+      ],
+      "outputs": [
+        7
+      ],
+      "hints": {},
+      "attr_schema": 0,
+      "attr_blob_len": 8
+    },
+    {
+      "i": 4,
+      "kind": "bias_add",
+      "name": "fc2.bias_add",
+      "inputs": [
+        7,
+        8
+      ],
+      "outputs": [
+        9
+      ],
+      "hints": {},
+      "attr_schema": 1145323842,
+      "attr_blob_len": 8
+    },
+    {
+      "i": 5,
+      "kind": "cross_entropy",
+      "name": "loss",
+      "inputs": [
+        9,
+        10
+      ],
+      "outputs": [
+        11
+      ],
+      "hints": {},
+      "attr_schema": 1414415704,
+      "attr_blob_len": 8
+    }
+  ]
+}

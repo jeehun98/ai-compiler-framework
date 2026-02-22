@@ -37,14 +37,14 @@ class CudaEmitContext:
 
     # --- Schema IDs (Lattice ABI 규격) ---
     # 프로젝트에서 약속된 4바이트 Magic Number들입니다.
-    SCHEMA_ADAM: int = 0x4144414D  # 'ADAM'
-    SCHEMA_BNEP: int = 0x424E4550  # 'BNEP'
-    SCHEMA_LNEP: int = 0x4C4E4550  # 'LNEP'
-    SCHEMA_BADD: int = 0x42414444  # 'BADD'
-    SCHEMA_BCOR: int = 0x42434F52  # 'BCOR'
-    SCHEMA_RSUM: int = 0x5253554D  # 'RSUM'
-    SCHEMA_MSEG: int = 0x4D534547  # 'MSEG'
-    SCHEMA_XENT: int = 0x58454E54  # 'XENT'
+    SCHEMA_ADAM: int = 0x4D414441  # 'ADAM' (LE)
+    SCHEMA_BNEP: int = 0x50454E42  # 'BNEP' (LE)
+    SCHEMA_LNEP: int = 0x50454E4C  # 'LNEP' (LE)
+    SCHEMA_BADD: int = 0x44444142  # 'BADD' (LE)
+    SCHEMA_BCOR: int = 0x524F4342  # 'BCOR' (LE)
+    SCHEMA_RSUM: int = 0x4D555352  # 'RSUM' (LE)
+    SCHEMA_MSEG: int = 0x4745534D  # 'MSEG' (LE)
+    SCHEMA_XENT: int = 0x544E4558  # 'XENT' (LE) <- 핵심 수정 포인트
 
     # ---- 3. Dynamic Dispatcher (Mirroring BWD Core) ----
     # 로드된 모듈을 캐싱하여 성능 최적화

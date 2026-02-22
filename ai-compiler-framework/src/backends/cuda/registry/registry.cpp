@@ -4,7 +4,6 @@
 #include <mutex>
 #include <vector>
 #include <string>
-#include <cstdio> // printf 추가
 
 #include "aicf/backends/cuda/registry/attr_blob.hpp"
 #include "aicf/backends/cuda/registry/register_all.hpp"
@@ -29,27 +28,32 @@ static Status DispatchById(const OpCall& call, const char* kernel_id) {
 
     const KernelVariant* chosen = KernelRegistry::instance().find_by_id(call.kind, kernel_id);
     
-    // 디버그 로그: ID로 직접 호출할 때
+    /* [DEBUG]
     if (call.kind == OpKind::CrossEntropyFwd) {
         std::printf("[AICF-DEBUG] DispatchById: kind=XENT, kernel_id=%s, found=%s\n", 
                     kernel_id, chosen ? "YES" : "NO");
     }
+    */
 
     if (!chosen) return Status::NotImplemented;
     if (!chosen->supported || !chosen->launch) return Status::NotImplemented;
 
     if (chosen->expected_attr_schema_id != 0 && attrs->schema_id != chosen->expected_attr_schema_id) {
+        /* [DEBUG]
         if (call.kind == OpKind::CrossEntropyFwd) {
             std::printf("[AICF-DEBUG] XENT Schema mismatch: Expected 0x%08x, Got 0x%08x\n", 
                         chosen->expected_attr_schema_id, attrs->schema_id);
         }
+        */
         return Status::InvalidArgument;
     }
 
     if (!chosen->supported(call.inputs, call.num_inputs, call.outputs, call.num_outputs, attr_ptr)) {
+        /* [DEBUG]
         if (call.kind == OpKind::CrossEntropyFwd) {
             std::printf("[AICF-DEBUG] XENT supported() returned FALSE for ID: %s\n", kernel_id);
         }
+        */
         return Status::InvalidArgument;
     }
 
@@ -118,10 +122,11 @@ Status Dispatch(const OpCall& call) {
     std::vector<const KernelVariant*> vars;
     KernelRegistry::instance().variants_snapshot(call.kind, vars);
 
-    // 디버그 로그: 변체 탐색 시작
+    /* [DEBUG]
     if (call.kind == OpKind::CrossEntropyFwd || call.kind == OpKind::ReduceSum || call.kind == OpKind::Gemm) {
         std::printf("[AICF-DEBUG] Dispatch: kind=XENT, found_variants=%zu\n", vars.size());
     }
+    */
 
     if (vars.empty()) return Status::NotImplemented;
 
@@ -129,21 +134,27 @@ Status Dispatch(const OpCall& call) {
     for (const auto* v : vars) {
         if (!v || !v->supported || !v->launch) continue;
 
+        /* [DEBUG]
         if (call.kind == OpKind::CrossEntropyFwd || call.kind == OpKind::Gemm) {
             std::printf("[AICF-DEBUG] Checking variant: %s\n", v->kernel_id ? v->kernel_id : "unnamed");
         }
+        */
 
         if (v->expected_attr_schema_id != 0 && attrs->schema_id != v->expected_attr_schema_id) {
+            /* [DEBUG]
             if (call.kind == OpKind::CrossEntropyFwd || call.kind == OpKind::Gemm) {
                 std::printf("  -> Schema mismatch (0x%08x vs 0x%08x)\n", v->expected_attr_schema_id, attrs->schema_id);
             }
+            */
             continue;
         }
 
         bool ok = v->supported(call.inputs, call.num_inputs, call.outputs, call.num_outputs, attr_ptr);
+        /* [DEBUG]
         if (call.kind == OpKind::CrossEntropyFwd || call.kind == OpKind::Gemm) {
             std::printf("  -> supported() call: %s\n", ok ? "TRUE" : "FALSE");
         }
+        */
 
         if (ok) {
             chosen = v;
@@ -152,9 +163,11 @@ Status Dispatch(const OpCall& call) {
     }
 
     if (!chosen) {
+        /* [DEBUG]
         if (call.kind == OpKind::CrossEntropyFwd) {
             std::printf("[AICF-DEBUG] XENT Dispatch failed: No variant passed supported() check.\n");
         }
+        */
         return Status::NotImplemented;
     }
 

@@ -1,0 +1,353 @@
+{
+  "stage": "03_compiled_plan",
+  "plan_id": null,
+  "num_ops": 18,
+  "alias": {
+    "4": 2,
+    "9": 7,
+    "25": 8,
+    "26": 23,
+    "27": 24,
+    "30": 6,
+    "31": 28,
+    "32": 29,
+    "35": 3,
+    "36": 33,
+    "37": 34,
+    "40": 1,
+    "41": 38,
+    "42": 39
+  },
+  "ops": [
+    {
+      "i": 0,
+      "kind": "gemm",
+      "name": "fc1.gemm",
+      "inputs": [
+        0,
+        1
+      ],
+      "outputs": [
+        2
+      ],
+      "kind_id": 2,
+      "attr_schema": 0,
+      "attr_blob_len": 8,
+      "hints": {}
+    },
+    {
+      "i": 1,
+      "kind": "bias_add",
+      "name": "fc1.bias_add",
+      "inputs": [
+        2,
+        3
+      ],
+      "outputs": [
+        4
+      ],
+      "kind_id": 3,
+      "attr_schema": 1145323842,
+      "attr_blob_len": 8,
+      "hints": {}
+    },
+    {
+      "i": 2,
+      "kind": "relu",
+      "name": "relu1.relu",
+      "inputs": [
+        4
+      ],
+      "outputs": [
+        5
+      ],
+      "kind_id": 1,
+      "attr_schema": 0,
+      "attr_blob_len": 0,
+      "hints": {}
+    },
+    {
+      "i": 3,
+      "kind": "gemm",
+      "name": "fc2.gemm",
+      "inputs": [
+        5,
+        6
+      ],
+      "outputs": [
+        7
+      ],
+      "kind_id": 2,
+      "attr_schema": 0,
+      "attr_blob_len": 8,
+      "hints": {}
+    },
+    {
+      "i": 4,
+      "kind": "bias_add",
+      "name": "fc2.bias_add",
+      "inputs": [
+        7,
+        8
+      ],
+      "outputs": [
+        9
+      ],
+      "kind_id": 3,
+      "attr_schema": 1145323842,
+      "attr_blob_len": 8,
+      "hints": {}
+    },
+    {
+      "i": 5,
+      "kind": "cross_entropy",
+      "name": "loss",
+      "inputs": [
+        9,
+        10
+      ],
+      "outputs": [
+        11
+      ],
+      "kind_id": 21,
+      "attr_schema": 1414415704,
+      "attr_blob_len": 8,
+      "hints": {}
+    },
+    {
+      "i": 6,
+      "kind": "cross_entropy_bwd",
+      "name": "cross_entropy_bwd",
+      "inputs": [
+        9,
+        10,
+        12
+      ],
+      "outputs": [
+        13
+      ],
+      "kind_id": 22,
+      "attr_schema": 1414415704,
+      "attr_blob_len": 8,
+      "hints": {}
+    },
+    {
+      "i": 7,
+      "kind": "reduce_sum",
+      "name": "bias_add_bwd.reduce_db",
+      "inputs": [
+        13
+      ],
+      "outputs": [
+        14
+      ],
+      "kind_id": 4,
+      "attr_schema": 1297437522,
+      "attr_blob_len": 8,
+      "hints": {}
+    },
+    {
+      "i": 8,
+      "kind": "gemm",
+      "name": "gemm_bwd.dA_gemm",
+      "inputs": [
+        13,
+        6
+      ],
+      "outputs": [
+        15
+      ],
+      "kind_id": 2,
+      "attr_schema": 0,
+      "attr_blob_len": 8,
+      "hints": {}
+    },
+    {
+      "i": 9,
+      "kind": "gemm",
+      "name": "gemm_bwd.dB_gemm",
+      "inputs": [
+        13,
+        5
+      ],
+      "outputs": [
+        16
+      ],
+      "kind_id": 2,
+      "attr_schema": 0,
+      "attr_blob_len": 8,
+      "hints": {}
+    },
+    {
+      "i": 10,
+      "kind": "relu_bwd",
+      "name": "relu_bwd",
+      "inputs": [
+        15,
+        5
+      ],
+      "outputs": [
+        17
+      ],
+      "kind_id": 6,
+      "attr_schema": 0,
+      "attr_blob_len": 0,
+      "hints": {}
+    },
+    {
+      "i": 11,
+      "kind": "reduce_sum",
+      "name": "bias_add_bwd.reduce_db",
+      "inputs": [
+        17
+      ],
+      "outputs": [
+        18
+      ],
+      "kind_id": 4,
+      "attr_schema": 1297437522,
+      "attr_blob_len": 8,
+      "hints": {}
+    },
+    {
+      "i": 12,
+      "kind": "gemm",
+      "name": "gemm_bwd.dA_gemm",
+      "inputs": [
+        17,
+        1
+      ],
+      "outputs": [
+        19
+      ],
+      "kind_id": 2,
+      "attr_schema": 0,
+      "attr_blob_len": 8,
+      "hints": {}
+    },
+    {
+      "i": 13,
+      "kind": "gemm",
+      "name": "gemm_bwd.dB_gemm",
+      "inputs": [
+        17,
+        0
+      ],
+      "outputs": [
+        20
+      ],
+      "kind_id": 2,
+      "attr_schema": 0,
+      "attr_blob_len": 8,
+      "hints": {}
+    },
+    {
+      "i": 14,
+      "kind": "adam_step",
+      "name": "optimizer.adam.adam_step",
+      "inputs": [
+        8,
+        14,
+        23,
+        24,
+        21,
+        22
+      ],
+      "outputs": [
+        25,
+        26,
+        27
+      ],
+      "kind_id": 10,
+      "attr_schema": 1296122945,
+      "attr_blob_len": 16,
+      "hints": {
+        "view_rank0_inputs": [
+          4,
+          5
+        ]
+      }
+    },
+    {
+      "i": 15,
+      "kind": "adam_step",
+      "name": "optimizer.adam.adam_step",
+      "inputs": [
+        6,
+        16,
+        28,
+        29,
+        21,
+        22
+      ],
+      "outputs": [
+        30,
+        31,
+        32
+      ],
+      "kind_id": 10,
+      "attr_schema": 1296122945,
+      "attr_blob_len": 16,
+      "hints": {
+        "view_rank0_inputs": [
+          4,
+          5
+        ]
+      }
+    },
+    {
+      "i": 16,
+      "kind": "adam_step",
+      "name": "optimizer.adam.adam_step",
+      "inputs": [
+        3,
+        18,
+        33,
+        34,
+        21,
+        22
+      ],
+      "outputs": [
+        35,
+        36,
+        37
+      ],
+      "kind_id": 10,
+      "attr_schema": 1296122945,
+      "attr_blob_len": 16,
+      "hints": {
+        "view_rank0_inputs": [
+          4,
+          5
+        ]
+      }
+    },
+    {
+      "i": 17,
+      "kind": "adam_step",
+      "name": "optimizer.adam.adam_step",
+      "inputs": [
+        1,
+        20,
+        38,
+        39,
+        21,
+        22
+      ],
+      "outputs": [
+        40,
+        41,
+        42
+      ],
+      "kind_id": 10,
+      "attr_schema": 1296122945,
+      "attr_blob_len": 16,
+      "hints": {
+        "view_rank0_inputs": [
+          4,
+          5
+        ]
+      }
+    }
+  ]
+}
