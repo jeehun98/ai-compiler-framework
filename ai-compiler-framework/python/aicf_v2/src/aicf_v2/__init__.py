@@ -1,16 +1,27 @@
+from __future__ import annotations
 import sys
+import os
 from pathlib import Path
 
-# 1) 빌드 폴더의 바이너리 우선 로드 설정
-_build_path = Path(__file__).parents[4] / "build" / "python" / "aicf_cuda"
-if _build_path.exists():
-    sys.path.insert(0, str(_build_path))
+# 1. C++ Backend (_C.pyd) 경로 설정
+# 현재 위치: python/aicf_v2/src/aicf_v2/__init__.py
+# 목표 위치: build/python/aicf_cuda/_C.pyd
+_current_file = Path(__file__).resolve()
+_project_root = _current_file.parents[4]  # ai-compiler-framework 루트
+_build_c_path = _project_root / "build" / "python" / "aicf_cuda"
 
+if _build_c_path.exists():
+    path_str = str(_build_c_path)
+    if path_str not in sys.path:
+        sys.path.insert(0, path_str)
+
+# 2. _C 모듈 로드
 try:
     import _C
-except ImportError:
-    from . import _C
-
+except ImportError as e:
+    print(f"[AICF_V2] Warning: Could not import C++ backend (_C) from {_build_c_path}")
+    print(f"[AICF_V2] Detail: {e}")
+    
 # 2) 기초 유틸리티 및 모델
 from .tensor_spec import TensorSpec
 from .model import Model, Sequential

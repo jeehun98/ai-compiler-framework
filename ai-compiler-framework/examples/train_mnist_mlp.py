@@ -114,6 +114,8 @@ def train_mnist():
                 "adam.bc2": torch.tensor([curr_bc2], device=device, dtype=torch.float32)
             }
             
+            print(model, "내용 확인")
+
             # 모델 실행
             outputs = model.run(feed, use_cuda_graph=False, mode="train")
             
