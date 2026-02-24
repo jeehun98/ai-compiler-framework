@@ -7,10 +7,8 @@
 // - f32 naive strided
 // - f16 WMMA out_f16 (C must be contiguous row-major) + bias + relu at store
 //
-// NOTE(v0):
-//   - bias is 1D length N (vector), contiguous preferred but we only require stride_valid
-//   - f16 path assumes bias dtype == f16 (to keep it simple)
-//   - epilogue: bias + (relu if enabled)
+// Added:
+// - f32 backward: dBias reduction with optional ReLU mask from Y
 // ============================================================================
 
 #include <cuda_runtime.h>
@@ -46,6 +44,7 @@ static inline Status cuda_last_status() {
 // - schema_id == kAttrSchema_GemmEpilogue => parse GemmEpilogueAttrV0 from bytes
 // Python pack: struct.pack("<iii", trans_a, trans_b, relu)
 // ============================================================================
+
 static constexpr uint32_t kAttrSchema_GemmEpilogue = 0x4750454Cu; // 'GPEL'
 
 struct GemmEpilogueAttrV0 {
@@ -82,6 +81,7 @@ static inline void read_gemm_epilogue_attr(const void* attr, bool* out_ta, bool*
 // ============================================================================
 // Tensor helpers
 // ============================================================================
+
 static inline bool stride_valid_1d(const TensorDesc& T) {
   if (T.rank() != 1) return false;
   return (T.stride[0] > 0);
@@ -195,11 +195,15 @@ static inline bool gemm_bias_check(
 // ============================================================================
 // kernels (definitions)  -- keep here
 // ============================================================================
+
 namespace gemm_epilogue_impl {
 
 __device__ __forceinline__ float relu_f(float x) { return x > 0.0f ? x : 0.0f; }
 
-__global__ void gemm_bias_relu_f32_naive_strided_kernel(
+// ------------------------
+// F32 Forward (naive strided)
+// ------------------------
+__global__ void gemm_bias_relu_f32_kernel(
     const float* __restrict__ A, int64_t Ars, int64_t Acs,
     const float* __restrict__ B, int64_t Brs, int64_t Bcs,
     const float* __restrict__ Bias, int64_t Bs,
@@ -224,7 +228,64 @@ __global__ void gemm_bias_relu_f32_naive_strided_kernel(
   C[(int64_t)row * Crs + (int64_t)col * Ccs] = y;
 }
 
-// ---- WMMA helpers / pack / core ----
+// ------------------------
+// F32 Backward: dBias = sum_m dY_masked
+// - if relu_enable: dY_masked = dY * (Y > 0)
+// - dY layout assumed same as Y: (Yrs, Ycs)
+// - output dBias is contiguous (stride==1) recommended, but kernel only needs linear indexing
+// ------------------------
+__inline__ __device__ float warp_sum(float v) {
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    v += __shfl_down_sync(0xffffffff, v, offset);
+  }
+  return v;
+}
+
+__global__ void bwd_bias_relu_mask_f32_kernel(
+    const float* __restrict__ dY,
+    float* __restrict__ dBias,
+    const float* __restrict__ Y,
+    int M, int N,
+    int64_t Yrs, int64_t Ycs,
+    int relu_enable) {
+
+  // 1 block per column (N). 256 threads default 추천.
+  const int col = (int)blockIdx.x;
+  if (col >= N) return;
+
+  float sum = 0.0f;
+  for (int row = (int)threadIdx.x; row < M; row += (int)blockDim.x) {
+    const int64_t idx = (int64_t)row * Yrs + (int64_t)col * Ycs;
+
+    float g = dY[idx];
+    if (relu_enable) {
+      const float y = Y[idx];
+      g = (y > 0.0f) ? g : 0.0f;
+    }
+    sum += g;
+  }
+
+  // block reduction: warp -> shared -> warp
+  sum = warp_sum(sum);
+
+  __shared__ float smem[32]; // max 1024 threads -> 32 warps
+  const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x >> 5;
+  if (lane == 0) smem[warp] = sum;
+  __syncthreads();
+
+  float total = 0.0f;
+  if (warp == 0) {
+    const int nwarps = (blockDim.x + 31) >> 5;
+    total = (lane < nwarps) ? smem[lane] : 0.0f;
+    total = warp_sum(total);
+    if (lane == 0) dBias[col] = total;
+  }
+}
+
+// ------------------------
+// WMMA helpers / pack / core
+// ------------------------
 __device__ __forceinline__ int ceil16_i(int x) { return (x + 15) & ~15; }
 
 __device__ __forceinline__
@@ -313,7 +374,7 @@ void wmma_core_out_f16_bias_relu_strided_packed(
   }
 }
 
-__global__ void gemm_f16_tc_wmma_out_f16_bias_relu_strided_kernel(
+__global__ void gemm_f16_tc_wmma_bias_relu_kernel(
     const __half* __restrict__ A, int64_t Ars, int64_t Acs, int64_t Am, int64_t Ak,
     const __half* __restrict__ B, int64_t Brs, int64_t Bcs, int64_t Bk, int64_t Bn,
     const __half* __restrict__ Bias, int64_t Bs,
@@ -333,6 +394,7 @@ __global__ void gemm_f16_tc_wmma_out_f16_bias_relu_strided_kernel(
 // ============================================================================
 // f32 variant (A=f32, B=f32, Bias=f32, C=f32)
 // ============================================================================
+
 static bool gemm_bias_relu_f32_supported(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs,
@@ -379,7 +441,7 @@ static Status gemm_bias_relu_f32_launch(
             1);
 
   cudaGetLastError(); // clear
-  gemm_epilogue_impl::gemm_bias_relu_f32_naive_strided_kernel<<<grid, block, 0, stream>>>(
+  gemm_epilogue_impl::gemm_bias_relu_f32_kernel<<<grid, block, 0, stream>>>(
       (const float*)A.data, A.rs, A.cs,
       (const float*)B.data, B.rs, B.cs,
       (const float*)Bias.data, Bias.s,
@@ -406,6 +468,7 @@ KernelVariant make_gemm_bias_relu_f32_naive_variant() {
 // f16 TC out_f16 variant (A=f16, B=f16, Bias=f16, C=f16)
 // - TC path requires C contiguous row-major
 // ============================================================================
+
 static bool gemm_bias_relu_f16_tc_out_f16_supported(
     const TensorDesc* inputs, int num_inputs,
     const TensorDesc* outputs, int num_outputs,
@@ -422,7 +485,7 @@ static bool gemm_bias_relu_f16_tc_out_f16_supported(
 
   if (!is_contig_rowmajor_2d(outputs[0])) return false;
 
-  // (권장) bias도 contiguous면 좋음. v0에선 강제하진 않지만, 원하면 아래 줄 켜도 됨.
+  // (권장) bias contiguous
   // if (!is_contig_1d(inputs[2])) return false;
 
   return true;
@@ -461,7 +524,7 @@ static Status gemm_bias_relu_f16_tc_out_f16_launch(
   dim3 grid((N + 15) / 16, (M + 15) / 16, 1);
 
   cudaGetLastError(); // clear
-  gemm_epilogue_impl::gemm_f16_tc_wmma_out_f16_bias_relu_strided_kernel<<<grid, block, 0, stream>>>(
+  gemm_epilogue_impl::gemm_f16_tc_wmma_bias_relu_kernel<<<grid, block, 0, stream>>>(
       (const __half*)A.data, A.rs, A.cs, A.rows, A.cols,
       (const __half*)B.data, B.rs, B.cs, B.rows, B.cols,
       (const __half*)Bias.data, Bias.s,
@@ -480,6 +543,104 @@ KernelVariant make_gemm_bias_relu_f16_tc_wmma_out_f16_variant() {
   v.launch = gemm_bias_relu_f16_tc_out_f16_launch;
   v.supported = gemm_bias_relu_f16_tc_out_f16_supported;
   v.query_workspace = gemm_bias_relu_f16_tc_out_f16_workspace;
+  return v;
+}
+
+// ============================================================================
+// OPTIONAL: f32 backward variant (dBias from dY and Y)
+// inputs: [dY, Y] outputs: [dBias]
+// - 이건 autograd에서 별도 op로 다는 게 보통 더 깔끔함.
+// - 여기서는 “코드 전체 버전” 요청이라 launcher 스타일도 같이 제공.
+// ============================================================================
+
+static inline bool bwd_bias_relu_mask_f32_check(
+    const TensorDesc* inputs, int num_inputs,
+    const TensorDesc* outputs, int num_outputs) {
+
+  if (!inputs || !outputs) return false;
+  if (num_inputs != 2 || num_outputs != 1) return false;
+
+  const TensorDesc& dY = inputs[0];
+  const TensorDesc& Y  = inputs[1];
+  const TensorDesc& dB = outputs[0];
+
+  if (dY.rank()!=2 || Y.rank()!=2) return false;
+  if (dB.rank()!=1) return false;
+
+  if (dY.dtype!=DType::kF32 || Y.dtype!=DType::kF32 || dB.dtype!=DType::kF32) return false;
+
+  if (!stride_valid_2d(dY) || !stride_valid_2d(Y) || !stride_valid_1d(dB)) return false;
+
+  if (dY.shape[0] != Y.shape[0] || dY.shape[1] != Y.shape[1]) return false;
+  if (dB.shape[0] != Y.shape[1]) return false;
+
+  // dY and Y stride can differ, but kernel assumes same layout stride params we pass.
+  // 여기선 단순히 Y stride를 쓰고 dY도 동일 stride라고 가정하려면 체크 필요.
+  // 안전하게 가려면: dY.stride == Y.stride를 강제.
+  if (dY.stride[0] != Y.stride[0] || dY.stride[1] != Y.stride[1]) return false;
+
+  return true;
+}
+
+static bool bwd_bias_relu_mask_f32_supported(
+    const TensorDesc* inputs, int num_inputs,
+    const TensorDesc* outputs, int num_outputs,
+    const void* attr) {
+
+  // relu_enable은 attr에서 읽음 (schema 동일)
+  (void)attr;
+  return bwd_bias_relu_mask_f32_check(inputs, num_inputs, outputs, num_outputs);
+}
+
+static size_t bwd_bias_relu_mask_f32_workspace(const TensorDesc*, int, const void*) { return 0; }
+
+static Status bwd_bias_relu_mask_f32_launch(
+    const TensorDesc* inputs, int num_inputs,
+    TensorDesc* outputs, int num_outputs,
+    const void* attr,
+    void*, size_t,
+    cudaStream_t stream) {
+
+  bool ta=false, tb=false, relu=true;
+  read_gemm_epilogue_attr(attr, &ta, &tb, &relu);
+  (void)ta; (void)tb;
+
+  if (!bwd_bias_relu_mask_f32_check(inputs, num_inputs, outputs, num_outputs)) {
+    return Status::InvalidArgument;
+  }
+
+  const TensorDesc& dY0 = inputs[0];
+  const TensorDesc& Y0  = inputs[1];
+  const TensorDesc& dB0 = outputs[0];
+
+  const int M = (int)Y0.shape[0];
+  const int N = (int)Y0.shape[1];
+
+  // 1 block per N column. threads=256 추천 (M이 작으면 128도 OK)
+  dim3 block(256, 1, 1);
+  dim3 grid(N, 1, 1);
+
+  cudaGetLastError(); // clear
+  gemm_epilogue_impl::bwd_bias_relu_mask_f32_kernel<<<grid, block, 0, stream>>>(
+      (const float*)dY0.data,
+      (float*)dB0.data,
+      (const float*)Y0.data,
+      M, N,
+      (int64_t)Y0.stride[0], (int64_t)Y0.stride[1],
+      relu ? 1 : 0);
+
+  return cuda_last_status();
+}
+
+KernelVariant make_bwd_bias_relu_mask_f32_variant() {
+  KernelVariant v{};
+  v.name = "bwd_bias_relu_mask_f32";
+  v.priority = 0;
+  v.flags = 0;
+  v.expected_attr_schema_id = 0;
+  v.launch = bwd_bias_relu_mask_f32_launch;
+  v.supported = bwd_bias_relu_mask_f32_supported;
+  v.query_workspace = bwd_bias_relu_mask_f32_workspace;
   return v;
 }
 

@@ -29,11 +29,13 @@ enum class OpKind : int {
 
   MseLoss       = 20,
 
-  // ---- NEW ----
   CrossEntropyFwd = 21,
   CrossEntropyBwd = 22,
 
-  _Count        = 23
+  // ---- NEW ----
+  GemmEpilogueBwd = 23,
+
+  _Count        = 24
 };
 
 } // namespace aicf::cuda

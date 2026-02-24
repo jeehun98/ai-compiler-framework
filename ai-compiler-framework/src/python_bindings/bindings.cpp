@@ -195,30 +195,36 @@ static bool g_trace_enabled = true;
 
 static inline const char* opkind_to_name(aicf::cuda::OpKind k) {
   switch (k) {
-    case aicf::cuda::OpKind::EltwiseAdd:   return "add";
-    case aicf::cuda::OpKind::EltwiseRelu:  return "relu";
-    case aicf::cuda::OpKind::Gemm:         return "gemm";
-    case aicf::cuda::OpKind::BiasAdd:      return "bias_add";
-    case aicf::cuda::OpKind::ReduceSum:    return "reduce_sum";
-    case aicf::cuda::OpKind::MseGrad:      return "mse_grad";
-    case aicf::cuda::OpKind::ReluBwd:      return "relu_bwd";
-    case aicf::cuda::OpKind::SgdStep:      return "sgd_step";
-    case aicf::cuda::OpKind::Copy:         return "copy";
-    case aicf::cuda::OpKind::GradZero:     return "grad_zero";
-    case aicf::cuda::OpKind::AdamStep:     return "adam_step";
-    case aicf::cuda::OpKind::StepInc:      return "step_inc";
-    case aicf::cuda::OpKind::BiasCorr:     return "bias_corr";
-    case aicf::cuda::OpKind::LayerNormFwd: return "layernorm_fwd";
-    case aicf::cuda::OpKind::LayerNormBwd: return "layernorm_bwd";
-    case aicf::cuda::OpKind::BatchNormFwd: return "batchnorm_fwd";
-    case aicf::cuda::OpKind::BatchNormBwd: return "batchnorm_bwd";
-    case aicf::cuda::OpKind::GemmEpilogue: return "gemm_epilogue";   // ✅ ADD
-    case aicf::cuda::OpKind::Softmax:      return "softmax";
-    case aicf::cuda::OpKind::SoftmaxBwd:   return "softmaxbwd";
-    case aicf::cuda::OpKind::MseLoss:      return "mse_loss";
-    case aicf::cuda::OpKind::CrossEntropyFwd:      return "cross_entropy_fwd";
-    case aicf::cuda::OpKind::CrossEntropyBwd:      return "cross_entropy_bwd";
+    case aicf::cuda::OpKind::EltwiseAdd:        return "add";
+    case aicf::cuda::OpKind::EltwiseRelu:       return "relu";
+    case aicf::cuda::OpKind::Gemm:              return "gemm";
+    case aicf::cuda::OpKind::BiasAdd:           return "bias_add";
+    case aicf::cuda::OpKind::ReduceSum:         return "reduce_sum";
+    case aicf::cuda::OpKind::MseGrad:           return "mse_grad";
+    case aicf::cuda::OpKind::ReluBwd:           return "relu_bwd";
+    case aicf::cuda::OpKind::SgdStep:           return "sgd_step";
+    case aicf::cuda::OpKind::Copy:              return "copy";
+    case aicf::cuda::OpKind::GradZero:          return "grad_zero";
+    case aicf::cuda::OpKind::AdamStep:          return "adam_step";
+    case aicf::cuda::OpKind::StepInc:           return "step_inc";
+    case aicf::cuda::OpKind::BiasCorr:          return "bias_corr";
+    case aicf::cuda::OpKind::LayerNormFwd:      return "layernorm_fwd";
+    case aicf::cuda::OpKind::LayerNormBwd:      return "layernorm_bwd";
+    case aicf::cuda::OpKind::BatchNormFwd:      return "batchnorm_fwd";
+    case aicf::cuda::OpKind::BatchNormBwd:      return "batchnorm_bwd";
 
+    // ✅ ADD
+    case aicf::cuda::OpKind::GemmEpilogue:      return "gemm_epilogue";
+    case aicf::cuda::OpKind::GemmEpilogueBwd:   return "gemm_epilogue_bwd";
+
+    case aicf::cuda::OpKind::Softmax:           return "softmax";
+
+    // (추천) 기존 "softmaxbwd" -> "softmax_bwd"로 통일
+    case aicf::cuda::OpKind::SoftmaxBwd:        return "softmax_bwd";
+
+    case aicf::cuda::OpKind::MseLoss:           return "mse_loss";
+    case aicf::cuda::OpKind::CrossEntropyFwd:   return "cross_entropy_fwd";
+    case aicf::cuda::OpKind::CrossEntropyBwd:   return "cross_entropy_bwd";
 
     default: return "unknown";
   }
@@ -381,32 +387,34 @@ PYBIND11_MODULE(_C, m) {
   ensure_kernels_registered_once();
 
   py::enum_<aicf::cuda::OpKind>(m, "OpKind")
-      .value("EltwiseAdd",   aicf::cuda::OpKind::EltwiseAdd)
-      .value("EltwiseRelu",  aicf::cuda::OpKind::EltwiseRelu)
-      .value("Gemm",         aicf::cuda::OpKind::Gemm)
-      .value("BiasAdd",      aicf::cuda::OpKind::BiasAdd)
-      .value("ReduceSum",    aicf::cuda::OpKind::ReduceSum)
-      .value("MseGrad",      aicf::cuda::OpKind::MseGrad)
-      .value("ReluBwd",      aicf::cuda::OpKind::ReluBwd)
-      .value("SgdStep",      aicf::cuda::OpKind::SgdStep)
-      .value("Copy",         aicf::cuda::OpKind::Copy)
-      .value("GradZero",     aicf::cuda::OpKind::GradZero)
-      .value("AdamStep",     aicf::cuda::OpKind::AdamStep)
-      .value("StepInc",      aicf::cuda::OpKind::StepInc)
-      .value("BiasCorr",     aicf::cuda::OpKind::BiasCorr)
-      .value("LayerNormFwd", aicf::cuda::OpKind::LayerNormFwd)
-      .value("LayerNormBwd", aicf::cuda::OpKind::LayerNormBwd)
-      .value("BatchNormFwd", aicf::cuda::OpKind::BatchNormFwd)
-      .value("BatchNormBwd", aicf::cuda::OpKind::BatchNormBwd)
-      .value("GemmEpilogue", aicf::cuda::OpKind::GemmEpilogue)  // ✅ ADD
-      .value("Softmax",      aicf::cuda::OpKind::Softmax)
-      .value("SoftmaxBwd",   aicf::cuda::OpKind::SoftmaxBwd)
-      .value("MseLoss",      aicf::cuda::OpKind::MseLoss)
-      .value("CrossEntropyFwd", aicf::cuda::OpKind::CrossEntropyFwd)
-      .value("CrossEntropyBwd", aicf::cuda::OpKind::CrossEntropyBwd)
+    .value("EltwiseAdd",        aicf::cuda::OpKind::EltwiseAdd)
+    .value("EltwiseRelu",       aicf::cuda::OpKind::EltwiseRelu)
+    .value("Gemm",              aicf::cuda::OpKind::Gemm)
+    .value("BiasAdd",           aicf::cuda::OpKind::BiasAdd)
+    .value("ReduceSum",         aicf::cuda::OpKind::ReduceSum)
+    .value("MseGrad",           aicf::cuda::OpKind::MseGrad)
+    .value("ReluBwd",           aicf::cuda::OpKind::ReluBwd)
+    .value("SgdStep",           aicf::cuda::OpKind::SgdStep)
+    .value("Copy",              aicf::cuda::OpKind::Copy)
+    .value("GradZero",          aicf::cuda::OpKind::GradZero)
+    .value("AdamStep",          aicf::cuda::OpKind::AdamStep)
+    .value("StepInc",           aicf::cuda::OpKind::StepInc)
+    .value("BiasCorr",          aicf::cuda::OpKind::BiasCorr)
+    .value("LayerNormFwd",      aicf::cuda::OpKind::LayerNormFwd)
+    .value("LayerNormBwd",      aicf::cuda::OpKind::LayerNormBwd)
+    .value("BatchNormFwd",      aicf::cuda::OpKind::BatchNormFwd)
+    .value("BatchNormBwd",      aicf::cuda::OpKind::BatchNormBwd)
 
+    // ✅ ADD
+    .value("GemmEpilogue",      aicf::cuda::OpKind::GemmEpilogue)
+    .value("GemmEpilogueBwd",   aicf::cuda::OpKind::GemmEpilogueBwd)
 
-      .export_values();
+    .value("Softmax",           aicf::cuda::OpKind::Softmax)
+    .value("SoftmaxBwd",        aicf::cuda::OpKind::SoftmaxBwd)
+    .value("MseLoss",           aicf::cuda::OpKind::MseLoss)
+    .value("CrossEntropyFwd",   aicf::cuda::OpKind::CrossEntropyFwd)
+    .value("CrossEntropyBwd",   aicf::cuda::OpKind::CrossEntropyBwd)
+    .export_values();
 
   // ---------------- op_call (legacy) ----------------
   m.def(

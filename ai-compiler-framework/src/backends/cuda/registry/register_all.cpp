@@ -10,6 +10,8 @@
 #include "aicf/backends/cuda/registry/op_kind.hpp"
 #include "aicf/backends/cuda/registry/kernel_variant.hpp"
 
+#include <cstdio>
+
 namespace aicf::cuda {
 
 // ReduceSum
@@ -82,6 +84,10 @@ KernelVariant make_batchnorm_bwd_f16_variant();
 KernelVariant make_gemm_bias_relu_f32_naive_variant();
 KernelVariant make_gemm_bias_relu_f16_tc_wmma_out_f16_variant();
 
+// GemmEpilogueBwd (dBias from dY and Y, optional relu mask)
+// NOTE: OpKind에 GemmEpilogueBwd 가 있어야 컴파일됨.
+KernelVariant make_bwd_bias_relu_mask_f32_variant();
+
 // Softmax
 KernelVariant make_softmax_f32_variant();
 KernelVariant make_softmax_f16_variant();
@@ -97,7 +103,6 @@ KernelVariant make_mse_loss_f16_variant();
 // CrossEntropyLoss
 KernelVariant make_cross_entropy_loss_fwd_f32_variant();
 KernelVariant make_cross_entropy_loss_bwd_f32_variant();
-
 
 }  // namespace aicf::cuda
 
@@ -136,8 +141,6 @@ extern "C" void aicf_cuda_register_all_kernels() {
           "reduce_sum_keep_lastdim_f32_v0"));
   }
 
-
-
   // Gemm
   {
     R.register_kernel(OpKind::Gemm,
@@ -148,7 +151,7 @@ extern "C" void aicf_cuda_register_all_kernels() {
           "gemm_f32_naive_v0"));
   }
 
-    // GemmEpilogue
+  // GemmEpilogue (FWD)
   {
     R.register_kernel(OpKind::GemmEpilogue,
       kid(setp(make_gemm_bias_relu_f16_tc_wmma_out_f16_variant(), 20),
@@ -158,6 +161,13 @@ extern "C" void aicf_cuda_register_all_kernels() {
           "gemm_bias_relu_f32_naive_v0"));
   }
 
+  // GemmEpilogueBwd (dBias from dY and Y, optional relu mask)
+  // NOTE: OpKind::GemmEpilogueBwd 가 op_kind.hpp에 정의되어 있어야 함.
+  {
+    R.register_kernel(OpKind::GemmEpilogueBwd,
+      kid(setp(make_bwd_bias_relu_mask_f32_variant(), 0),
+          "gemm_epilogue_bwd_bias_relu_mask_f32_v0"));
+  }
 
   // BiasAdd
   {
@@ -328,7 +338,7 @@ extern "C" void aicf_cuda_register_all_kernels() {
           "softmax_bwd_lastdim_f32_v0"));
   }
 
-    // MseLoss
+  // MseLoss
   {
     R.register_kernel(OpKind::MseLoss,
       kid(setp(make_mse_loss_f16_variant(), 10),
@@ -338,18 +348,17 @@ extern "C" void aicf_cuda_register_all_kernels() {
           "mse_loss_f32_v0"));
   }
 
-// CrossEntropyLossFwd
-{
-  R.register_kernel(OpKind::CrossEntropyFwd,
-    kid(setp(make_cross_entropy_loss_fwd_f32_variant(), 0),
-        "cross_entropy_loss_fwd_f32_v0"));
-}
+  // CrossEntropyLossFwd
+  {
+    R.register_kernel(OpKind::CrossEntropyFwd,
+      kid(setp(make_cross_entropy_loss_fwd_f32_variant(), 0),
+          "cross_entropy_loss_fwd_f32_v0"));
+  }
 
-// CrossEntropyLossBwd
-{
-  R.register_kernel(OpKind::CrossEntropyBwd,
-    kid(setp(make_cross_entropy_loss_bwd_f32_variant(), 0),
-        "cross_entropy_loss_bwd_f32_v0"));
-}
-
+  // CrossEntropyLossBwd
+  {
+    R.register_kernel(OpKind::CrossEntropyBwd,
+      kid(setp(make_cross_entropy_loss_bwd_f32_variant(), 0),
+          "cross_entropy_loss_bwd_f32_v0"));
+  }
 }
