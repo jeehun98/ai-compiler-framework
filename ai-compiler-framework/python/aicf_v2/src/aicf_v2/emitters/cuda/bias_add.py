@@ -26,8 +26,9 @@ def emit(
     # 정적 속성: BiasAdd는 Element-wise 연산입니다.
     # 인덱스 하드코딩 방지를 위한 role 추가
     in_role = ["x", "bias"]
-    static = OpFlags.IS_ELEMENTWISE
-
+    
+    static = OpFlags.IS_ELEMENTWISE | OpFlags.HAS_BIAS
+    
     return emit_resolved(
         b,
         kind="bias_add",

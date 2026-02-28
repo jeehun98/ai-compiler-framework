@@ -1,36 +1,39 @@
 from __future__ import annotations
-
 from typing import Any, Dict, List, Optional
-
 from ...builder import Builder
-
 
 class OpFlags:
     """
-    연산의 성격과 최적화 상태를 나타내는 비트마스크 정의.
-    - 0~15 bits: Static Flags (Emitter가 설정하는 연산의 본질)
-    - 16~31 bits: Derived Flags (Optimizer/Pass가 설정하는 그래프 맥락)
+    연산의 성격(Semantics)과 그래프 내의 역할(Traits)을 비트로 정의.
+    - 0~15 bits: Static Flags (연산 고유의 속성)
+    - 16~31 bits: Derived Flags (그래프 위상 및 런타임 정보)
     """
     NONE = 0
 
-    # --- Static Flags (Emitter-side) ---
-    IS_GEMM_LIKE   = 1 << 0   # Gemm, Conv 등 무거운 행렬 연산
-    IS_ELEMENTWISE = 1 << 1   # Add, Relu 등 1:1 매핑 연산
-    IS_REDUCE      = 1 << 2   # Sum, Mean 등 차원 축소
-    IS_OPTIMIZER   = 1 << 3   # Adam, SGD 등 업데이트 로직
-    HAS_STATE      = 1 << 4   # 내부 버퍼를 직접 수정(Stateful)
-    TERMINAL       = 1 << 5   # 그래프 종착점(Grad sink 등)
-    INPLACE_PREF   = 1 << 6   # Inplace 실행을 권장
+    # --- [Static Flags: 성격 (Semantics)] ---
+    IS_GEMM_LIKE     = 1 << 0   # Gemm, Conv 등 대량 연산 (Fusion Root 후보)
+    IS_ELEMENTWISE   = 1 << 1   # 1:1 매핑 연산
+    IS_REDUCE        = 1 << 2   # 차원 축소 연산
+    IS_OPTIMIZER     = 1 << 3   # 상태 업데이트 연산
+    IS_NORM          = 1 << 4   # Normalization 계열 (BN, LN 등)
+    IS_ACTIVATION    = 1 << 5   # ReLU, Sigmoid 등 활성화 함수
+
+    # --- [Static Flags: 특성 (Traits/Roles)] ---
+    # 패턴 매칭 시 if문 대신 비트로 역할을 즉시 판별
+    HAS_BIAS         = 1 << 8   # Bias 입력을 가지는 연산 (예: bias_add)
+    HAS_STATE        = 1 << 9   # 내부 버퍼 수정 (Stateful)
+    INPLACE_PREF     = 1 << 10  # Inplace 실행 권장
+    TERMINAL         = 1 << 11  # 그래프 종착점 (Grad sink)
+
+    # --- [Derived Flags: 맥락 (Context/Pass)] ---
+    SAFE_NODE        = 1 << 16  # Out-degree <= 1 (Fusion 안전)
+    FUSION_BARRIER   = 1 << 17  # 정책상 퓨전 차단 지점
+    DTYPE_F32        = 1 << 18  # FP32 데이터 타입
+    DTYPE_F16        = 1 << 19  # FP16/BF16 데이터 타입
     
-    # 신규(예시)
-    IS_NORM        = 1 << 12     # normalization 계열 (BN/LN/RMSN 등)
-    IS_BATCHNORM   = 1 << 13     # 필요하면 더 구체화
-
-    # --- Derived Flags (Pass-side) ---
-    SAFE_NODE      = 1 << 16  # Out-degree <= 1 등 퓨전 안전
-    FUSION_BARRIER = 1 << 17  # 정책상 퓨전 차단
-    DTYPE_F32      = 1 << 18  # 데이터 타입이 F32
-
+    # --- [Helper Mask: 패턴 쿼리용] ---
+    # 예: Gemm Epilogue 후보 (Gemm 성격이면서 데이터 타입이 일치)
+    QUERY_GEMM_ROOT = IS_GEMM_LIKE | DTYPE_F32
 
 def emit_resolved(
     b: Builder,
@@ -49,12 +52,9 @@ def emit_resolved(
     static_flags: int = OpFlags.NONE,
 ) -> int:
     """
-    통합된 Emitter 엔트리:
-    - Builder.emit()으로 노드 생성
-    - 백엔드 실행에 필요한 로우레벨 정보(kind_id/schema/blob) 주입
-    - attrs에 BWD가 참조할 FWD 정적 정보 보관(기존 의도 유지)
-    - static_flags로 연산의 '본질'을 노드에 각인
-    - derived_flags는 pass 단계에서 채우도록 0으로 초기화
+    모든 연산의 공통 진입점.
+    static_flags를 통해 '지문(Fingerprint)'을 각인하여 
+    Pass 단계에서 정밀 검증(문자열 비교) 횟수를 최소화함.
     """
     op_index = b.emit(
         kind=kind,
@@ -63,19 +63,18 @@ def emit_resolved(
         name=str(name),
         attrs=dict(attrs or {}),
         constraints=dict(constraints or {}),
-        hints=hints,  # Builder 사양상 None 허용
+        hints=hints,
         saved=list(saved or []),
     )
 
     op = b.ops[op_index]
-
-    # C++ 백엔드 실행에 필요한 로우 레벨 정보 주입
     op.kind_id = int(kind_id)
     op.attr_schema = int(attr_schema)
     op.attr_blob = bytes(attr_blob)
 
-    # 최적화/퓨전 판정을 위한 비트마스크 필드
+    # Emitter에서 정의한 연산의 본질 주입
     op.static_flags = int(static_flags)
+    # Optimizer가 분석할 공간 확보
     op.derived_flags = 0
 
     return op_index

@@ -3,48 +3,41 @@ import numpy as np
 from scipy import sparse
 from typing import Any, List, Dict, Tuple, Optional
 
-# Emitter의 base.py에 정의된 비트마스크 클래스를 사용
 from aicf_v2.emitters.cuda.base import OpFlags
+from aicf_v2.emitters.cuda import gemm_epilogue
 
-class FusedGemmBiasReluOp:
-    """퓨전된 노드에 주입될 정체성 및 역전파 정의"""
-    KIND = "fused_gemm_bias_relu"
-    KID = 100 
 
-    @staticmethod
-    def emit_bwd(b: Any, ctx: Any, fused_node: Any, grad_y: int) -> Dict[int, int]:
-        """Fused 노드의 역전파 로직: 입력 [X, W, Bias]에 대한 미분값 생성"""
-        x_vid = fused_node.inputs[0]
-        w_vid = fused_node.inputs[1]
-        b_vid = fused_node.inputs[2]
-        
-        # 실제 런타임에서는 FusedBwd 커널이 실행되도록 IR을 구성
-        grads = {
-            x_vid: b.value(f"{fused_node.name}.dx", b.values[x_vid].spec),
-            w_vid: b.value(f"{fused_node.name}.dw", b.values[w_vid].spec),
-            b_vid: b.value(f"{fused_node.name}.db", b.values[b_vid].spec),
-        }
-        return grads
+# -----------------------------------------------------------------------------
+# Declarative Fusion Registry (bit-sequence based)
+# -----------------------------------------------------------------------------
+FUSION_PATTERNS = {
+    "gemm_epilogue": {
+        "sequence": [
+            OpFlags.IS_GEMM_LIKE,                             # Root (Gemm)
+            OpFlags.IS_ELEMENTWISE | OpFlags.HAS_BIAS,        # BiasAdd-like
+            OpFlags.IS_ELEMENTWISE | OpFlags.IS_ACTIVATION,   # Relu-like
+        ],
+        "target_kind": "gemm_epilogue",
+    },
+}
 
+
+# -----------------------------------------------------------------------------
+# Matcher: 그래프 위상과 비트 지문을 분석하여 패턴을 탐색
+# -----------------------------------------------------------------------------
 class RichMatrixOptimizer:
     def __init__(self, builder: Any):
         self.b = builder
         self.ops = builder.ops
         self.n = len(self.ops)
-        
-        # 탐색 가속을 위한 캐시 레이어
         self.node_masks = np.zeros(self.n, dtype=np.uint32)
         self.adj_csr = None
 
     def encode(self):
-        """
-        [Step 1] 정적 속성(Static)과 동적 속성(Derived)을 비트셋으로 통합
-        [Step 2] CSR(Compressed Sparse Row)로 그래프 위상 정보 캡슐화
-        """
-        # Value ID -> 생산자 Node Index 매핑
+        """그래프 위상(CSR) + 노드 비트마스크 생성"""
         val_to_producer = {vid: i for i, op in enumerate(self.ops) for vid in op.outputs}
-        
-        # 1. Out-degree 계산 (Consumer가 여럿이면 퓨전 시 데이터 유실 위험이 있어 필터링 필요)
+
+        # Out-degree 계산 -> SAFE_NODE(단일 소비자) 판별
         temp_rows = []
         for op in self.ops:
             for v_in in op.inputs:
@@ -52,102 +45,143 @@ class RichMatrixOptimizer:
                     temp_rows.append(val_to_producer[v_in])
         counts = np.bincount(temp_rows, minlength=self.n) if temp_rows else np.zeros(self.n)
 
-        # 2. 통합 Node Mask 생성
         for i, op in enumerate(self.ops):
-            # Emitter 단계에서 설정된 본질 정보 (IS_GEMM, IS_ELEMENTWISE 등)
-            mask = getattr(op, "static_flags", OpFlags.NONE)
-            
-            # 동적 맥락 정보: 단일 소비자(Safe) 여부
+            mask = int(getattr(op, "static_flags", OpFlags.NONE))
             if counts[i] <= 1:
                 mask |= OpFlags.SAFE_NODE
-            
-            # 데이터 타입 힌트 (F32일 때만 최적화 커널이 존재할 경우)
-            if any(self.b.values[v].spec.dtype == "f32" for v in op.outputs):
-                mask |= OpFlags.DTYPE_F32
-                
             self.node_masks[i] = mask
 
-        # 3. CSR 인접 행렬 생성 (local traversal 가속용)
+        # CSR adjacency 생성
         rows, cols = [], []
         for j, op in enumerate(self.ops):
             for v_in in op.inputs:
                 if v_in in val_to_producer:
                     rows.append(val_to_producer[v_in])
                     cols.append(j)
-        
-        # 데이터는 존재 여부(1)만 마킹
-        self.adj_csr = sparse.csr_matrix((np.ones(len(rows)), (rows, cols)), shape=(self.n, self.n))
+        self.adj_csr = sparse.csr_matrix(
+            (np.ones(len(rows), dtype=np.uint8), (rows, cols)),
+            shape=(self.n, self.n),
+        )
 
-    def find_gemm_bias_relu(self) -> List[Tuple[int, int, int]]:
-        """
-        패턴: Root(GEMM) -> [Safe] Consumer(BIAS_ADD) -> Consumer(RELU)
-        """
-        from aicf_v2.emitters.cuda.base import OpFlags
-        results = []
-        
-        # 1. Root 후보 추출 (static_flags & 0b1)
-        seeds = np.where(self.node_masks & OpFlags.IS_GEMM_LIKE)[0]
+    def find_matches(self, pattern_name: str) -> List[List[int]]:
+        """비트 시퀀스에 매칭되는 노드 인덱스 경로 반환"""
+        config = FUSION_PATTERNS[pattern_name]
+        seq = config["sequence"]
 
-        for i in seeds:
-            for j in self._get_consumers(i):
-                # 2. 중간 노드 체크: IS_ELEMENTWISE 이면서 SAFE_NODE(단일 소비자) 인가?
-                if not (self.node_masks[j] & OpFlags.IS_ELEMENTWISE): continue
-                if not (self.node_masks[j] & OpFlags.SAFE_NODE): continue
-                
-                for k in self._get_consumers(j):
-                    # 3. 마지막 노드 체크: IS_ELEMENTWISE 인가?
-                    if not (self.node_masks[k] & OpFlags.IS_ELEMENTWISE): continue
-                    
-                    # 4. 정밀 검증: 로그에서 확인된 'bias_add' 명칭으로 매칭 (핵심 수정)
-                    # kinds = ["gemm", "bias_add", "relu"] 로 전달
-                    if self._verify_pattern(i, j, k, ["gemm", "bias_add", "relu"]):
-                        results.append((int(i), int(j), int(k)))
+        # Root: 첫 번째 비트 조건이 충족되는 노드 탐색
+        roots = np.where((self.node_masks & seq[0]) == seq[0])[0]
+
+        results: List[List[int]] = []
+        for r in roots:
+            self._match_recursive([int(r)], seq[1:], results)
         return results
 
-    def _verify_pattern(self, i, j, k, kinds: List[str]) -> bool:
-        """비트 필터링 통과 후 최종 명칭 확인"""
-        # 로그 결과: Op[00]=gemm, Op[01]=bias_add, Op[02]=relu
-        return (self.ops[i].kind == kinds[0] and 
-                self.ops[j].kind == kinds[1] and 
-                self.ops[k].kind == kinds[2])
+    def _match_recursive(self, path: List[int], remaining_seq: List[int], results: List[List[int]]):
+        if not remaining_seq:
+            results.append(list(path))
+            return
 
-    def _get_consumers(self, node_idx: int) -> np.ndarray:
-        """CSR 포인터를 직접 사용하여 특정 노드의 자식 노드 인덱스 슬라이싱"""
-        return self.adj_csr.indices[self.adj_csr.indptr[node_idx] : self.adj_csr.indptr[node_idx + 1]]
+        last = path[-1]
+        need = remaining_seq[0]
 
+        for c in self._get_consumers(last):
+            c = int(c)
+            # 비트마스크 일치 여부 확인
+            if (self.node_masks[c] & need) != need:
+                continue
+
+            # 중간 노드는 안전을 위해 SAFE_NODE 제약 확인
+            if len(remaining_seq) > 1 and not (self.node_masks[c] & OpFlags.SAFE_NODE):
+                continue
+
+            path.append(c)
+            self._match_recursive(path, remaining_seq[1:], results)
+            path.pop()
+
+    def _get_consumers(self, idx: int) -> np.ndarray:
+        return self.adj_csr.indices[self.adj_csr.indptr[idx] : self.adj_csr.indptr[idx + 1]]
+
+
+# -----------------------------------------------------------------------------
+# Rewriter: 탐색된 패턴을 실제 최적화된 노드로 치환
+# -----------------------------------------------------------------------------
 class GraphRewriter:
-    def __init__(self, builder: Any):
+    def __init__(self, builder: Any, ctx: Any):
         self.b = builder
+        self.ctx = ctx  # 주입받은 Context 보관 (Emitter 호출 시 사용)
 
-    def apply_fusion(self, patterns: List[Tuple[int, int, int]]):
-        """탐색된 패턴을 바탕으로 실제 그래프 구조를 변형 및 무효화(NOP)"""
-        for i, j, k in patterns:
-            op_g, op_b, op_r = self.b.ops[i], self.b.ops[j], self.b.ops[k]
-            
-            # Role 기반 인덱스 룩업: Bias 연산의 입력 중 Bias 텐서(c)를 찾음
-            in_role_b = op_b.attrs.get("in_role", ["a", "c"])
-            try:
-                # 'add' emitter에서 정의한 역할명을 사용하여 정확한 인덱스 추출
-                bias_idx = list(in_role_b).index("c") 
-            except ValueError:
-                bias_idx = 1
-            bias_vid = op_b.inputs[bias_idx]
-            
-            # 1. Forward 통합: 시작 노드인 Gemm을 퓨전 노드로 갱신
-            op_g.kind = FusedGemmBiasReluOp.KIND
-            op_g.kind_id = FusedGemmBiasReluOp.KID
-            op_g.name = f"{op_g.name}_fused"
-            
-            # 입력 재구성: [X, W, Bias]
-            op_g.inputs = [op_g.inputs[0], op_g.inputs[1], bias_vid]
-            # 출력 전이: 최종 노드인 Relu의 출력을 승계
-            op_g.outputs = op_r.outputs
-            
-            # 2. Backward Logic 주입 (Autograd 시 호출됨)
-            setattr(op_g, 'bwd_emit_fn', FusedGemmBiasReluOp.emit_bwd)
+    def apply_fusion(self, pattern_name: str, matches: List[List[int]]):
+        """인덱스 안정성을 유지하며 퓨전 적용"""
+        if pattern_name != "gemm_epilogue":
+            return
 
-            # 3. 중간 노드(Add, Relu) 무효화
-            # IR 배열의 순서를 깨지 않기 위해 'nop'으로 변경 처리
-            for idx in [j, k]:
-                self.b.ops[idx].kind = "nop"
-                self.b.ops[idx].inputs, self.b.ops[idx].outputs = [], []
+        # 겹침 방지를 위해 루트 인덱스 역순으로 처리
+        matches_sorted = sorted(matches, key=lambda p: p[0], reverse=True)
+        for path in matches_sorted:
+            self._fuse_gemm_epilogue(path)
+
+    def _fuse_gemm_epilogue(self, path: List[int]):
+        # path: [gemm, bias_add, relu]
+        if len(path) != 3:
+            return
+
+        i_g, i_b, i_r = path
+        op_g = self.b.ops[i_g]
+        op_b = self.b.ops[i_b]
+        op_r = self.b.ops[i_r]
+
+        if getattr(op_g, "kind", "") == "nop": return
+
+        # 1) 속성 및 입력 추출
+        ta = bool(op_g.attrs.get("transA", False))
+        tb = bool(op_g.attrs.get("transB", False))
+        A_vid, B_vid = op_g.inputs[0], op_g.inputs[1]
+
+        # Bias Vid 추출 (gemm 출력이 아닌 입력 찾기)
+        prev_out = set(op_g.outputs)
+        bias_vid = next((v for v in op_b.inputs if v not in prev_out), op_b.inputs[-1])
+        out_vid = op_r.outputs[0]
+
+        # 2) Fused Emitter 호출 (ctx 사용)
+        # b.ops 리스트 끝에 새로운 노드가 추가됨
+        new_op_idx = gemm_epilogue.emit(
+            self.b, self.ctx,
+            A=A_vid, B=B_vid, bias=bias_vid, out=out_vid,
+            transA=ta, transB=tb, relu=True,
+            name=f"{self.b.ops[i_g].name}_fused"
+        )
+
+        # 2. 생성된 노드 객체를 '복사'하여 가져오기
+        import copy
+        fused_op_orig = self.b.ops[new_op_idx]
+        fused_op_copy = copy.copy(fused_op_orig) # 얕은 복사로 충분함
+        
+        # 3. 역전파 훅 주입
+        setattr(fused_op_copy, "bwd_emit_fn", gemm_epilogue.emit_bwd)
+
+        # 4. 기존 Gemm 위치[i_g]를 Fused Op로 대체
+        self.b.ops[i_g] = fused_op_copy
+
+        # 5. 나머지 노드들(기존 b, r 그리고 방금 생성에 사용된 꼬리 노드)을 nop화
+        # 주의: i_g 자리에 이미 복사본을 넣었으므로 new_op_idx를 마음편히 nop으로 만듭니다.
+        for idx in (i_b, i_r, new_op_idx):
+            self.b.ops[idx].kind = "nop"
+            self.b.ops[idx].inputs = []
+            self.b.ops[idx].outputs = []
+            self.b.ops[idx].attrs = {}
+
+
+# -----------------------------------------------------------------------------
+# Pipeline Entry: Context를 주입받아 최적화 공정 실행
+# -----------------------------------------------------------------------------
+def optimize_ir(b: Any, ctx: Any):
+    # 1. 분석
+    opt = RichMatrixOptimizer(b)
+    opt.encode()
+
+    # 2. 치환 (Context 주입)
+    rewriter = GraphRewriter(b, ctx)
+    for pname in FUSION_PATTERNS.keys():
+        matches = opt.find_matches(pname)
+        if matches:
+            rewriter.apply_fusion(pname, matches)

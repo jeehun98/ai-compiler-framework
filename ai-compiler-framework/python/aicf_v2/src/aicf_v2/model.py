@@ -155,7 +155,7 @@ class Model:
         """
         # optimize hook (현재 identity여도 OK)
         from .compile.passes.pipeline import optimize_ir
-        optimize_ir(self.b)
+        optimize_ir(self.b, self.ctx)  # self.ctx를 함께 전달!
 
         fwd_ops_snapshot = list(self.b.ops)
         return self.build_backward_from_ops(fwd_ops_snapshot, loss_vid)
