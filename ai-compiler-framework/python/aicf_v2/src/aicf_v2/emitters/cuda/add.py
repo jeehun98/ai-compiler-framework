@@ -3,7 +3,7 @@ from typing import Dict, Any
 
 from ...builder import Builder
 from .context import CudaEmitContext
-from .base import emit_resolved
+from .base import emit_resolved, OpFlags # OpFlags 추가
 
 def emit(
     b: Builder,
@@ -17,6 +17,14 @@ def emit(
     hints: dict | None = None,
 ) -> int:
     """Element-wise Add Forward 연산을 IR에 기록합니다."""
+    
+    # 1. 정적 속성 선언: Add는 대표적인 Element-wise 연산입니다.
+    static = OpFlags.IS_ELEMENTWISE
+    
+    # Inplace 가능 여부 확인 (예: a += c)
+    if constraints and constraints.get("inplace_ok"):
+        static |= OpFlags.INPLACE_PREF
+
     return emit_resolved(
         b,
         kind="add",
@@ -29,25 +37,22 @@ def emit(
         attrs={},
         constraints=constraints,
         hints=hints,
+        static_flags=static, # 본질 각인
     )
 
 def emit_bwd(
     b: Builder,
     ctx: CudaEmitContext,
-    fwd_node: Any,        # 최적화된 FWD Add EmitNode
-    grad_y: int,          # dy Vid
+    fwd_node: Any,
+    grad_y: int,
     name: str = "add_bwd",
 ) -> Dict[int, int]:
     """
     최적화된 FWD add 노드를 바탕으로 BWD 연산을 누적합니다.
-    y = a + c 이므로, da = dy, dc = dy 입니다. (Gradient Identity 전파)
     """
     a_vid = fwd_node.inputs[0]
     c_vid = fwd_node.inputs[1]
 
-    # 단순히 grad_y(dy)를 각 입력의 미분값으로 전달합니다.
-    # 만약 Shape 브로드캐스팅이 있었다면 여기서 ReduceSum 처리가 추가되어야 하나,
-    # 현재 규격에서는 Identity 전파를 기본으로 합니다.
     return {
         a_vid: grad_y,
         c_vid: grad_y

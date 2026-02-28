@@ -78,6 +78,12 @@ def main():
     for i, (kind, kid, name, ins, outs) in enumerate(before):
         print(f"Op[{i:02d}] kind={kind:<18} kid={kid:<4} name={name:<22} in={ins} out={outs}")
 
+    print("\n[DEBUG Flags Check]")
+    from aicf_v2.emitters.cuda.base import OpFlags
+    for i, op in enumerate(b.ops):
+        flags = getattr(op, "static_flags", 0)
+        print(f"Op[{i:02d}] kind={op.kind} static_flags={bin(flags)}")
+
     # 3) ✅ pipeline.optimize_ir 호출 (네가 옮긴 패스가 실제로 실행되는지)
     optimize_ir(b)
 

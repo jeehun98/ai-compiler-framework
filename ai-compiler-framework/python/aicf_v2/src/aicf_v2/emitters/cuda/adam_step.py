@@ -4,7 +4,7 @@ from typing import Any, Dict
 
 from ...builder import Builder
 from .context import CudaEmitContext
-from .base import emit_resolved
+from .base import emit_resolved, OpFlags  # OpFlags 추가 임포트
 
 def emit(
     b: Builder,
@@ -41,6 +41,16 @@ def emit(
     if hints:
         abi_hints.update(hints)
 
+    # 1. 정적 속성(Static Flags) 선언
+    # AdamStep은 Optimizer이고, 상태를 변경하며, 그래프의 말단(Terminal)이다.
+    static = OpFlags.IS_OPTIMIZER | OpFlags.HAS_STATE | OpFlags.TERMINAL
+    
+    # 기본 제약 조건 설정 및 Inplace 선호 비트 반영
+    final_constraints = constraints or {"inplace_ok": True}
+    if final_constraints.get("inplace_ok"):
+        static |= OpFlags.INPLACE_PREF
+
+    # 2. 통합 엔트리 호출 (static_flags 전달)
     return emit_resolved(
         b,
         kind="adam_step",
@@ -51,9 +61,9 @@ def emit(
         attr_schema=ctx.SCHEMA_ADAM,
         attr_blob=blob,
         attrs={"lr": lr_f, "beta1": b1, "beta2": b2, "eps": eps_f},
-        # 기본적으로 Inplace 업데이트를 선호함 (Lattice Optimization)
-        constraints=constraints or {"inplace_ok": True},
+        constraints=final_constraints,
         hints=abi_hints,
+        static_flags=static, # 계산된 정적 비트 전달
     )
 
 def emit_bwd(b: Builder, ctx: CudaEmitContext, fwd_node: Any, grad_y: int) -> Dict[int, int]:

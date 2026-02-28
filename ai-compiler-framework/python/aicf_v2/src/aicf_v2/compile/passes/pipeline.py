@@ -14,7 +14,7 @@ def optimize_ir(b: Builder) -> Builder:
     opt.encode()
     
     # 2. 특정 패턴(Gemm+Bias+ReLU) 탐색
-    targets = opt.find_fused_gemm_bias_relu()
+    targets = opt.find_gemm_bias_relu()
     
     # 3. 발견된 타겟이 있다면 그래프 변조 적용
     if targets:
