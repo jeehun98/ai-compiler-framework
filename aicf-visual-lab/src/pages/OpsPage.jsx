@@ -2,33 +2,26 @@
 import React, { useMemo, useState, useEffect } from 'react';
 import 'katex/dist/katex.min.css';
 import { InlineMath, BlockMath } from 'react-katex';
-import {
-  BarChart, Bar, XAxis, YAxis, Tooltip,
-  ResponsiveContainer, Cell
-} from 'recharts';
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts';
 import {
   Cpu, ChevronRight, Zap, Share2, Layers, ShieldCheck, Activity,
-  Terminal, Scale, Eye, Focus, History, Boxes, Menu, X
+  Terminal, Scale, Eye, Focus, History, Boxes, Menu, X, ArrowUpRight
 } from 'lucide-react';
 
-import { useSearchParams } from 'react-router-dom';
-
+import { useSearchParams, Link } from 'react-router-dom';
 import { allOpsData } from '../data/index.js';
 import KernelDeepDive from '../components/KernelDeepDive.jsx';
 
 export default function OpsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
 
-  // ✅ 초기 op: /ops?op=AdamStep
   const initialOp = searchParams.get('op') || 'AdamStep';
-
   const [selectedOpId, setSelectedOpId] = useState(initialOp);
-  const [isModalOpen, setIsModalOpen] = useState(false);
 
-  // ✅ 모바일 사이드바(드로어)
+  const [isModalOpen, setIsModalOpen] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
-  // ✅ URL의 op가 바뀌면(뒤로가기/링크 이동 등) 상태도 동기화
+  // ✅ URL op 동기화 (뒤로가기/링크 이동 대응)
   useEffect(() => {
     const opFromUrl = searchParams.get('op');
     if (opFromUrl && opFromUrl !== selectedOpId) {
@@ -39,17 +32,24 @@ export default function OpsPage() {
 
   const data = allOpsData[selectedOpId];
 
-  // ✅ op가 바뀌면 모바일 드로어 닫기
+  // ✅ op 바뀌면 모바일 드로어 닫기
   useEffect(() => {
     setIsSidebarOpen(false);
   }, [selectedOpId]);
 
-  if (!data) return (
-    <div className="p-10 text-blue-300 bg-[#0f172a] min-h-screen flex flex-col items-center justify-center font-mono italic">
-      <div className="animate-pulse mb-4 text-2xl">AICF Engine Analyzing...</div>
-      <div className="text-slate-500 text-sm italic">그래프 의미론 분석 및 최적화 경로 탐색 중</div>
-    </div>
-  );
+  const handleSelectOp = (id) => {
+    setSelectedOpId(id);
+    setSearchParams({ op: id }, { replace: true });
+  };
+
+  if (!data) {
+    return (
+      <div className="p-10 text-blue-400 bg-[#0f172a] min-h-screen flex flex-col items-center justify-center font-mono">
+        <div className="animate-pulse mb-4 text-2xl font-black uppercase">AICF Engine Analyzing...</div>
+        <div className="text-slate-500 text-sm">그래프 의미론 분석 및 최적화 경로 탐색 중</div>
+      </div>
+    );
+  }
 
   const semantic = data.semantics ?? data.semantic ?? null;
   const formula = data.canonical?.formula ?? '';
@@ -58,32 +58,33 @@ export default function OpsPage() {
   const latency = data.performance?.latency ?? {};
 
   const latencyData = useMemo(() => ([
-    { name: 'PyTorch (기본)', value: latency.pytorch ?? 0, color: '#64748b' },
-    { name: 'torch.compile', value: latency.torch_compile ?? 0, color: '#94a3b8' },
-    { name: 'AICF 최적화', value: latency.ours ?? 0, color: '#3b82f6' },
+    { name: 'PyTorch', value: latency.pytorch ?? 0, color: '#475569' },
+    { name: 'torch.compile', value: latency.torch_compile ?? 0, color: '#64748b' },
+    { name: 'AICF Optimized', value: latency.ours ?? 0, color: '#3b82f6' },
   ]), [latency.pytorch, latency.torch_compile, latency.ours]);
 
   const km = data.kernel?.metrics ?? {};
   const chosenVariant = data.lowering?.chosen?.variant ?? 'Standard_Kernel';
   const hasDeepDive = !!(data.kernel_evolution || data.evolution);
 
-  const handleSelectOp = (id) => {
-    setSelectedOpId(id);
-    setSearchParams({ op: id }, { replace: true });
-  };
-
   return (
-    // ✅ overflow-hidden 제거: 모바일에서 잘림/깨짐 방지
-    // ✅ min-h-dvh: 모바일 주소창 변동 대응 (Tailwind v3.4+)
-    <div className="flex min-h-dvh bg-[#0f172a] text-slate-200 font-sans overflow-x-hidden italic-vars">
-      {/* 모바일 상단바 */}
-      <div className="md:hidden fixed top-0 left-0 right-0 z-40 bg-[#0f172a]/90 backdrop-blur border-b border-slate-800">
-        <div className="flex items-center justify-between px-4 py-3">
-          <div className="flex items-center gap-2 text-blue-400 font-black uppercase tracking-tight">
-            <Cpu size={18} className="text-blue-500" />
-            <span className="text-sm">AICF Lab</span>
-            <span className="text-[10px] text-slate-500 font-normal">v1.0</span>
-          </div>
+    // ✅ min-h-dvh로 모바일 주소창/세이프에어리어 흔들림 대응
+    // ✅ x축 잘림 방지
+    <div className="flex min-h-dvh bg-[#0f172a] text-slate-200 antialiased overflow-x-hidden">
+
+      {/* Mobile Top Header */}
+      <header className="md:hidden fixed top-0 left-0 right-0 z-40 border-b border-slate-800 bg-[#0f172a]/90 backdrop-blur">
+        <div className="flex items-center justify-between px-5 py-4">
+          <Link to="/" className="flex items-center gap-2">
+            <div className="bg-blue-600 p-2 rounded-xl">
+              <Cpu size={18} className="text-white" />
+            </div>
+            <div className="leading-none">
+              <div className="font-black text-blue-400 tracking-tight">AICF LAB</div>
+              <div className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">v1.0.4 Stable</div>
+            </div>
+          </Link>
+
           <button
             onClick={() => setIsSidebarOpen(true)}
             className="p-2 rounded-xl border border-slate-700 bg-[#1e293b] text-slate-200 active:scale-95 transition"
@@ -92,36 +93,42 @@ export default function OpsPage() {
             <Menu size={18} />
           </button>
         </div>
-      </div>
+      </header>
 
-      {/* 모바일 드로어 오버레이 */}
+      {/* Mobile Overlay */}
       {isSidebarOpen && (
         <div
-          className="md:hidden fixed inset-0 z-50 bg-black/50"
+          className="md:hidden fixed inset-0 z-40 bg-black/50"
           onClick={() => setIsSidebarOpen(false)}
           aria-hidden="true"
         />
       )}
 
-      {/* 사이드바 (데스크톱 고정 / 모바일 드로어) */}
+      {/* GLOBAL SIDEBAR */}
       <aside
         className={`
-          fixed md:static top-0 left-0 z-50 md:z-10
-          h-dvh md:h-auto
-          w-[88vw] max-w-[360px] md:w-80
-          bg-[#1e293b] border-r border-slate-700 p-6
-          flex flex-col shadow-2xl
-          transform transition-transform duration-300
+          fixed md:static inset-y-0 left-0 z-50 md:z-10
+          w-[85vw] max-w-[320px] md:w-80
+          bg-[#1e293b] border-r border-slate-800
+          flex flex-col shadow-2xl transition-transform duration-300
           ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}
         `}
         role="dialog"
         aria-modal={isSidebarOpen ? 'true' : 'false'}
       >
-        <div className="flex items-center justify-between">
-          <h1 className="text-xl font-bold text-blue-400 tracking-tight flex items-center gap-2 uppercase">
-            <Cpu size={24} className="text-blue-500" /> AICF Lab{' '}
-            <span className="text-[10px] text-slate-500 font-normal">v1.0</span>
-          </h1>
+        {/* Logo Area */}
+        <div className="p-6 border-b border-slate-800 bg-[#0f172a]/50 flex items-center justify-between gap-3">
+          <Link to="/" className="flex items-center gap-3 group min-w-0">
+            <div className="bg-blue-600 p-2 rounded-xl group-hover:bg-blue-500 transition">
+              <Cpu size={20} className="text-white" />
+            </div>
+            <div className="min-w-0">
+              <h1 className="text-lg font-black tracking-tight text-white leading-none truncate">AICF LAB</h1>
+              <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">
+                v1.0.4 Stable
+              </span>
+            </div>
+          </Link>
 
           <button
             className="md:hidden p-2 rounded-xl border border-slate-700 bg-[#0f172a] text-slate-300"
@@ -132,376 +139,390 @@ export default function OpsPage() {
           </button>
         </div>
 
-        <div className="space-y-2 flex-1 overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-slate-700 mt-8">
-          <p className="text-[10px] text-slate-500 font-black uppercase tracking-widest mb-4 px-4 font-mono">
-            Graph Trace
+        {/* Global Menu Navigation */}
+        <nav className="p-4 border-b border-slate-800 space-y-1">
+          <p className="px-3 text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">
+            Navigation
           </p>
 
-          {Object.keys(allOpsData).map(id => (
+          <Link
+            to="/"
+            className="flex items-center gap-3 px-3 py-2.5 rounded-xl text-slate-400 hover:bg-slate-800 hover:text-white transition font-bold text-sm"
+          >
+            <Layers size={18} /> Dashboard
+          </Link>
+
+          <Link
+            to="/ops"
+            className="flex items-center gap-3 px-3 py-2.5 rounded-xl bg-blue-600/10 text-blue-400 font-bold text-sm border border-blue-500/20"
+          >
+            <Terminal size={18} /> Ops Explorer
+          </Link>
+        </nav>
+
+        {/* Op List (Scrollable) */}
+        <div className="flex-1 overflow-y-auto p-4 space-y-1 scrollbar-thin scrollbar-thumb-slate-700">
+          <p className="px-3 text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">
+            Available Operators
+          </p>
+
+          {Object.keys(allOpsData).map((id) => (
             <button
               key={id}
               onClick={() => handleSelectOp(id)}
-              className={`w-full flex flex-col items-start px-5 py-4 rounded-2xl transition-all duration-300 ${
+              className={`w-full flex items-center justify-between px-4 py-3 rounded-xl transition-all font-bold text-sm ${
                 selectedOpId === id
-                  ? 'bg-blue-600 text-white shadow-lg scale-[1.02]'
-                  : 'hover:bg-slate-800 text-slate-400 opacity-70 hover:opacity-100'
+                  ? 'bg-blue-600 text-white shadow-lg'
+                  : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'
               }`}
             >
-              <div className="flex justify-between w-full items-center uppercase font-black text-xs tracking-widest">
-                <span className="truncate">{id}</span>
-                <ChevronRight size={14} opacity={selectedOpId === id ? 1 : 0.3} />
+              <div className="min-w-0 flex flex-col items-start text-left">
+                <span className="truncate w-full">{id}</span>
+                <span className={`text-[10px] mt-0.5 truncate w-full ${
+                  selectedOpId === id ? 'text-blue-100/90' : 'text-slate-500'
+                }`}>
+                  {allOpsData[id]?.category ?? '연산자 분류'}
+                </span>
               </div>
-              <span className={`text-[10px] mt-1 ${selectedOpId === id ? 'text-blue-100' : 'text-slate-500'}`}>
-                {allOpsData[id]?.category ?? '연산자 분류'}
-              </span>
+              {selectedOpId === id ? <ArrowUpRight size={14} /> : <ChevronRight size={14} opacity={0.25} />}
             </button>
           ))}
         </div>
       </aside>
 
-      {/* 메인 콘텐츠 */}
-      <main
-        // ✅ 모바일 상단바 공간 확보 (pt)
-        className="flex-1 p-5 sm:p-8 lg:p-10 overflow-y-auto space-y-10 bg-gradient-to-b from-[#0f172a] to-[#1e293b]/20 pt-20 md:pt-10"
-      >
-        <header className="flex flex-col lg:flex-row lg:justify-between lg:items-end gap-5 border-b border-slate-800 pb-6">
-          <div className="min-w-0">
-            <span className="text-blue-500 font-mono text-xs uppercase tracking-[0.4em] font-black italic">
-              Architecture Trace Report
-            </span>
+      {/* MAIN CONTENT */}
+      <main className="flex-1 flex flex-col min-w-0">
+        {/* ✅ 모바일 상단바 공간 확보 */}
+        <div className="md:hidden h-[68px]" />
 
-            {/* ✅ 모바일 타이포 다운 */}
-            <h2 className="text-3xl sm:text-4xl lg:text-6xl font-black mt-2 tracking-tighter italic break-words">
-              {data.id}{' '}
-              <span className="text-slate-700 font-light not-italic text-xl sm:text-2xl lg:text-4xl ml-2 text-blue-400/30">
-                Trace
-              </span>
-            </h2>
-          </div>
+        {/* ✅ 메인만 스크롤 (사이드바/오버레이 충돌 방지) */}
+        <div className="flex-1 overflow-y-auto p-5 sm:p-8 lg:p-10 space-y-12 pb-32 bg-gradient-to-b from-[#0f172a] to-[#1e293b]/20">
 
-          <div className="w-fit flex items-center gap-2 text-emerald-400 font-black bg-emerald-400/5 px-4 py-2 rounded-xl border border-emerald-400/10 text-xs uppercase tracking-widest shadow-lg">
-            <ShieldCheck size={16} /> 수학적 불변성 확정 (Semantic Anchored)
-          </div>
-        </header>
+          {/* Header Title Section */}
+          <section className="flex flex-col lg:flex-row lg:items-end justify-between gap-6 border-b border-slate-800 pb-8">
+            <div className="space-y-2 min-w-0">
+              <div className="flex items-center gap-2 text-blue-500 font-mono text-[10px] font-black uppercase tracking-[0.3em]">
+                <Activity size={14} /> Architecture Trace Report
+              </div>
+              <h2 className="text-4xl sm:text-6xl font-black tracking-tight text-white leading-tight break-words">
+                {data.id} <span className="text-blue-500/30 font-light ml-2">Explorer</span>
+              </h2>
+            </div>
 
-        {/* 1. 연산 본질 섹션 */}
-        <section className="space-y-8">
-          <div className="flex items-center gap-3 text-blue-500">
-            <Share2 size={28} />
-            <h3 className="text-2xl sm:text-3xl font-black uppercase tracking-tighter italic">
-              1. 연산 본질 및 데이터 정의
-            </h3>
-          </div>
+            <div className="flex items-center gap-2 text-emerald-400 font-bold bg-emerald-400/5 px-4 py-2 rounded-xl border border-emerald-400/10 text-[11px] uppercase tracking-widest w-fit">
+              <ShieldCheck size={16} /> Semantic Anchored
+            </div>
+          </section>
 
-          <p className="text-slate-500 text-sm ml-0 sm:ml-10 -mt-2 sm:-mt-6 italic leading-relaxed max-w-3xl">
-            {data.descriptions?.essence ?? "해당 연산의 수학적/의미론적 본질을 분석합니다."}
-          </p>
+          {/* 1. Essence Section */}
+          <section className="space-y-6">
+            <div className="flex items-center gap-3 text-blue-400">
+              <Share2 size={24} />
+              <h3 className="text-2xl font-black uppercase tracking-tight">
+                1. 연산 본질 및 데이터 정의
+              </h3>
+            </div>
 
-          <div className="grid grid-cols-12 gap-6">
-            <div className="col-span-12 lg:col-span-8 bg-[#1e293b] p-5 sm:p-8 rounded-[2rem] sm:rounded-[2.5rem] border border-slate-800 shadow-xl">
-              <div className="bg-[#0b1120] p-6 sm:p-12 rounded-3xl border border-slate-800/50 w-full text-center shadow-inner mb-8">
-                {/* ✅ 수식 가로 스크롤 확보 */}
-                <div className="text-2xl sm:text-4xl lg:text-5xl text-blue-400 drop-shadow-[0_0_15px_rgba(96,165,250,0.3)] max-w-full overflow-x-auto scrollbar-hide">
-                  <div className="inline-block min-w-max px-2">
+            <p className="text-slate-500 text-sm leading-relaxed max-w-3xl">
+              {data.descriptions?.essence ?? "해당 연산의 수학적/의미론적 본질을 분석합니다."}
+            </p>
+
+            <div className="grid grid-cols-12 gap-6">
+              <div className="col-span-12 lg:col-span-8 bg-[#1e293b] p-6 sm:p-8 rounded-[2.5rem] border border-slate-800 shadow-xl">
+                {/* Formula */}
+                <div className="bg-[#0b1120] p-6 sm:p-10 rounded-3xl border border-slate-800/50 mb-8 overflow-x-auto scrollbar-hide">
+                  <div className="text-3xl sm:text-4xl text-blue-400 text-center min-w-max">
                     <BlockMath math={formula} />
+                  </div>
+
+                  {/* Shapes (원본에 있던 배지 복원) */}
+                  <div className="mt-6 flex flex-wrap justify-center gap-3 text-slate-500 font-mono text-xs">
+                    {Object.entries(shapes).map(([tensor, shape]) => (
+                      <div
+                        key={tensor}
+                        className="flex gap-2 items-center bg-[#0f172a] px-4 py-2 rounded-xl border border-slate-800 max-w-full"
+                      >
+                        <Boxes size={14} className="text-blue-500/40" />
+                        <span className="text-blue-400 font-bold">{tensor}:</span>
+                        <span className="italic break-all">{shape}</span>
+                      </div>
+                    ))}
                   </div>
                 </div>
 
-                <div className="mt-6 sm:mt-8 flex flex-wrap justify-center gap-3 sm:gap-8 text-slate-500 font-mono text-xs">
-                  {Object.entries(shapes).map(([tensor, shape]) => (
-                    <div key={tensor} className="flex gap-2 items-center bg-[#0f172a] px-4 py-2 rounded-xl border border-slate-800 max-w-full">
-                      <Boxes size={14} className="text-blue-500/40" />
-                      <span className="text-blue-400 font-bold">{tensor}:</span>
-                      <span className="italic break-all">{shape}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div className="space-y-4">
-                <p className="text-[10px] text-slate-500 uppercase font-black tracking-[0.2em] border-l-2 border-blue-500 pl-3 mb-6">
+                {/* Axes */}
+                <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-4">
                   데이터 흐름 및 축별 의미
                 </p>
 
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
-                  {Object.keys(semantic?.axes ?? {}).map((axisKey) => (
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  {Object.keys(semantic?.axes ?? {}).map((axis) => (
                     <div
-                      key={axisKey}
-                      className="relative p-6 bg-[#0f172a] rounded-2xl border border-slate-800 group hover:border-blue-500/40 transition-all shadow-lg overflow-hidden"
+                      key={axis}
+                      className="bg-[#0f172a] p-5 rounded-2xl border border-slate-800 relative group overflow-hidden hover:border-blue-500/30 transition"
                     >
-                      <div className="absolute -bottom-2 -right-2 text-6xl font-black text-blue-500/5 group-hover:text-blue-500/10 transition-colors uppercase italic font-mono pointer-events-none">
-                        {axisKey}
+                      <div className="absolute -right-2 -bottom-2 text-4xl font-black text-white/5 uppercase italic">
+                        {axis}
                       </div>
 
-                      <div className="mb-4 relative z-10">
-                        <p className="text-blue-500 font-black text-[10px] uppercase tracking-widest mb-1">
-                          {semantic.axes[axisKey].name}
-                        </p>
-                        <p className="text-sm font-bold text-slate-200 leading-snug break-words">
-                          {interpretation[axisKey] || "정의되지 않음"}
-                        </p>
+                      <div className="relative z-10 text-[10px] font-black text-blue-500 uppercase tracking-widest mb-1">
+                        {semantic.axes[axis].name}
                       </div>
 
-                      <div className="pt-3 border-t border-slate-800/50 relative z-10">
-                        <p className="text-[10px] text-slate-500 break-words">
-                          <span className="text-slate-400 font-black uppercase mr-1">Role:</span>
-                          "{semantic.axes[axisKey].role}"
-                        </p>
+                      <div className="relative z-10 text-sm font-bold text-slate-200 break-words">
+                        {interpretation[axis] || "정의되지 않음"}
+                      </div>
+
+                      {/* Role (원본에 있던 role 표시 복원) */}
+                      <div className="relative z-10 mt-4 pt-3 border-t border-slate-800/60 text-[10px] text-slate-500">
+                        <span className="text-slate-400 font-black uppercase mr-1">Role:</span>
+                        "{semantic.axes[axis].role}"
                       </div>
                     </div>
                   ))}
                 </div>
               </div>
-            </div>
 
-            {/* Optimization Constraints */}
-            <div className="col-span-12 lg:col-span-4 space-y-4">
-              <div className="flex items-center justify-between border-l-2 border-blue-500 pl-3 mb-4">
-                <p className="text-[10px] text-slate-500 uppercase font-black tracking-[0.2em] font-mono">
-                  Optimization Constraints
-                </p>
-                <span className="text-[9px] text-emerald-500 font-bold bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
-                  VERIFIED
-                </span>
-              </div>
+              {/* Invariants */}
+              <div className="col-span-12 lg:col-span-4 space-y-4">
+                <div className="flex items-center justify-between px-2">
+                  <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">
+                    Optimization Constraints
+                  </p>
+                  <span className="text-[9px] text-emerald-500 font-bold bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
+                    VERIFIED
+                  </span>
+                </div>
 
-              {semantic?.invariants?.map(inv => (
-                <div
-                  key={inv.id}
-                  className="bg-[#1e293b] p-6 rounded-3xl border border-slate-800 hover:border-blue-500/50 transition-all shadow-xl group relative overflow-hidden"
-                >
-                  <div className="absolute top-2 right-4 text-[8px] font-mono text-slate-700 opacity-50 uppercase tracking-tighter">
-                    {inv.id}
-                  </div>
+                {semantic?.invariants?.map((inv) => (
+                  <div
+                    key={inv.id}
+                    className="bg-[#1e293b] p-6 rounded-3xl border border-slate-800 hover:border-blue-500/30 transition shadow-lg relative overflow-hidden"
+                  >
+                    <div className="absolute top-2 right-4 text-[8px] font-mono text-slate-700 opacity-60 uppercase tracking-tighter">
+                      {inv.id}
+                    </div>
 
-                  <div className="flex justify-between items-start mb-4">
-                    <p className="text-sm font-black text-blue-400 uppercase tracking-tight italic group-hover:text-blue-300 transition-colors">
+                    <div className="text-blue-400 font-black text-xs uppercase tracking-tight mb-3">
                       {inv.name}
-                    </p>
-                  </div>
+                    </div>
 
-                  <div className="bg-[#0f172a] px-3 py-2 rounded-xl border border-slate-800 mb-3 shadow-inner">
-                    <p className="text-[8px] text-slate-600 font-black uppercase tracking-widest mb-1 font-mono">
-                      Control Metric
-                    </p>
-                    <div className="text-xs text-blue-200/80 italic font-mono truncate">
+                    <div className="bg-[#0f172a] p-3 rounded-xl border border-slate-800 font-mono text-[11px] text-blue-200/70 mb-3 italic overflow-x-auto scrollbar-hide">
                       <InlineMath math={inv.metric} />
                     </div>
-                  </div>
 
-                  <div className="flex gap-2 mb-4">
-                    <div className="flex-1 bg-emerald-500/5 px-3 py-2 rounded-xl border border-emerald-500/10">
-                      <p className="text-[8px] text-emerald-600 font-black uppercase tracking-widest mb-1 font-mono text-center">
-                        Threshold
-                      </p>
-                      <div className="text-[10px] text-emerald-400 font-bold text-center leading-none">
-                        <InlineMath math={inv.threshold} />
+                    {/* Threshold + Allow Range (원본 정보 유지) */}
+                    <div className="grid grid-cols-2 gap-2 mb-3">
+                      <div className="bg-emerald-500/5 px-3 py-2 rounded-xl border border-emerald-500/10">
+                        <p className="text-[8px] text-emerald-600 font-black uppercase tracking-widest mb-1 font-mono text-center">
+                          Threshold
+                        </p>
+                        <div className="text-[10px] text-emerald-400 font-bold text-center leading-none">
+                          <InlineMath math={inv.threshold} />
+                        </div>
+                      </div>
+
+                      <div className="bg-blue-500/5 px-3 py-2 rounded-xl border border-blue-500/10">
+                        <p className="text-[8px] text-blue-600 font-black uppercase tracking-widest mb-1 font-mono text-center">
+                          Allow Range
+                        </p>
+                        <div className="text-[10px] text-blue-300 font-bold text-center leading-none">
+                          {inv.allows?.length ?? 0} Strategies
+                        </div>
                       </div>
                     </div>
 
-                    <div className="flex-1 bg-blue-500/5 px-3 py-2 rounded-xl border border-blue-500/10">
-                      <p className="text-[8px] text-blue-600 font-black uppercase tracking-widest mb-1 font-mono text-center">
-                        Allow Range
-                      </p>
-                      <div className="text-[10px] text-blue-300 font-bold text-center leading-none">
-                        {inv.allows?.length ?? 0} Strategies
-                      </div>
+                    <div className="flex flex-wrap gap-1">
+                      {inv.allows?.map((a) => (
+                        <span
+                          key={a}
+                          className="text-[8px] font-bold bg-slate-900 text-slate-500 px-2 py-0.5 rounded border border-slate-800 uppercase tracking-tighter hover:text-blue-400/80 transition-colors"
+                        >
+                          + {a}
+                        </span>
+                      ))}
                     </div>
                   </div>
+                ))}
+              </div>
+            </div>
+          </section>
 
-                  <div className="flex flex-wrap gap-1">
-                    {inv.allows?.map(a => (
-                      <span
-                        key={a}
-                        className="text-[8px] font-bold bg-slate-900 text-slate-500 px-2 py-0.5 rounded border border-slate-800 uppercase tracking-tighter group-hover:text-blue-400/70 transition-colors"
-                      >
-                        + {a}
-                      </span>
-                    ))}
+          {/* 2. Strategy Section */}
+          <section className="space-y-6">
+            <div className="flex items-center gap-3 text-purple-400">
+              <Eye size={24} />
+              <h3 className="text-2xl font-black uppercase tracking-tight">
+                2. 연쇄 최적화 전략
+              </h3>
+            </div>
+
+            <p className="text-slate-500 text-sm leading-relaxed max-w-3xl">
+              {data.descriptions?.strategy ?? "인접한 후행 연산의 특성을 분석하여 최적화 경로를 탐색합니다."}
+            </p>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {semantic?.sensitivity?.downstream?.map((ds, i) => (
+                <div
+                  key={i}
+                  className="bg-[#1e293b] p-6 sm:p-8 rounded-[2.5rem] border border-slate-800 shadow-xl flex gap-6 items-start group hover:border-purple-500/30 transition"
+                >
+                  <div className="bg-purple-500/10 p-4 rounded-2xl border border-purple-500/20 text-purple-400 shrink-0">
+                    <Focus size={24} />
+                  </div>
+
+                  <div className="space-y-4 flex-1 min-w-0">
+                    <h4 className="text-xl font-black text-white uppercase tracking-tight break-words">
+                      {ds.name}
+                    </h4>
+
+                    <div className="bg-[#0f172a] p-4 rounded-2xl border border-slate-800 font-mono text-xs text-slate-300 overflow-x-auto scrollbar-hide">
+                      <InlineMath math={ds.rule} />
+                    </div>
+
+                    <div className="flex items-center gap-2 text-xs font-bold text-emerald-400 bg-emerald-400/5 px-3 py-2 rounded-lg border border-emerald-400/10">
+                      <Zap size={14} /> <span className="break-words">{ds.hint}</span>
+                    </div>
                   </div>
                 </div>
               ))}
             </div>
-          </div>
-        </section>
+          </section>
 
-        {/* 2. 연쇄 최적화 전략 섹션 */}
-        <section className="space-y-8">
-          <div className="flex items-center gap-3 text-purple-400">
-            <Eye size={28} />
-            <h3 className="text-2xl sm:text-3xl font-black uppercase tracking-tighter italic">
-              2. 연쇄 최적화 전략
-            </h3>
-          </div>
-
-          <p className="text-slate-500 text-sm ml-0 sm:ml-10 -mt-2 sm:-mt-6 italic leading-relaxed max-w-3xl">
-            {data.descriptions?.strategy ?? "인접한 후행 연산의 특성을 분석하여 최적화 경로를 탐색합니다."}
-          </p>
-
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {semantic?.sensitivity?.downstream?.map((ds, i) => (
-              <div
-                key={i}
-                className="bg-[#1e293b] p-6 sm:p-8 rounded-[2rem] sm:rounded-[2.5rem] border border-slate-800 flex gap-6 sm:gap-8 items-start shadow-xl group relative overflow-hidden transition-all hover:border-purple-500/40"
-              >
-                <div className="bg-purple-500/10 p-4 sm:p-5 rounded-2xl border border-purple-500/20 text-purple-400 shrink-0">
-                  <Focus size={28} className="sm:hidden" />
-                  <Focus size={32} className="hidden sm:block" />
-                </div>
-
-                <div className="flex-1 space-y-5 min-w-0">
-                  <h4 className="text-xl sm:text-2xl font-black text-white italic uppercase tracking-tighter break-words">
-                    {ds.name}
-                  </h4>
-
-                  <div className="relative">
-                    <p className="text-[9px] text-slate-600 font-black uppercase tracking-widest mb-1.5 ml-1">
-                      Detection Rule
-                    </p>
-                    <div className="text-sm text-slate-200 leading-relaxed bg-[#0f172a] p-4 rounded-2xl border border-slate-800 italic shadow-inner overflow-x-auto scrollbar-hide">
-                      <div className="text-[11px] whitespace-normal break-keep">
-                        <InlineMath math={ds.rule} />
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-3 bg-emerald-500/5 px-4 py-3 rounded-2xl border border-emerald-500/10">
-                    <Zap size={14} className="text-emerald-400" />
-                    <span className="text-xs font-bold text-emerald-400 break-words">
-                      {ds.hint}
-                    </span>
-                  </div>
-                </div>
+          {/* 3. Hardware Mapping */}
+          <section className="space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+              <div className="flex items-center gap-3 text-emerald-400">
+                <Zap size={24} />
+                <h3 className="text-2xl font-black uppercase tracking-tight">
+                  3. 하드웨어 매핑 및 최적화 구현
+                </h3>
               </div>
-            ))}
-          </div>
-        </section>
 
-        {/* 3. 하드웨어 매핑 섹션 */}
-        <section className="space-y-8 pb-24">
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-            <div className="flex items-center gap-3 text-emerald-400">
-              <Zap size={28} />
-              <h3 className="text-2xl sm:text-3xl font-black uppercase tracking-tighter italic">
-                3. 하드웨어 매핑 및 최적화 구현
-              </h3>
+              {hasDeepDive && (
+                <button
+                  onClick={() => setIsModalOpen(true)}
+                  className="w-fit flex items-center gap-2 px-5 py-2.5 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-bold uppercase tracking-widest border border-slate-700 transition"
+                >
+                  <History size={14} />
+                  History
+                </button>
+              )}
             </div>
 
-            {hasDeepDive && (
-              <button
-                onClick={() => setIsModalOpen(true)}
-                className="w-fit flex items-center gap-2 px-5 sm:px-6 py-3 bg-emerald-600/10 hover:bg-emerald-600 border border-emerald-500/30 text-emerald-400 hover:text-white rounded-2xl font-black text-xs uppercase transition-all shadow-lg"
-              >
-                <History size={16} />
-                최적화 히스토리 보기
-              </button>
-            )}
-          </div>
+            <p className="text-slate-500 text-sm leading-relaxed max-w-3xl">
+              {data.descriptions?.hardware ?? "GPU 하드웨어 매핑 전략을 수행합니다."}
+            </p>
 
-          <p className="text-slate-500 text-sm ml-0 sm:ml-10 -mt-2 sm:-mt-6 italic leading-relaxed max-w-3xl">
-            {data.descriptions?.hardware ?? "GPU 하드웨어 매핑 전략을 수행합니다."}
-          </p>
-
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-            <div className="lg:col-span-5 bg-[#1e293b] p-6 sm:p-10 rounded-[2rem] sm:rounded-[2.5rem] border border-slate-800 shadow-2xl flex flex-col">
-              <div className="flex items-center gap-2 mb-8 text-emerald-400">
-                <Terminal size={20} />
-                <h4 className="text-[10px] font-black uppercase tracking-[0.2em]">
-                  Lowering Decision Engine
-                </h4>
-              </div>
-
-              <div className="space-y-10">
-                <div>
-                  <p className="text-[10px] text-slate-500 uppercase font-black mb-3 ml-2">
-                    Selected Variant
-                  </p>
-                  <p className="text-xl sm:text-2xl font-black text-white italic ml-2 break-words">
-                    "{chosenVariant}"
-                  </p>
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+              {/* Lowering Decision */}
+              <div className="lg:col-span-5 bg-[#1e293b] p-6 sm:p-8 rounded-[2.5rem] border border-slate-800 shadow-xl">
+                <div className="flex items-center gap-2 mb-6 text-emerald-400 font-black text-[10px] uppercase tracking-widest">
+                  <Terminal size={16} /> Lowering Decision Engine
                 </div>
 
-                <div className="space-y-4 text-sm">
+                <p className="text-[10px] text-slate-500 uppercase font-black mb-2">
+                  Selected Variant
+                </p>
+                <div className="text-2xl font-black text-white mb-6 break-words">
+                  "{chosenVariant}"
+                </div>
+
+                <div className="space-y-3">
                   {data.lowering?.chosen?.reason?.map((r, i) => (
                     <div
                       key={i}
-                      className="flex gap-4 p-4 bg-[#0f172a] rounded-2xl border border-slate-800 text-slate-400 leading-relaxed font-bold border-l-4 border-l-emerald-600/50"
+                      className="bg-[#0f172a] p-4 rounded-2xl border border-slate-800 text-sm font-bold text-slate-400 flex gap-3"
                     >
-                      <span className="text-emerald-500 font-mono text-xs mt-1 shrink-0">
+                      <span className="text-emerald-500 font-mono shrink-0">
                         0{i + 1}
                       </span>
-                      <div className="flex-1 overflow-x-auto scrollbar-hide min-w-0">
-                        <div className="text-[11px] whitespace-normal break-keep">
-                          <InlineMath math={r} />
-                        </div>
+                      <div className="min-w-0 overflow-x-auto scrollbar-hide">
+                        <InlineMath math={r} />
                       </div>
                     </div>
                   ))}
                 </div>
               </div>
-            </div>
 
-            {/* ✅ 모바일 1열, sm부터 2열 */}
-            <div className="lg:col-span-7 grid grid-cols-1 sm:grid-cols-2 gap-6">
-              <MetricCard title="최대 처리량" value={km.throughput} color="text-emerald-400" icon={<Activity size={16} />} />
-              <MetricCard title="메모리 재사용률" value={km.memory_reuse} color="text-purple-400" icon={<Layers size={16} />} />
-
-              <div className="sm:col-span-2 bg-[#1e293b] p-6 sm:p-8 rounded-3xl border border-slate-700 shadow-xl">
-                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6 sm:mb-8">
-                  <div className="flex items-center gap-2 text-slate-500 font-mono text-[10px] font-black uppercase">
-                    <Scale size={18} /> Semantic Cost Model
-                  </div>
-                  <div className="text-xs font-mono text-blue-400 italic break-words">
-                    <InlineMath math={data.costModel?.semanticLoss || ''} />
-                  </div>
+              {/* Metrics + CostModel + Chart */}
+              <div className="lg:col-span-7 flex flex-col gap-6 min-w-0">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                  <MetricCard
+                    title="Throughput"
+                    value={km.throughput}
+                    color="text-emerald-400"
+                    icon={<Activity size={16} />}
+                  />
+                  <MetricCard
+                    title="Mem Reuse"
+                    value={km.memory_reuse}
+                    color="text-purple-400"
+                    icon={<Layers size={16} />}
+                  />
                 </div>
 
-                <div className="grid grid-cols-3 gap-4">
-                  {Object.entries(data.costModel?.weights_hint?.default ?? {}).map(([k, v]) => (
-                    <div
-                      key={k}
-                      className="flex flex-col items-center gap-2 p-4 bg-[#0f172a]/50 rounded-2xl border border-slate-800"
-                    >
-                      <div className="text-lg font-black text-slate-100">{v}</div>
-                      <p className="text-[9px] text-slate-600 uppercase font-black tracking-tighter text-center break-words">
-                        {k}
-                      </p>
+                {/* Cost Model (원본의 costModel 섹션 복원) */}
+                <div className="bg-[#1e293b] p-6 sm:p-8 rounded-[2.5rem] border border-slate-800 shadow-xl">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
+                    <div className="flex items-center gap-2 text-slate-500 font-mono text-[10px] font-black uppercase">
+                      <Scale size={18} /> Semantic Cost Model
                     </div>
-                  ))}
+                    <div className="text-xs font-mono text-blue-400 italic break-words">
+                      <InlineMath math={data.costModel?.semanticLoss || ''} />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-4">
+                    {Object.entries(data.costModel?.weights_hint?.default ?? {}).map(([k, v]) => (
+                      <div
+                        key={k}
+                        className="flex flex-col items-center gap-2 p-4 bg-[#0f172a]/50 rounded-2xl border border-slate-800"
+                      >
+                        <div className="text-lg font-black text-slate-100">{v}</div>
+                        <p className="text-[9px] text-slate-600 uppercase font-black tracking-tighter text-center break-words">
+                          {k}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
                 </div>
+
+                {/* Latency Chart (원본의 별도 섹션 톤 반영) */}
+                <section className="bg-[#1e293b] p-6 sm:p-8 rounded-[2.5rem] border border-slate-800 shadow-xl">
+                  <h4 className="text-slate-500 text-[10px] font-black mb-6 uppercase text-center font-mono">
+                    Physical Performance Comparison (Latency ms)
+                  </h4>
+
+                  <div className="h-52 sm:h-56">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={latencyData} layout="vertical">
+                        <XAxis type="number" hide />
+                        <YAxis dataKey="name" type="category" stroke="#94a3b8" fontSize={10} width={110} />
+                        <Tooltip
+                          cursor={{ fill: '#2d3748' }}
+                          contentStyle={{
+                            backgroundColor: '#0f172a',
+                            border: '1px solid #334155',
+                            borderRadius: '12px',
+                          }}
+                        />
+                        <Bar dataKey="value" barSize={24} radius={[0, 6, 6, 0]}>
+                          {latencyData.map((e, i) => <Cell key={i} fill={e.color} />)}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </section>
               </div>
             </div>
-          </div>
-        </section>
-
-        {/* 성능 차트 */}
-        <section className="bg-[#1e293b] p-6 sm:p-8 rounded-[2rem] sm:rounded-[2.5rem] border border-slate-800 shadow-xl pb-10 sm:pb-12">
-          <h4 className="text-slate-500 text-[10px] font-black mb-8 sm:mb-12 uppercase text-center italic font-mono">
-            Physical Performance Comparison (Latency ms)
-          </h4>
-
-          {/* ✅ 모바일에서 차트 높이 축소 */}
-          <div className="h-56 sm:h-64">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={latencyData} layout="vertical">
-                <XAxis type="number" hide />
-                <YAxis dataKey="name" type="category" stroke="#94a3b8" fontSize={11} width={110} />
-                <Tooltip
-                  cursor={{ fill: '#2d3748' }}
-                  contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '12px' }}
-                />
-                <Bar dataKey="value" barSize={28} radius={[0, 8, 8, 0]}>
-                  {latencyData.map((e, i) => <Cell key={i} fill={e.color} />)}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </section>
+          </section>
+        </div>
       </main>
 
       <KernelDeepDive isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} data={data} />
 
-      {/* 스타일 보강: 스크롤바 숨김 */}
+      {/* ✅ 원본에 있던 scrollbar-hide 유지 */}
       <style jsx="true">{`
         .scrollbar-hide::-webkit-scrollbar { display: none; }
         .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
@@ -512,12 +533,13 @@ export default function OpsPage() {
 
 function MetricCard({ title, value, color, icon }) {
   return (
-    <div className="bg-[#1e293b] p-6 sm:p-8 rounded-[2rem] sm:rounded-[2.5rem] border border-slate-800 shadow-lg group transition-all hover:border-emerald-500/30">
-      <div className="flex items-center gap-3 text-slate-500 mb-4 group-hover:text-emerald-400 transition-colors">
-        {icon}
-        <p className="text-[10px] uppercase font-black tracking-[0.2em]">{title}</p>
+    <div className="bg-[#1e293b] p-6 sm:p-8 rounded-[2.5rem] border border-slate-800 shadow-lg transition hover:border-emerald-500/30">
+      <div className="flex items-center gap-2 text-slate-500 mb-3 text-[10px] font-black uppercase tracking-widest">
+        {icon} {title}
       </div>
-      <p className={`text-3xl sm:text-4xl font-black font-mono tracking-tighter ${color}`}>{value ?? '—'}</p>
+      <p className={`text-3xl sm:text-4xl font-black font-mono tracking-tighter ${color}`}>
+        {value ?? '—'}
+      </p>
     </div>
   );
 }

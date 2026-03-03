@@ -9,16 +9,19 @@ export const gemmEpilogueData = {
   },
 
   canonical: {
-    formula: "Y = \text{ReLU}(\alpha(A \times B) + \beta C + \text{Bias})",
+    // 수식 수정: GEMM 표준 수식 C = alpha(A*B) + beta*C 에 Bias와 ReLU를 결합한 형태
+    formula: "Y = \\max(0, \\alpha(A \\times B) + \\beta C + \\text{Bias})",
     shapes: { 
       A: "M x K", 
       B: "K x N", 
+      C: "M x N",
       Bias: "N (Vector)", 
       Y: "M x N" 
     },
     interpretation: {
       A: "입력 특징 (질의)",
       B: "선형 투영 가중치 (가설)",
+      C: "누적용 베이스 행렬 (Accumulator Base)",
       Bias: "특징 활성화 임계값 조정 (Prior)",
       Y: "정제된 출력 특징 (Final Features)"
     }
@@ -27,7 +30,6 @@ export const gemmEpilogueData = {
   semantics: {
     thesis: "투영된 신호를 편향(Bias)으로 교정하고 비선형성(ReLU)을 부여하여 정보의 유효성을 확정하는 연산",
     
-    // 분석된 데이터 기반 불변성 (Invariants)
     invariants: [
       {
         id: "INV_EPILOGUE_FUSION",
@@ -39,13 +41,12 @@ export const gemmEpilogueData = {
         id: "INV_RELU_SPARSITY",
         name: "희소성 전파 (Sparsity Propagation)",
         metric: "Zero-value Ratio",
-        rule: "ReLU에 의해 0이 된 데이터는 후속 연산(Softmax 등)의 연산 비용 절감 힌트로 활용",
+        rule: "ReLU에 의해 0이 된 데이터는 후속 연산의 연산 비용 절감 힌트로 활용",
         allows: ["Sparse-aware Optimization"]
       }
     ],
 
     sensitivity: {
-      // 커널 코드의 f32/f16 분기에 따른 정밀도 민감도
       precision: {
         f16_tc: "Tensor Core 사용 시 Accumulator는 f32로 유지하여 Bias 합산 시 수치적 정밀도 손실 방지",
         f32_naive: "대형 행렬에서 정밀도가 중요할 경우 사용하며, 병렬 리덕션 효율에 집중"
@@ -70,7 +71,6 @@ export const gemmEpilogueData = {
   },
 
   kernel_analysis: {
-    // 제공해주신 launcher.cu 코드의 핵심 전략 분석
     logic: [
       { 
         stage: "Load & Compute", 
@@ -78,7 +78,7 @@ export const gemmEpilogueData = {
       },
       { 
         stage: "Epilogue Fusion", 
-        detail: "wmma::store_matrix_sync 직후 smemC에서 데이터를 읽을 때 Bias 가산 및 ReLU 적용" 
+        detail: "wmma::store_matrix_sync 직전 Accumulator Fragment 단계에서 Bias 가산 및 ReLU 적용" 
       },
       { 
         stage: "Backward (dBias)", 
