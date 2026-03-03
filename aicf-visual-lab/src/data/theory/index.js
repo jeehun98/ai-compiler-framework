@@ -1,13 +1,10 @@
-import { gemmTheory } from "./gemm";
-
-// TODO: 다른 op 이론 파일 추가
-// import { softmaxTheory } from "./softmax";
-// import { layerNormTheory } from "./layernorm";
+// src/data/theory/index.js
+import { gemmTheory } from "./gemm.js";
+import { biasTheory } from "./bias.js"; // biasTheory도 같은 스키마로 만들 것
 
 export const theoryByOpId = {
-  GEMM: gemmTheory,
-  // Softmax: softmaxTheory,
-  // LayerNorm: layerNormTheory,
+  [gemmTheory.id]: gemmTheory,
+  [biasTheory.id]: biasTheory,
 };
 
-export const DEFAULT_THEORY_OP = "GEMM";
+export const theoryOpIds = Object.keys(theoryByOpId);

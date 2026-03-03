@@ -1,9 +1,17 @@
 // src/components/AppSidebar.jsx
 import React, { useMemo } from "react";
 import { Link, useLocation } from "react-router-dom";
-import { Cpu, Terminal, LayoutDashboard, BookOpen, ArrowUpRight } from "lucide-react";
+import {
+  Cpu,
+  Terminal,
+  LayoutDashboard,
+  BookOpen,
+  ArrowUpRight,
+  ChevronRight,
+} from "lucide-react";
 
 import { allOpsData } from "../data/index.js";
+import { theoryByOpId } from "../data/theory/index.js";
 
 export default function AppSidebar({
   isOpen,
@@ -13,8 +21,13 @@ export default function AppSidebar({
 }) {
   const location = useLocation();
   const isOps = location.pathname === "/ops";
+  const isTheory = location.pathname === "/theory";
 
-  const opIds = useMemo(() => Object.keys(allOpsData || {}), []);
+  const listIds = useMemo(() => {
+    if (isTheory) return Object.keys(theoryByOpId || {});
+    if (isOps) return Object.keys(allOpsData || {});
+    return [];
+  }, [isOps, isTheory]);
 
   const navItem = (to, label, Icon) => {
     const isActive = location.pathname === to;
@@ -34,9 +47,14 @@ export default function AppSidebar({
     );
   };
 
+  const SectionTitle = ({ children }) => (
+    <p className="px-3 text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">
+      {children}
+    </p>
+  );
+
   return (
     <>
-      {/* Overlay */}
       {isOpen && (
         <div
           className="fixed inset-0 z-40 bg-black/60 md:hidden backdrop-blur-sm"
@@ -56,7 +74,6 @@ export default function AppSidebar({
         role="dialog"
         aria-modal={isOpen ? "true" : "false"}
       >
-        {/* Logo */}
         <div className="p-6 border-b border-slate-800 bg-[#0f172a]/50">
           <Link to="/" className="flex items-center gap-3 group" onClick={onClose}>
             <div className="bg-blue-600 p-2 rounded-xl group-hover:bg-blue-500 transition">
@@ -73,31 +90,30 @@ export default function AppSidebar({
           </Link>
         </div>
 
-        {/* Nav */}
         <nav className="p-4 space-y-1 border-b border-slate-800">
-          <p className="px-3 text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">
-            Navigation
-          </p>
-
+          <SectionTitle>Navigation</SectionTitle>
           {navItem("/", "Dashboard", LayoutDashboard)}
           {navItem("/ops", "Ops Explorer", Terminal)}
           {navItem("/theory", "Theory", BookOpen)}
         </nav>
 
-        {/* Ops List (Ops 페이지에서만 노출) */}
         <div className="flex-1 overflow-y-auto p-4 space-y-1 scrollbar-thin scrollbar-thumb-slate-700">
-          {isOps ? (
+          {(isOps || isTheory) ? (
             <>
-              <p className="px-3 text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">
-                Available Operators
-              </p>
+              <SectionTitle>{isOps ? "Available Operators" : "Theory Specs"}</SectionTitle>
 
-              {opIds.map((id) => {
+              {listIds.map((id) => {
                 const active = activeOpId === id;
+
+                const to = isOps ? `/ops?op=${id}` : `/theory?op=${id}`;
+                const category = isTheory
+                  ? (theoryByOpId?.[id]?.subtitle ?? "Theory Spec")
+                  : (allOpsData?.[id]?.category ?? "연산자 분류");
+
                 return (
                   <Link
                     key={id}
-                    to={`/ops?op=${id}`}
+                    to={to}
                     onClick={onClose}
                     className={[
                       "w-full flex items-center justify-between px-4 py-3 rounded-xl transition-all font-bold text-sm",
@@ -114,15 +130,10 @@ export default function AppSidebar({
                           active ? "text-blue-100/90" : "text-slate-500",
                         ].join(" ")}
                       >
-                        {allOpsData?.[id]?.category ?? "연산자 분류"}
+                        {category}
                       </span>
                     </div>
-
-                    {active ? (
-                      <ArrowUpRight size={14} />
-                    ) : (
-                      <ArrowUpRight size={14} className="opacity-25" />
-                    )}
+                    {active ? <ArrowUpRight size={14} /> : <ChevronRight size={14} className="opacity-25" />}
                   </Link>
                 );
               })}
@@ -132,7 +143,7 @@ export default function AppSidebar({
               <div className="text-[10px] font-black uppercase tracking-widest text-slate-600 mb-2">
                 Tip
               </div>
-              Ops Explorer에서 연산 리스트가 나타납니다.
+              Ops / Theory 페이지에서 리스트가 나타납니다.
             </div>
           )}
         </div>
