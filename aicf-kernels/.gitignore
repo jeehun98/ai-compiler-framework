@@ -1,0 +1,10 @@
+build*/
+out/
+*.ncu-rep
+*.nsys-rep
+*.sqlite
+*.qdrep
+*.csv
+*.json
+*.log
+.DS_Store
