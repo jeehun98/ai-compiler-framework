@@ -5,6 +5,7 @@ import HomePage from "./pages/HomePage.jsx";
 import OpsPage from "./pages/OpsPage.jsx";
 import TheoryPage from "./pages/TheoryPage.jsx"
 import PipelinePage from "./pages/PipelinePage.jsx";
+import KernelAnalysisPage from "./pages/KernelAnalysisPage.jsx";
 
 export default function App() {
   return (
@@ -14,6 +15,7 @@ export default function App() {
         <Route path="/ops" element={<OpsPage />} />
         <Route path="/theory" element={<TheoryPage />} />
         <Route path="/pipeline" element={<PipelinePage />} />
+        <Route path="/kernels" element={<KernelAnalysisPage/>}/>
 
         {/* 나중 확장 */}
         {/* <Route path="/ir" element={<IRPage />} /> */}
