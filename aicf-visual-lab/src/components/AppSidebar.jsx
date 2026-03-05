@@ -9,7 +9,8 @@ import {
   ChevronRight,
   GitMerge,
   Settings2,
-  ShieldCheck
+  ShieldCheck,
+  Microscope // 분석용 아이콘 추가
 } from "lucide-react";
 
 import { allOpsData } from "../data/index.js";
@@ -25,16 +26,19 @@ export default function AppSidebar({
   const isOps = location.pathname === "/ops";
   const isTheory = location.pathname === "/theory";
   const isPipeline = location.pathname === "/pipeline";
+  const isAnalysis = location.pathname.startsWith("/analysis"); // Analysis 페이지 판별
 
-  // ✅ 수정: Pipeline 페이지에서는 리스트를 보여주지 않음 (isOps와 isTheory일 때만 리스트 생성)
+  // ✅ 수정: Analysis 페이지에서도 커널 리스트(allOpsData 기반)를 보여주도록 설정
   const listIds = useMemo(() => {
     if (isTheory) return Object.keys(theoryByOpId || {});
-    if (isOps) return Object.keys(allOpsData || {});
+    if (isOps || isAnalysis) return Object.keys(allOpsData || {}); // 분석 페이지도 리스트 공유
     return [];
-  }, [isOps, isTheory]); // isPipeline 제거
+  }, [isOps, isTheory, isAnalysis]);
 
   const navItem = (to, label, Icon) => {
-    const isActive = location.pathname === to;
+    // pathname이 정확히 일치하거나, 해당 경로로 시작하는 경우(하위 경로 포함) active 처리
+    const isActive = to === "/" ? location.pathname === "/" : location.pathname.startsWith(to);
+    
     return (
       <Link
         to={to}
@@ -96,12 +100,12 @@ export default function AppSidebar({
           <SectionTitle>Navigation</SectionTitle>
           {navItem("/", "Dashboard", LayoutDashboard)}
           {navItem("/ops", "Ops Explorer", Terminal)}
+          {navItem("/kernels", "Kernel Analysis", Microscope)} {/* 신규 추가 */}
           {navItem("/theory", "Theory Specs", BookOpen)}
           {navItem("/pipeline", "Compiler Pipeline", GitMerge)}
         </nav>
 
         <div className="flex-1 overflow-y-auto p-4 space-y-1 scrollbar-thin scrollbar-thumb-slate-700">
-          {/* ✅ listIds가 존재할 때(Ops, Theory 페이지일 때)만 리스트 노출 */}
           {listIds.length > 0 ? (
             <>
               <SectionTitle>
@@ -110,7 +114,8 @@ export default function AppSidebar({
 
               {listIds.map((id) => {
                 const active = activeOpId === id;
-                let to = isTheory ? `/theory?op=${id}` : `/ops?op=${id}`;
+                // 이동 경로 설정
+                let to = isTheory ? `/theory?op=${id}` : isAnalysis ? `/analysis/${id}` : `/ops?op=${id}`;
 
                 const category = isTheory
                   ? (theoryByOpId?.[id]?.subtitle ?? "Theoretical Object")
@@ -145,7 +150,6 @@ export default function AppSidebar({
               })}
             </>
           ) : (
-            /* ✅ Pipeline이나 Dashboard 등 리스트가 필요 없는 페이지용 Empty State */
             <div className="px-3 py-10 text-center animate-in fade-in duration-500">
               <div className="inline-flex p-3 bg-slate-800/50 rounded-2xl mb-4 text-slate-600">
                 <Settings2 size={24} />
@@ -153,7 +157,7 @@ export default function AppSidebar({
               <p className="text-[11px] text-slate-500 font-medium leading-relaxed">
                 {isPipeline 
                   ? "파이프라인 페이지는 전체 실행 <br/> 흐름 가이드를 제공합니다." 
-                  : "선택한 메뉴에 대한 상세 <br/> 리스트가 이곳에 표시됩니다."}
+                  : "상세 리스트가 필요한 <br/> 메뉴를 선택해주세요."}
               </p>
             </div>
           )}
