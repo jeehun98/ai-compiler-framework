@@ -10,22 +10,22 @@ export default function PipelinePage() {
 
   const steps = [
     {
-      title: "Graph Ingestion",
+      title: "Semantic Ingestion",
       icon: <Box size={20} />,
       desc: "수학적 정의(Theory)를 바탕으로 상위 프레임워크의 그래프를 분석합니다.",
-      detail: "ONNX/PyTorch IR을 AICF 전용 Semantic Graph로 변환하며, 각 노드에 이론적 제약 사항을 바인딩합니다."
+      detail: "ONNX/PyTorch IR을 AICF 전용 Semantic Graph로 변환하며, 각 노드에 이론적 제약 사항과 수학적 불변성(Invariants)을 바인딩합니다."
     },
     {
       title: "Optimization Pass",
       icon: <Zap size={20} />,
-      desc: "Ops Explorer의 전략을 적용하여 커널 퓨전 및 그래프 변환을 수행합니다.",
-      detail: "Dead Code Elimination, Operator Fusion, Constant Folding 등이 이 단계에서 실행됩니다."
+      desc: "비트마스크 패턴 매칭을 통해 최적화 기회를 식별하고 그래프를 변환합니다.",
+      detail: "Dead Code Elimination뿐만 아니라, 비트마스크 매칭을 통한 Operator Fusion 및 메모리 액세스 최적화 전략이 결정됩니다."
     },
     {
-      title: "Lowering & CodeGen",
+      title: "Plan Concretization", // Lowering & CodeGen에서 변경
       icon: <Code2 size={20} />,
-      desc: "최종 하드웨어 아키텍처에 최적화된 로우레벨 코드를 생성합니다.",
-      detail: "선택된 Variant에 따라 Triton 혹은 CUDA 코드가 생성되며, 메모리 레이아웃이 확정됩니다."
+      desc: "하드웨어 타겟에 맞춰 실체화된 실행 계획(Executable Plan)을 생성합니다.",
+      detail: "선택된 Variant에 따라 Launch Config, Memory Layout(Stride/Packing)이 확정되며, 최종 Executable Plan 데이터 구조가 빌드됩니다."
     }
   ];
 
@@ -38,14 +38,14 @@ export default function PipelinePage() {
         <section className="bg-[#1e293b] border border-slate-800 rounded-[2.5rem] p-10 sm:p-16 shadow-2xl relative overflow-hidden">
           <div className="absolute -top-10 -right-10 text-[140px] font-black text-blue-500/5 pointer-events-none uppercase tracking-tighter">Pipeline</div>
           <div className="flex items-center gap-2 text-blue-500 font-mono text-xs font-black uppercase tracking-[0.3em] mb-6">
-            <Settings2 size={16} /> AICF Execution Flow
+            <Settings2 size={16} /> AICF Execution Strategy
           </div>
           <h1 className="text-4xl sm:text-6xl font-black tracking-tight text-white leading-tight">
-            From Theory to <br/><span className="text-blue-500">Optimized Kernel</span>
+            From Theory to <br/><span className="text-blue-500">Executable Plan</span>
           </h1>
           <p className="mt-8 text-slate-400 text-lg leading-relaxed max-w-3xl">
-            AICF 컴파일러 파이프라인은 수학적 추상화를 물리적 성능으로 변환하는 일련의 과정을 관리합니다. 
-            이 페이지에서는 각 단계에서 발생하는 데이터 변환과 최적화 알고리즘을 시각화합니다.
+            AICF 컴파일러는 단순한 코드 번역기를 넘어, 수학적 추상화를 물리적 성능으로 변환하는 <strong>전략적 기획자(Planner)</strong>입니다. 
+            패턴 매칭을 통해 검증된 커널을 조합하고 최적의 실행 경로를 결정하는 과정을 시각화합니다.
           </p>
         </section>
 
@@ -86,14 +86,14 @@ export default function PipelinePage() {
 
         {/* Visualizer Placeholder */}
         <section className="bg-[#0b1120] border border-slate-800 rounded-[3rem] p-12 flex flex-col items-center justify-center min-h-[400px] text-center">
-           <div className="bg-blue-500/10 p-6 rounded-full mb-6">
-              <GitMerge size={48} className="text-blue-500 animate-pulse" />
-           </div>
-           <h3 className="text-2xl font-black text-white uppercase mb-4">Pipeline Visualizer</h3>
-           <p className="text-slate-500 max-w-xl">
-             각 단계별 텐서 그래프의 변화와 코드 생성 결과를 인터랙티브하게 보여주는 시각화 모듈이 이곳에 위치합니다. 
-             (예: React-flow를 이용한 그래프 최적화 과정 시각화)
-           </p>
+            <div className="bg-blue-500/10 p-6 rounded-full mb-6">
+               <GitMerge size={48} className="text-blue-500 animate-pulse" />
+            </div>
+            <h3 className="text-2xl font-black text-white uppercase mb-4">Plan Orchestrator</h3>
+            <p className="text-slate-500 max-w-xl">
+              각 단계별 텐서 그래프의 비트마스크 매칭 결과와 최종 결정된 <strong>Execution Plan(Launch Config, Kernel ID)</strong>을 인터랙티브하게 시각화합니다. 
+              (React-flow를 통해 하드웨어 자원 할당 계획을 출력합니다)
+            </p>
         </section>
       </main>
     </div>

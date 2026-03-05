@@ -124,6 +124,69 @@ export default function HomePage() {
               ))}
             </div>
           </section>
+
+          {/* 신규 섹션: Execution Strategy (Plan Compiler) */}
+          <section className="space-y-10 py-10">
+            <div className="flex items-center gap-2 text-emerald-400 font-black uppercase tracking-widest text-xs">
+              <Boxes size={16} /> Strategy Orchestration
+            </div>
+
+            <div className="flex flex-col lg:flex-row gap-12 items-start">
+              <div className="lg:w-1/2 space-y-6">
+                <h2 className="text-4xl font-black tracking-tight text-white leading-tight">
+                  코드 생성을 넘어, <br />
+                  <span className="text-emerald-400">최적의 실행 계획</span>을 컴파일하다
+                </h2>
+                <p className="text-slate-400 text-lg leading-relaxed">
+                  AICF는 단순히 소스 코드를 출력하는 번역기가 아닙니다. <br/>
+                  수학적 그래프를 분석하여 <strong>Kernel Registry</strong>에서 가장 적합한 연주자를 고르고, 메모리 레이아웃과 병렬 처리 정책을 결정하는 
+                  <span className="text-slate-100 font-bold"> 'Execution Planner'</span>입니다.
+                </p>
+                
+                <div className="grid grid-cols-2 gap-4 pt-4">
+                  <div className="p-5 rounded-2xl bg-slate-800/50 border border-slate-700">
+                    <div className="text-emerald-400 font-black text-2xl mb-1">0ms</div>
+                    <div className="text-slate-400 text-xs uppercase font-bold tracking-tighter">Zero JIT Overhead</div>
+                  </div>
+                  <div className="p-5 rounded-2xl bg-slate-800/50 border border-slate-700">
+                    <div className="text-emerald-400 font-black text-2xl mb-1">Adaptive</div>
+                    <div className="text-slate-400 text-xs uppercase font-bold tracking-tighter">Variant Selection</div>
+                  </div>
+                </div>
+              </div>
+
+              {/* 시각적 아키텍처 카드 */}
+              <div className="lg:w-1/2 w-full bg-[#0b1120] border border-slate-800 rounded-[3rem] p-8 relative overflow-hidden group">
+                <div className="absolute inset-0 bg-emerald-500/5 opacity-0 group-hover:opacity-100 transition-opacity" />
+                <div className="space-y-6 relative">
+                  <div className="flex items-center justify-between border-b border-slate-800 pb-4 text-xs font-mono text-slate-500 uppercase tracking-widest">
+                    <span>Execution Plan Workflow</span>
+                    <span className="text-emerald-500/50">Plan Compiler v1.0</span>
+                  </div>
+                  
+                  <div className="space-y-4">
+                    {[
+                      { label: "Semantic Graph Analysis", detail: "Bitmask Pattern Matching", color: "bg-blue-500" },
+                      { label: "Kernel Variant Selection", detail: "Registry Lookup (Pre-built)", color: "bg-indigo-500" },
+                      { label: "Memory Layout Finalization", detail: "Launch Config & Stride Binding", color: "bg-emerald-500" }
+                    ].map((step, i) => (
+                      <div key={i} className="flex items-center gap-4">
+                        <div className={`w-2 h-12 ${step.color} rounded-full`} />
+                        <div>
+                          <div className="text-white font-bold text-sm">{step.label}</div>
+                          <div className="text-slate-500 text-xs font-mono mt-0.5">{step.detail}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <Link to="/pipeline" className="mt-8 flex items-center justify-center w-full py-4 rounded-xl border border-emerald-500/30 text-emerald-400 font-bold text-xs uppercase tracking-widest hover:bg-emerald-500 hover:text-[#0b1120] transition-all">
+                    실행 계획 생성 과정 상세 보기
+                  </Link>
+                </div>
+              </div>
+            </div>
+          </section>
         </div>
       </main>
     </div>

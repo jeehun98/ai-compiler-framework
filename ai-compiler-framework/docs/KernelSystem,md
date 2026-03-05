@@ -1,0 +1,252 @@
+AICF Kernel System
+
+이 문서는 AICF에서 Operator가 GPU 커널 실행으로 연결되는 구조를 설명합니다.
+
+AICF는 연산 의미(Semantics)와 실행 구현(Realization)을 분리하기 위해 Kernel ABI 기반 실행 시스템을 사용합니다.
+
+Kernel Execution Model
+
+AICF에서 GPU 실행은 다음 구조로 이루어집니다.
+
+Operator
+   │
+   ▼
+Emitter
+   │
+   ▼
+Kernel ABI
+   │
+   ▼
+Runtime Launch
+
+즉
+
+Operator semantics → Kernel ABI → GPU kernel execution
+
+으로 연결됩니다.
+
+Kernel ABI
+
+AICF에서 모든 GPU 연산은 다음 세 가지 값으로 정의됩니다.
+
+kind_id
+attr_schema
+attr_blob
+
+이 세 값이 Kernel ABI를 구성합니다.
+
+kind_id
+kernel identifier
+
+각 연산은 고유한 kernel ID를 가집니다.
+
+예
+
+Gemm
+Relu
+ReduceSum
+AdamStep
+Softmax
+LayerNorm
+
+Python emitter는 C++ backend의 OpKind enum과 연결됩니다.
+
+예
+
+ctx.Gemm = _C.OpKind.Gemm
+attr_schema
+attribute schema identifier
+
+각 커널은 특정 attribute 구조를 기대합니다.
+
+schema는 4CC code로 정의됩니다.
+
+예
+
+'ADAM'
+'BADD'
+'RSUM'
+'LNEP'
+'GPEL'
+
+schema ID는 C++ 커널 구현과 정확히 일치해야 합니다.
+
+attr_blob
+packed attribute data
+
+kernel 실행에 필요한 모든 파라미터는 attr_blob에 직렬화됩니다.
+
+예
+
+learning rate
+epsilon
+momentum
+reduction axis
+
+Emitter는 Python에서 attribute를 packing하여 bytes 형태로 저장합니다.
+
+Emitter Resolution
+
+Emitter는 Operator semantics를 Kernel ABI로 해석합니다.
+
+핵심 함수
+
+emit_resolved()
+
+Emitter는 다음 작업을 수행합니다.
+
+Op 생성
+kernel ID 설정
+schema ID 설정
+attribute packing
+fingerprint flag 설정
+
+즉
+
+Operator semantics
+      ↓
+Kernel ABI metadata
+
+를 수행합니다.
+
+Kernel Launch
+
+Runtime에서 실제 GPU 실행은 다음 호출로 이루어집니다.
+
+op_call(
+    op.kind_id,
+    inputs,
+    outputs,
+    op.attr_schema,
+    op.attr_blob
+)
+
+이 호출은 Python과 CUDA extension 사이의 ABI boundary입니다.
+
+Kernel Bridge
+
+bridge.py는 Python과 CUDA 커널 사이의 연결 계층입니다.
+
+핵심 함수
+
+op_call()
+
+역할
+
+CUDA kernel launch
+stream handling
+argument validation
+Kernel Registry
+
+registry.py는 커널 메타데이터를 관리합니다.
+
+예
+
+kernel id
+schema id
+kernel metadata
+
+registry는 다음 검증을 수행합니다.
+
+kind_id validation
+schema validation
+Attribute System
+
+커널 파라미터는 schema 기반 attribute 시스템으로 관리됩니다.
+
+예
+
+AdamStep
+ ├─ lr
+ ├─ beta1
+ ├─ beta2
+ └─ epsilon
+
+이 값들은 emitter에서 attr_blob으로 직렬화됩니다.
+
+Kernel Execution Flow
+
+실제 실행 흐름
+
+Op
+  ↓
+Emitter resolution
+  ↓
+ExecPlan
+  ↓
+CudaExecutor
+  ↓
+Kernel launch
+Example
+
+예: Adam optimizer step
+
+inputs
+ ├─ P
+ ├─ G
+ ├─ M
+ ├─ V
+ ├─ bc1
+ └─ bc2
+
+Emitter가 생성하는 ABI
+
+kind_id     = AdamStep
+attr_schema = 'ADAM'
+attr_blob   = packed optimizer parameters
+
+Runtime launch
+
+op_call(AdamStep, ...)
+ABI Fixups
+
+Runtime은 kernel launch 전에 ABI 보정을 수행합니다.
+
+예
+
+rank-1 scalar → rank-0 scalar
+
+이는 backend kernel ABI와의 호환성을 유지하기 위해 필요합니다.
+
+Design Rationale
+
+AICF는 다음 이유로 Kernel ABI 기반 설계를 사용합니다.
+
+Explicit execution contract
+
+Operator → Kernel 실행 계약이 명확합니다.
+
+Lightweight runtime
+
+Runtime은 복잡한 scheduling 없이 kernel ABI를 전달합니다.
+
+Flexible backend integration
+
+CUDA backend 외에도 다른 backend 추가가 가능합니다.
+
+Clear separation of concerns
+Operator semantics
+Execution planning
+Kernel realization
+
+이 세 계층이 명확히 분리됩니다.
+
+Summary
+
+AICF Kernel System의 핵심은 다음과 같습니다.
+
+Emitter resolves semantics into kernel ABI
+Runtime forwards ABI to GPU kernels
+
+Kernel ABI는 다음 세 값으로 정의됩니다.
+
+kind_id
+attr_schema
+attr_blob
+
+이를 통해 AICF는 semantic-driven execution pipeline을 구현합니다.
+
+Related Documents
+Architecture.md
+ExecutionWalkthrough.md
+CodeStructure.md
