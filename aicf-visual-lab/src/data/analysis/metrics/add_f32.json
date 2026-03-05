@@ -1,0 +1,21 @@
+﻿{
+    "device":  "0",
+    "kernel":  "add_f32_kernel(const float *, const float *, float *, int)",
+    "block":  "(256, 1, 1)",
+    "timestamp":  "2026-03-05 18:56:36.736",
+    "grid":  "(65536, 1, 1)",
+    "metrics":  {
+                    "sm__warps_active.avg.pct_of_peak_sustained_active":  {
+                                                                              "val":  75.311269,
+                                                                              "unit":  "%"
+                                                                          },
+                    "sm__throughput.avg.pct_of_peak_sustained_elapsed":  {
+                                                                             "val":  17.585055,
+                                                                             "unit":  "%"
+                                                                         },
+                    "gpu__time_duration.sum":  {
+                                                   "val":  1.927296,
+                                                   "unit":  "us"
+                                               }
+                }
+}

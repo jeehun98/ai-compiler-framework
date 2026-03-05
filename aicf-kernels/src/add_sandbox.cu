@@ -24,7 +24,8 @@
 // pointer alignment helper
 // -------------------------
 static inline bool is_aligned_ptr(const void* p, size_t align) {
-  return (reinterpret_cast<uintptr_t>(p) % reinterpret_cast<uintptr_t>(align)) == 0;
+  uintptr_t addr = reinterpret_cast<uintptr_t>(p);
+  return (addr & (align - 1)) == 0;
 }
 
 // -------------------------

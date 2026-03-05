@@ -7,6 +7,7 @@ import TheoryPage from "./pages/TheoryPage.jsx"
 import PipelinePage from "./pages/PipelinePage.jsx";
 import KernelAnalysisPage from "./pages/KernelAnalysisPage.jsx";
 
+// src/App.jsx 수정본
 export default function App() {
   return (
     <BrowserRouter>
@@ -15,11 +16,14 @@ export default function App() {
         <Route path="/ops" element={<OpsPage />} />
         <Route path="/theory" element={<TheoryPage />} />
         <Route path="/pipeline" element={<PipelinePage />} />
-        <Route path="/kernels" element={<KernelAnalysisPage/>}/>
 
-        {/* 나중 확장 */}
-        {/* <Route path="/ir" element={<IRPage />} /> */}
-        {/* <Route path="/kernels" element={<KernelPage />} /> */}
+        {/* ✅ 수정: 파라미터를 계층적으로 받을 수 있도록 설정 */}
+        {/* 1. 기본 분석 대시보드 */}
+        <Route path="/analysis" element={<KernelAnalysisPage />} />
+        {/* 2. 연산별 비교 페이지 (예: /analysis/add) */}
+        <Route path="/analysis/:opId" element={<KernelAnalysisPage />} />
+        {/* 3. 개별 커널 상세 페이지 (예: /analysis/add/f16x2) */}
+        <Route path="/analysis/:opId/:kernelId" element={<KernelAnalysisPage />} />
 
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

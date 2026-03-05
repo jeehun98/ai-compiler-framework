@@ -1,16 +1,18 @@
-import React, { useMemo } from "react";
-import { Link, useLocation } from "react-router-dom";
+import React, { useState, useEffect } from "react";
+import { Link, useLocation, useParams } from "react-router-dom";
 import {
-  Cpu,
   Terminal,
   LayoutDashboard,
   BookOpen,
   ArrowUpRight,
   ChevronRight,
+  ChevronDown,
+  Microscope,
+  Zap,
+  Beaker,
+  Layers,
   GitMerge,
-  Settings2,
   ShieldCheck,
-  Microscope // 분석용 아이콘 추가
 } from "lucide-react";
 
 import { allOpsData } from "../data/index.js";
@@ -19,41 +21,44 @@ import { theoryByOpId } from "../data/theory/index.js";
 export default function AppSidebar({
   isOpen,
   onClose,
-  activeOpId,
-  version = "v1.0.4 Stable",
+  version = "v1.0.6 Lab-Ready",
 }) {
   const location = useLocation();
-  const isOps = location.pathname === "/ops";
-  const isTheory = location.pathname === "/theory";
-  const isPipeline = location.pathname === "/pipeline";
-  const isAnalysis = location.pathname.startsWith("/analysis"); // Analysis 페이지 판별
+  const { opId, kernelId } = useParams();
 
-  // ✅ 수정: Analysis 페이지에서도 커널 리스트(allOpsData 기반)를 보여주도록 설정
-  const listIds = useMemo(() => {
-    if (isTheory) return Object.keys(theoryByOpId || {});
-    if (isOps || isAnalysis) return Object.keys(allOpsData || {}); // 분석 페이지도 리스트 공유
-    return [];
-  }, [isOps, isTheory, isAnalysis]);
+  // 1) 현재 메뉴 카테고리 판별
+  const isOps = location.pathname.startsWith("/ops");
+  const isTheory = location.pathname.startsWith("/theory");
+  const isPipeline = location.pathname.startsWith("/pipeline");
+  const isAnalysis = location.pathname.startsWith("/analysis") || location.pathname.startsWith("/kernels");
 
-  const navItem = (to, label, Icon) => {
-    // pathname이 정확히 일치하거나, 해당 경로로 시작하는 경우(하위 경로 포함) active 처리
-    const isActive = to === "/" ? location.pathname === "/" : location.pathname.startsWith(to);
-    
-    return (
-      <Link
-        to={to}
-        className={[
-          "flex items-center gap-3 px-3 py-2.5 rounded-xl transition font-bold text-sm",
-          isActive
-            ? "bg-blue-600/10 text-blue-400 border border-blue-500/20"
-            : "text-slate-400 hover:bg-slate-800 hover:text-white",
-        ].join(" ")}
-        onClick={onClose}
-      >
-        <Icon size={18} /> {label}
-      </Link>
-    );
+  // 2) 분석 데이터 구조 (실제 configs 데이터와 매칭되도록 구성)
+  const analysisData = {
+    add: {
+      label: "Element-wise Add",
+      category: "Pointwise",
+      kernels: [
+        { id: "f16x2", label: "Vectorized (f16x2)", tag: "Fast" },
+        { id: "f16", label: "Naive (f16)", tag: "Scalar" },
+        { id: "f32", label: "FP32 Baseline", tag: "Ref" },
+      ],
+    },
+    gemm: {
+      label: "Matrix Multiply",
+      category: "Linear",
+      kernels: [
+        { id: "tiling_v1", label: "Tiled V1", tag: "Testing" },
+        { id: "cublas", label: "cuBLAS Ref", tag: "Vendor" },
+      ],
+    },
   };
+
+  // 3) 아코디언 상태 관리: 현재 선택된 opId가 있으면 자동으로 열리도록 설정
+  const [expandedOp, setExpandedOp] = useState(opId || "add");
+
+  useEffect(() => {
+    if (opId) setExpandedOp(opId);
+  }, [opId]);
 
   const SectionTitle = ({ children }) => (
     <p className="px-3 text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2 mt-4 first:mt-0">
@@ -61,32 +66,49 @@ export default function AppSidebar({
     </p>
   );
 
+  const navItem = (to, label, Icon) => {
+    const isActive = to === "/" ? location.pathname === "/" : location.pathname.startsWith(to);
+    return (
+      <Link
+        to={to}
+        onClick={onClose}
+        className={[
+          "flex items-center gap-3 px-3 py-2.5 rounded-xl transition font-bold text-sm",
+          isActive
+            ? "bg-emerald-600/10 text-emerald-400 border border-emerald-500/20"
+            : "text-slate-400 hover:bg-slate-800 hover:text-white",
+        ].join(" ")}
+      >
+        <Icon size={18} /> {label}
+      </Link>
+    );
+  };
+
   return (
     <>
+      {/* 모바일 오버레이 */}
       {isOpen && (
         <div
-          className="fixed inset-0 z-40 bg-black/60 md:hidden backdrop-blur-sm"
+          className="fixed inset-0 z-40 bg-black/60 md:hidden"
           onClick={onClose}
-          aria-hidden="true"
         />
       )}
 
       <aside
         className={[
-          "fixed md:static inset-y-0 left-0 z-50 md:z-10",
-          "w-[85vw] max-w-[320px] md:w-80",
-          "bg-[#1e293b] border-r border-slate-800",
-          "flex flex-col shadow-2xl transition-transform duration-300",
+          "fixed md:static inset-y-0 left-0 z-50 md:z-10 w-[85vw] max-w-[320px] md:w-80",
+          "bg-[#0f172a] border-r border-slate-800 flex flex-col shadow-2xl transition-transform duration-300",
           isOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0",
         ].join(" ")}
       >
-        <div className="p-6 border-b border-slate-800 bg-[#0f172a]/50">
+        {/* 헤더: 브랜딩 */}
+        <div className="p-6 border-b border-slate-800 bg-[#0b0f1a]">
           <Link to="/" className="flex items-center gap-3 group" onClick={onClose}>
-            <div className="bg-blue-600 p-2 rounded-xl group-hover:bg-blue-500 transition shadow-lg shadow-blue-600/20">
-              <Cpu size={20} className="text-white" />
+            <div className="bg-emerald-600 p-2 rounded-xl group-hover:bg-emerald-500 transition shadow-lg shadow-emerald-600/20">
+              <Beaker size={20} className="text-white" />
             </div>
-            <div className="min-w-0">
-              <h1 className="text-lg font-black tracking-tight text-white leading-none truncate uppercase">
+            <div>
+              <h1 className="text-lg font-black tracking-tight text-white leading-none">
                 AICF LAB
               </h1>
               <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">
@@ -96,89 +118,175 @@ export default function AppSidebar({
           </Link>
         </div>
 
+        {/* 글로벌 네비게이션 */}
         <nav className="p-4 space-y-1 border-b border-slate-800">
           <SectionTitle>Navigation</SectionTitle>
           {navItem("/", "Dashboard", LayoutDashboard)}
           {navItem("/ops", "Ops Explorer", Terminal)}
-          {navItem("/kernels", "Kernel Analysis", Microscope)} {/* 신규 추가 */}
+          {navItem("/analysis", "Kernel Analysis", Microscope)}
           {navItem("/theory", "Theory Specs", BookOpen)}
           {navItem("/pipeline", "Compiler Pipeline", GitMerge)}
         </nav>
 
-        <div className="flex-1 overflow-y-auto p-4 space-y-1 scrollbar-thin scrollbar-thumb-slate-700">
-          {listIds.length > 0 ? (
+        {/* 메인 리스트 영역 */}
+        <div className="flex-1 overflow-y-auto p-4 space-y-2 scrollbar-thin scrollbar-thumb-slate-800">
+          
+          {/* Case 1: Analysis 2-Level 구조 */}
+          {isAnalysis && (
             <>
-              <SectionTitle>
-                {isTheory ? "Mathematical Specs" : "Target Operators"}
-              </SectionTitle>
-
-              {listIds.map((id) => {
-                const active = activeOpId === id;
-                // 이동 경로 설정
-                let to = isTheory ? `/theory?op=${id}` : isAnalysis ? `/analysis/${id}` : `/ops?op=${id}`;
-
-                const category = isTheory
-                  ? (theoryByOpId?.[id]?.subtitle ?? "Theoretical Object")
-                  : (allOpsData?.[id]?.category ?? "Graph Node");
+              <SectionTitle>Laboratory Experiments</SectionTitle>
+              {Object.entries(analysisData).map(([id, op]) => {
+                const isExpanded = expandedOp === id;
+                const isOpActive = opId === id && !kernelId;
 
                 return (
-                  <Link
-                    key={id}
-                    to={to}
-                    onClick={onClose}
-                    className={[
-                      "w-full flex items-center justify-between px-4 py-3 rounded-xl transition-all font-bold text-sm mb-1",
-                      active
-                        ? "bg-blue-600 text-white shadow-lg shadow-blue-600/20"
-                        : "text-slate-400 hover:bg-slate-800 hover:text-slate-200",
-                    ].join(" ")}
-                  >
-                    <div className="min-w-0 flex flex-col items-start text-left">
-                      <span className="truncate w-full tracking-tight">{id}</span>
-                      <span
-                        className={[
-                          "text-[9px] mt-0.5 truncate w-full uppercase tracking-tighter font-black",
-                          active ? "text-blue-100/70" : "text-slate-500",
-                        ].join(" ")}
+                  <div key={id} className="space-y-1">
+                    {/* Level 1: Op 메인 비교 페이지 링크 */}
+                    <div
+                      className={[
+                        "w-full flex items-center justify-between rounded-xl transition-all font-bold text-sm",
+                        isOpActive ? "bg-emerald-600 text-white shadow-lg shadow-emerald-600/20" : "text-slate-400 hover:bg-slate-800",
+                      ].join(" ")}
+                    >
+                      <Link
+                        to={`/analysis/${id}`}
+                        className="flex-1 text-left flex flex-col px-4 py-3"
+                        onClick={onClose}
                       >
-                        {category}
-                      </span>
+                        <span className="flex items-center gap-2">
+                          {op.label}
+                          {isOpActive && <Zap size={10} className="text-yellow-300 animate-pulse fill-yellow-300" />}
+                        </span>
+                        <span className={`text-[9px] uppercase font-black ${isOpActive ? 'text-emerald-100' : 'text-slate-500'}`}>
+                          {op.category}
+                        </span>
+                      </Link>
+                      <button 
+                        onClick={() => setExpandedOp(isExpanded ? null : id)}
+                        className="p-3 hover:bg-white/10 rounded-r-xl"
+                      >
+                        {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                      </button>
                     </div>
-                    {active ? <ArrowUpRight size={14} className="shrink-0" /> : <ChevronRight size={14} className="opacity-20 shrink-0" />}
-                  </Link>
+
+                    {/* Level 2: 세부 커널 페이지 링크 */}
+                    {isExpanded && (
+                      <div className="ml-4 pl-4 border-l border-slate-800 space-y-1 mt-1 animate-in slide-in-from-top-2 duration-200">
+                        {op.kernels.map((k) => {
+                          const isKernelActive = kernelId === k.id;
+                          return (
+                            <Link
+                              key={k.id}
+                              to={`/analysis/${id}/${k.id}`}
+                              onClick={onClose}
+                              className={[
+                                "flex items-center justify-between px-3 py-2 rounded-lg text-[13px] font-bold transition-all",
+                                isKernelActive
+                                  ? "text-emerald-400 bg-emerald-400/5"
+                                  : "text-slate-500 hover:text-slate-300 hover:bg-slate-800/50",
+                              ].join(" ")}
+                            >
+                              <span className="flex items-center gap-2">
+                                <Zap
+                                  size={12}
+                                  className={isKernelActive ? "text-yellow-400 fill-yellow-400" : "text-slate-600"}
+                                />
+                                {k.label}
+                              </span>
+                              <div className="flex items-center gap-2">
+                                <span className="text-[8px] border border-slate-700 px-1.5 py-0.5 rounded uppercase tracking-tighter opacity-60">
+                                  {k.tag}
+                                </span>
+                                {isKernelActive && <ArrowUpRight size={12} />}
+                              </div>
+                            </Link>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
                 );
               })}
             </>
-          ) : (
-            <div className="px-3 py-10 text-center animate-in fade-in duration-500">
-              <div className="inline-flex p-3 bg-slate-800/50 rounded-2xl mb-4 text-slate-600">
-                <Settings2 size={24} />
-              </div>
-              <p className="text-[11px] text-slate-500 font-medium leading-relaxed">
-                {isPipeline 
-                  ? "파이프라인 페이지는 전체 실행 <br/> 흐름 가이드를 제공합니다." 
-                  : "상세 리스트가 필요한 <br/> 메뉴를 선택해주세요."}
+          )}
+
+          {/* Case 2: 일반 Ops 리스트 */}
+          {isOps && (
+            <>
+              <SectionTitle>Operator Library</SectionTitle>
+              {Object.keys(allOpsData).map((id) => (
+                <Link
+                  key={id}
+                  to={`/ops?op=${id}`}
+                  onClick={onClose}
+                  className="w-full flex items-center justify-between px-4 py-3 rounded-xl transition-all font-bold text-sm mb-1 text-slate-400 hover:bg-slate-800 hover:text-slate-200"
+                >
+                  <div className="min-w-0 flex flex-col items-start text-left">
+                    <span className="truncate tracking-tight">{id}</span>
+                    <span className="text-[9px] mt-0.5 uppercase tracking-tighter font-black text-slate-500">
+                      {allOpsData[id]?.category || "Uncategorized"}
+                    </span>
+                  </div>
+                  <ChevronRight size={14} className="opacity-20" />
+                </Link>
+              ))}
+            </>
+          )}
+
+          {/* Case 3: 이론 문서 리스트 */}
+          {isTheory && (
+            <>
+              <SectionTitle>Mathematical Specs</SectionTitle>
+              {Object.keys(theoryByOpId).map((id) => (
+                <Link
+                  key={id}
+                  to={`/theory?op=${id}`}
+                  onClick={onClose}
+                  className="w-full flex items-center justify-between px-4 py-3 rounded-xl transition-all font-bold text-sm mb-1 text-slate-400 hover:bg-slate-800 hover:text-slate-200"
+                >
+                  <div className="min-w-0 flex flex-col items-start text-left">
+                    <span className="truncate tracking-tight">{id}</span>
+                    <span className="text-[9px] mt-0.5 uppercase tracking-tighter font-black text-slate-500">
+                      {theoryByOpId[id]?.subtitle || "Spec"}
+                    </span>
+                  </div>
+                  <ChevronRight size={14} className="opacity-20" />
+                </Link>
+              ))}
+            </>
+          )}
+
+          {/* 기본 Empty State */}
+          {!isAnalysis && !isOps && !isTheory && !isPipeline && (
+            <div className="px-3 py-10 text-center opacity-40">
+              <Layers size={24} className="mx-auto mb-2" />
+              <p className="text-[10px] uppercase font-black tracking-widest text-slate-500">
+                No Active Lab Context
               </p>
             </div>
           )}
         </div>
 
-        <div className="p-6 border-t border-slate-800">
-          <div className="flex items-center gap-2 mb-2 text-blue-500">
-             <ShieldCheck size={12} strokeWidth={3} />
-             <span className="text-[10px] font-black uppercase tracking-widest">Semantic Verified</span>
+        {/* 푸터: 하드웨어 상태 표시 */}
+        <div className="p-6 border-t border-slate-800 bg-[#0b0f1a] text-[10px]">
+          <div className="flex items-center gap-2 mb-2 text-emerald-500">
+            <ShieldCheck size={12} strokeWidth={3} />
+            <span className="font-black uppercase tracking-widest">Hardware Verified</span>
           </div>
-          <div className="text-[10px] text-slate-600 font-medium leading-tight">
-            © 2026 AICF Compiler Team. <br /> 
-            High-Performance ML Engine.
-          </div>
+          <p className="text-slate-600 font-medium leading-tight italic">
+            "Turning CUDA Kernels into <br /> Measurable Science."
+          </p>
         </div>
       </aside>
 
       <style jsx="true">{`
-        .scrollbar-thin::-webkit-scrollbar { width: 6px; }
-        .scrollbar-thin::-webkit-scrollbar-thumb { background: #334155; border-radius: 999px; }
-        .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+        .scrollbar-thin::-webkit-scrollbar {
+          width: 4px;
+        }
+        .scrollbar-thin::-webkit-scrollbar-thumb {
+          background: #1f2937;
+          border-radius: 10px;
+        }
       `}</style>
     </>
   );
