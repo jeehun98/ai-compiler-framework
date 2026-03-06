@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
+import { allAnalysisConfigs } from "../data/analysis/configs";
+
 import {
   Terminal,
   LayoutDashboard,
@@ -33,25 +35,21 @@ export default function AppSidebar({
   const isAnalysis = location.pathname.startsWith("/analysis") || location.pathname.startsWith("/kernels");
 
   // 2) 분석 데이터 구조 (실제 configs 데이터와 매칭되도록 구성)
-  const analysisData = {
-    add: {
-      label: "Element-wise Add",
-      category: "Pointwise",
-      kernels: [
-        { id: "f16x2", label: "Vectorized (f16x2)", tag: "Fast" },
-        { id: "f16", label: "Naive (f16)", tag: "Scalar" },
-        { id: "f32", label: "FP32 Baseline", tag: "Ref" },
-      ],
-    },
-    gemm: {
-      label: "Matrix Multiply",
-      category: "Linear",
-      kernels: [
-        { id: "tiling_v1", label: "Tiled V1", tag: "Testing" },
-        { id: "cublas", label: "cuBLAS Ref", tag: "Vendor" },
-      ],
-    },
-  };
+
+  const analysisData = Object.fromEntries(
+    Object.entries(allAnalysisConfigs).map(([op, cfg]) => [
+      op,
+      {
+        label: cfg.label,
+        category: cfg.category,
+        kernels: cfg.variants.map(v => ({
+          id: v.id,
+          label: v.name,
+          tag: v.tag,
+        })),
+      },
+    ])
+  );
 
   // 3) 아코디언 상태 관리: 현재 선택된 opId가 있으면 자동으로 열리도록 설정
   const [expandedOp, setExpandedOp] = useState(opId || "add");

@@ -1,0 +1,21 @@
+﻿{
+    "device":  "0",
+    "kernel":  "gemm_f32_naive_kernel(const float *, long long, long long, const float *, long long, long long, float *, long long, long long, int, int, int)",
+    "block":  "(16, 16, 1)",
+    "timestamp":  "2026-03-06 11:58:54.780",
+    "grid":  "(128, 128, 1)",
+    "metrics":  {
+                    "sm__warps_active.avg.pct_of_peak_sustained_active":  {
+                                                                              "val":  99.137332,
+                                                                              "unit":  "%"
+                                                                          },
+                    "sm__throughput.avg.pct_of_peak_sustained_elapsed":  {
+                                                                             "val":  95.17286,
+                                                                             "unit":  "%"
+                                                                         },
+                    "gpu__time_duration.sum":  {
+                                                   "val":  33.621248,
+                                                   "unit":  "us"
+                                               }
+                }
+}
