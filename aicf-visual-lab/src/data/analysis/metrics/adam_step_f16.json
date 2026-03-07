@@ -1,0 +1,21 @@
+﻿{
+    "device":  "0",
+    "kernel":  "adam_f16_kernel(__half *, __half *, __half *, const __half *, float, float, float, float, float, float, long long)",
+    "block":  "(256, 1, 1)",
+    "timestamp":  "2026-03-07 14:39:14.799",
+    "grid":  "(65536, 1, 1)",
+    "metrics":  {
+                    "sm__warps_active.avg.pct_of_peak_sustained_active":  {
+                                                                              "val":  87.525164,
+                                                                              "unit":  "%"
+                                                                          },
+                    "sm__throughput.avg.pct_of_peak_sustained_elapsed":  {
+                                                                             "val":  73.266421,
+                                                                             "unit":  "%"
+                                                                         },
+                    "gpu__time_duration.sum":  {
+                                                   "val":  1.024704,
+                                                   "unit":  "us"
+                                               }
+                }
+}

@@ -6,6 +6,16 @@
 
 Kernel Code: src/*.cu 커널 수정
 
+cmake -B build -S . 수행 후 
+
+:: F32 AdamStep 벤치마크
+scripts\bench.bat adam_sandbox.exe --n 16777216 --dtype f32 --iters 100
+
+:: F16 AdamStep 벤치마크
+scripts\bench.bat adam_sandbox.exe --n 16777216 --dtype f16 --iters 100
+
+각 커널 벤치마크 실행
+
 scripts\bench.bat: CMake 빌드 수행 및 GPU Timer 기반 순수 커널 실행 성능(ms) 측정
 
 scripts\ncu_kernel_extract.bat: Nsight Compute 프로파일링 수행
