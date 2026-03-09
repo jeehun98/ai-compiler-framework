@@ -2,10 +2,10 @@ import React, { useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { Microscope, FileCode, PieChart, Zap, Database, Activity, ShieldAlert, Menu } from 'lucide-react';
 
-import AppSidebar from '../components/AppSidebar';
-import OpsComparisonView from '../features/analysis/OpsComparisonView';
-import KernelDetailView from '../features/analysis/KernelDetailView';
-import { allAnalysisConfigs } from '../data/analysis/configs';
+import ComputeSidebar from '../../../components/ComputeSidebar.jsx';
+import OpsComparisonView from '../../../features/analysis/OpsComparisonView';
+import KernelDetailView from '../../../features/analysis/KernelDetailView';
+import { allAnalysisConfigs } from '../../../data/analysis/configs';
 
 export default function KernelAnalysisPage() {
   const { opId, kernelId } = useParams();
@@ -26,7 +26,7 @@ export default function KernelAnalysisPage() {
   return (
     <div className="flex min-h-dvh bg-[#0f172a] text-slate-200 antialiased font-sans overflow-x-hidden">
       {/* 1. 사이드바: 상태 제어 프롭스 전달 */}
-      <AppSidebar 
+      <ComputeSidebar 
         isOpen={isSidebarOpen}
         onClose={() => setIsSidebarOpen(false)}
         activeOpId={opId}

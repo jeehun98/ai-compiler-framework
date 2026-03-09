@@ -23,9 +23,9 @@ import {
 } from 'lucide-react';
 
 import { useSearchParams, Link } from 'react-router-dom';
-import { allOpsData } from '../data/index.js';
-import KernelDeepDive from '../components/KernelDeepDive.jsx';
-import AppSidebar from '../components/AppSidebar.jsx';
+import { allOpsData } from '../../../data/index.js';
+import KernelDeepDive from '../../../components/KernelDeepDive.jsx';
+import ComputeSidebar from '../../../components/ComputeSidebar.jsx';
 
 export default function OpsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -84,7 +84,7 @@ export default function OpsPage() {
   return (
     <div className="flex min-h-dvh bg-[#0f172a] text-slate-200 antialiased overflow-x-hidden">
       {/* ✅ GLOBAL SIDEBAR (통일) */}
-      <AppSidebar
+      <ComputeSidebar
         isOpen={isSidebarOpen}
         onClose={() => setIsSidebarOpen(false)}
         activeOpId={activeOpId || ''}

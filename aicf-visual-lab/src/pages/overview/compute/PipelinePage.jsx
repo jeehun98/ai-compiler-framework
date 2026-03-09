@@ -3,7 +3,7 @@ import {
   GitMerge, Cpu, Code2, Zap, ArrowRight, 
   Settings2, Activity, ShieldCheck, Box
 } from 'lucide-react';
-import AppSidebar from '../components/AppSidebar';
+import ComputeSidebar from '../../../components/ComputeSidebar.jsx';
 
 export default function PipelinePage() {
   const [activeStep, setActiveStep] = useState(0);
@@ -31,7 +31,7 @@ export default function PipelinePage() {
 
   return (
     <div className="flex min-h-dvh bg-[#0f172a] text-slate-200 antialiased font-sans">
-      <AppSidebar activeMenu="pipeline" />
+      <ComputeSidebar activeMenu="pipeline" />
       
       <main className="flex-1 overflow-y-auto p-6 sm:p-10 space-y-12 bg-[linear-gradient(180deg,rgba(15,23,42,1),rgba(30,41,59,0.2))]">
         {/* Hero Section */}

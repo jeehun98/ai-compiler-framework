@@ -17,8 +17,8 @@ import {
   Info
 } from "lucide-react";
 
-import AppSidebar from "../components/AppSidebar.jsx";
-import { theoryByOpId, theoryOpIds } from "../data/theory/index.js";
+import ComputeSidebar from "../../../components/ComputeSidebar.jsx";
+import { theoryByOpId, theoryOpIds } from "../../../data/theory/index.js";
 
 // Helper Component for equivalence cards
 const iconMap = {
@@ -79,7 +79,7 @@ export default function TheoryPage() {
         </div>
       </header>
 
-      <AppSidebar isOpen={isSidebarOpen} onClose={() => setIsSidebarOpen(false)} activeOpId={activeOpId} />
+      <ComputeSidebar isOpen={isSidebarOpen} onClose={() => setIsSidebarOpen(false)} activeOpId={activeOpId} />
 
       <main className="flex-1 flex flex-col min-w-0">
         <div className="md:hidden h-[68px]" />

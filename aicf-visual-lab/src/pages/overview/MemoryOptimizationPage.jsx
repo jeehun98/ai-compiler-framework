@@ -12,14 +12,14 @@ import {
   Workflow,
   Database,
 } from "lucide-react";
-import AppSidebar from "../components/AppSidebar.jsx";
+import MemorySidebar from "../../components/MemorySidebar.jsx";
 
 export default function MemoryOptimizationPage() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
   return (
     <div className="flex min-h-dvh bg-[#0f172a] text-slate-200 antialiased overflow-x-hidden">
-      <AppSidebar
+      <MemorySidebar
         isOpen={isSidebarOpen}
         onClose={() => setIsSidebarOpen(false)}
         activeOpId={null}

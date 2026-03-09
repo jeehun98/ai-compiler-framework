@@ -10,7 +10,7 @@ import {
   Waypoints,
   Menu,
 } from "lucide-react";
-import AppSidebar from "../components/AppSidebar.jsx";
+import AppSidebar from "../../components/ComputeSidebar.jsx";
 
 export default function ComputeOptimizationPage() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
