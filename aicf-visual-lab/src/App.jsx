@@ -1,33 +1,41 @@
 import React from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 
-import HomePage from "./pages/HomePage.jsx";
-import OpsPage from "./pages/OpsPage.jsx";
-import TheoryPage from "./pages/TheoryPage.jsx"
-import PipelinePage from "./pages/PipelinePage.jsx";
-import KernelAnalysisPage from "./pages/KernelAnalysisPage.jsx";
 import AICFOverviewPage from "./pages/AICFOverviewPage.jsx";
+import ComputeOptimizationPage from "./pages/ComputeOptimizationPage.jsx";
+import MemoryOptimizationPage from "./pages/MemoryOptimizationPage.jsx";
+import TheoryPage from "./pages/TheoryPage.jsx";
+import PipelinePage from "./pages/PipelinePage.jsx";
+import OpsPage from "./pages/OpsPage.jsx";
+import KernelAnalysisPage from "./pages/KernelAnalysisPage.jsx";
 
-
-// src/App.jsx 수정본
 export default function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route path="/" element={<HomePage />} />
-        <Route path="/ops" element={<OpsPage />} />
-        <Route path="/theory" element={<TheoryPage />} />
-        <Route path="/pipeline" element={<PipelinePage />} />
+        {/* top level */}
+        <Route path="/" element={<AICFOverviewPage />} />
+        <Route path="/compute" element={<ComputeOptimizationPage />} />
+        <Route path="/memory" element={<MemoryOptimizationPage />} />
 
-        <Route path="/overview" element={<AICFOverviewPage />} />
+        {/* compute sub pages */}
+        <Route path="/compute/theory" element={<TheoryPage />} />
+        <Route path="/compute/pipeline" element={<PipelinePage />} />
+        <Route path="/compute/ops" element={<OpsPage />} />
 
-        {/* ✅ 수정: 파라미터를 계층적으로 받을 수 있도록 설정 */}
-        {/* 1. 기본 분석 대시보드 */}
-        <Route path="/analysis" element={<KernelAnalysisPage />} />
-        {/* 2. 연산별 비교 페이지 (예: /analysis/add) */}
-        <Route path="/analysis/:opId" element={<KernelAnalysisPage />} />
-        {/* 3. 개별 커널 상세 페이지 (예: /analysis/add/f16x2) */}
-        <Route path="/analysis/:opId/:kernelId" element={<KernelAnalysisPage />} />
+        <Route path="/compute/analysis" element={<KernelAnalysisPage />} />
+        <Route path="/compute/analysis/:opId" element={<KernelAnalysisPage />} />
+        <Route
+          path="/compute/analysis/:opId/:kernelId"
+          element={<KernelAnalysisPage />}
+        />
+
+        {/* legacy redirects */}
+        <Route path="/overview" element={<Navigate to="/" replace />} />
+        <Route path="/theory" element={<Navigate to="/compute/theory" replace />} />
+        <Route path="/pipeline" element={<Navigate to="/compute/pipeline" replace />} />
+        <Route path="/ops" element={<Navigate to="/compute/ops" replace />} />
+        <Route path="/analysis" element={<Navigate to="/compute/analysis" replace />} />
 
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
