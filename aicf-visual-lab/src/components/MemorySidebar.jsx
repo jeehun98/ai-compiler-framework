@@ -66,7 +66,7 @@ export default function MemorySidebar({
       >
         <div className="p-6 border-b border-slate-800 bg-[#0b0f1a]">
           <Link
-            to="/memory"
+            to="/"
             className="flex items-center gap-3 group"
             onClick={onClose}
           >
