@@ -2,55 +2,60 @@ const onlineNormDetail = {
   overview: {
     title: "Method Overview",
     summary:
-      "Online Reducible Norm은 평균과 분산 계산을 multi-pass reduction이 아닌 streaming reduction으로 바꾸는 방식입니다.",
+      "Online Reducible Norm converts mean and variance computation from multi-pass reduction into a single-pass streaming reduction.",
     problem:
-      "기존 정규화 계열 계산은 mean pass와 variance pass를 분리하면서 입력을 여러 번 읽게 되고, 이는 HBM bandwidth를 낭비합니다.",
+      "Traditional normalization implementations compute mean and variance in separate passes, causing the input tensor to be read multiple times and increasing HBM bandwidth usage.",
     property:
-      "핵심은 통계량이 결합 가능한 상태(state)로 표현된다는 점입니다. Welford state는 partial merge가 가능하므로 tile 단위 병렬 reduction과 streaming accumulation 모두에 적합합니다.",
+      "The key observation is that statistics can be represented as a mergeable state. Welford's formulation maintains (count, mean, M2), which allows partial segments to be merged safely. This makes the statistic suitable for both streaming accumulation and parallel tile reductions.",
     impact:
-      "입력 재방문 횟수를 줄이고 intermediate traffic을 낮춰 normalization 계열 연산을 memory-bound bottleneck에서 더 유리하게 만듭니다.",
+      "By avoiding repeated reads of the same activation data, normalization kernels reduce intermediate traffic and alleviate memory bandwidth pressure.",
   },
+
   theory: {
     title: "Math & Logic",
     body: [
-      "평균과 분산은 단순히 전체 벡터를 모두 본 뒤 계산해야 하는 값처럼 보이지만, 실제로는 merge 가능한 상태로 표현할 수 있습니다.",
-      "Welford 알고리즘은 count, mean, M2를 유지하면서 새 샘플이 들어올 때마다 통계량을 업데이트합니다.",
-      "이 상태 표현은 두 개의 partial segment를 다시 합칠 수 있으므로, single-pass streaming뿐 아니라 block-wise parallel reduction에도 잘 맞습니다.",
-      "즉, norm statistic은 full materialization 대상이 아니라 reducible state로 다룰 수 있습니다.",
+      "Mean and variance may appear to require full materialization of the vector before computation, but they can instead be expressed as a mergeable statistical state.",
+      "Welford's algorithm maintains a running state consisting of count, mean, and M2, updating the statistics incrementally as new samples arrive.",
+      "Because two partial Welford states can be merged safely, the algorithm supports both streaming updates and block-level parallel reductions.",
+      "This means normalization statistics do not require full tensor materialization and can instead be computed through reducible state accumulation.",
     ],
     bullets: [
       "Reducer state: (count, mean, M2)",
-      "Associative-style merge 가능",
+      "Associative-style state merge",
       "Single-pass statistic accumulation",
-      "Multi-pass HBM reread 제거 가능",
+      "Eliminates multi-pass HBM rereads",
     ],
   },
+
   hardware: {
     title: "Physical Analysis",
     body: [
-      "하드웨어 관점에서 가장 중요한 점은 같은 activation을 여러 번 다시 읽지 않는다는 것입니다.",
-      "tile 내부에서 partial statistics를 register/shared memory에 유지하고 block reduction 뒤 최종 norm factor만 확정하면 됩니다.",
-      "입력 전체를 두세 번 순회하는 방식보다 memory traffic이 감소하며, bandwidth pressure가 큰 구간일수록 효과가 커집니다.",
+      "From a hardware perspective, the primary advantage is that the activation tensor does not need to be read multiple times.",
+      "Tile-level partial statistics can be accumulated in registers or shared memory, followed by a block reduction to finalize the normalization factor.",
+      "Compared to implementations that scan the input multiple times, this approach significantly reduces global memory traffic.",
+      "The benefit becomes more pronounced when kernels are memory-bandwidth bound.",
     ],
     bullets: [
-      "HBM reread 감소",
-      "Shared memory / register accumulation",
-      "Reduction tree와 결합 쉬움",
-      "Normalization kernel fusion 기반 제공",
+      "Reduced HBM rereads",
+      "Register / shared-memory accumulation",
+      "Naturally compatible with reduction trees",
+      "Foundation for fused normalization kernels",
     ],
   },
+
   compiler: {
     title: "MCIR Implementation",
     body: [
-      "MCIR에서는 이 기법을 단순한 mean/var op 조합이 아니라 reducible-statistic property로 표현하는 것이 중요합니다.",
-      "핵심 legality는 통계량이 merge-safe state로 분해 가능한지 여부입니다.",
-      "lowering 단계에서는 tile-local accumulation + hierarchical merge + final normalization scale application 형태로 내릴 수 있습니다.",
+      "Within MCIR, this method should not be represented as separate mean and variance operators, but rather as a reducible-statistic property.",
+      "The key legality condition is whether the statistic can be decomposed into a merge-safe state representation.",
+      "During lowering, the computation can be structured as tile-local accumulation followed by hierarchical state merges.",
+      "The final stage applies the normalization scale using the finalized statistics.",
     ],
     bullets: [
       "Property: reducible_state(statistics)",
-      "Legality: associative merge / stable update",
-      "Rewrite: multi-pass norm -> online stat reduction",
-      "Kernel mapping: block reduction + final apply",
+      "Legality: merge-safe statistical state",
+      "Rewrite: multi-pass norm → streaming stat reduction",
+      "Kernel mapping: tile accumulation + hierarchical reduction",
     ],
   },
 };

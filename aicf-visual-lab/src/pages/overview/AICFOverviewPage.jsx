@@ -34,23 +34,24 @@ export default function AICFOverviewPage() {
             <p className="mt-10 max-w-3xl text-xl sm:text-2xl text-slate-400 leading-relaxed font-medium">
               AICF는 최적화를 하나의 기술이 아니라
               <br className="hidden sm:block" />
-              <span className="text-cyan-400"> 의미를 줄이는 문제</span>와
-              <span className="text-emerald-400"> 이동을 줄이는 문제</span>로 나눠 봅니다.
+              <span className="text-cyan-400"> 같은 의미를 더 간결한 계산 구조로 실현하는 문제</span>와
+              <span className="text-emerald-400"> 같은 결과를 더 적은 데이터 이동으로 실현하는 문제</span>
+              로 나누어 다룹니다.
             </p>
 
             <div className="mt-10 flex flex-wrap gap-4">
               <Link
-                to="/theory"
+                to="/compute"
                 className="inline-flex items-center gap-2 px-7 py-4 rounded-2xl bg-blue-600 text-white font-bold text-sm uppercase tracking-widest shadow-lg hover:bg-blue-500 transition-all active:scale-95"
               >
-                Theory Index 보기 <ArrowRight size={18} />
+                Compute Domain 보기 <ArrowRight size={18} />
               </Link>
 
               <Link
-                to="/pipeline"
+                to="/memory"
                 className="inline-flex items-center gap-2 px-6 py-4 rounded-2xl border border-slate-700 text-slate-300 font-bold text-xs uppercase tracking-widest hover:bg-slate-800 transition"
               >
-                Execution Planner 보기
+                Memory Domain 보기
               </Link>
             </div>
           </div>
@@ -79,11 +80,11 @@ export default function AICFOverviewPage() {
               </h2>
 
               <p className="mt-6 text-lg text-slate-400 leading-relaxed">
-                “무엇을 계산할 것인가?”
+                “같은 의미를 더 간결하게 계산할 수 있는가?”
                 <br />
-                같은 의미를 더 적은 계산으로 표현합니다.
+                의미를 보존하면서 계산 구조를 더 단순하고 효율적으로 바꿉니다.
                 <br />
-                의미 보존, 동치 축약, 근사 허용 경계를 다룹니다.
+                semantic contract, equivalent reduction, approximation boundary를 다룹니다.
               </p>
 
               <div className="mt-10 flex flex-wrap gap-2">
@@ -126,20 +127,20 @@ export default function AICFOverviewPage() {
               <h2 className="mt-12 text-4xl font-black text-white group-hover:text-emerald-500 transition-colors">
                 Memory <br /> Optimization
               </h2>
-
+              
               <p className="mt-6 text-lg text-slate-400 leading-relaxed">
-                “어디에 데이터를 머물게 할 것인가?”
+                “같은 결과를 더 적은 이동으로 실현할 수 있는가?”
                 <br />
-                같은 결과를 더 적은 이동으로 실현합니다.
+                어떤 값은 local state로 유지하고, 어떤 intermediate는 제거하거나 다시 계산합니다.
                 <br />
-                residency, fusion, traffic-aware planning을 다룹니다.
+                residency, streaming reduction, rematerialization, traffic-aware planning을 다룹니다.
               </p>
 
               <div className="mt-10 flex flex-wrap gap-2">
                 {[
                   "On-Chip Residency",
-                  "Boundary Elimination",
-                  "Dataflow Scheduling",
+                  "Streaming Reduction",
+                  "Traffic-Aware Planning",
                 ].map((tag) => (
                   <span
                     key={tag}
@@ -172,9 +173,9 @@ export default function AICFOverviewPage() {
               </h3>
 
               <p className="mt-5 max-w-3xl text-slate-400 text-lg leading-relaxed">
-                Compute 축의 의미 제약과 Memory 축의 물리 제약을 함께 평가해
+                Compute 축의 의미 제약과 Memory 축의 물리 제약을 함께 평가하여
                 <br className="hidden sm:block" />
-                최종 kernel path와 execution plan을 결정합니다.
+                최종 execution path와 kernel plan을 결정합니다.
               </p>
 
               <div className="mt-10 grid grid-cols-1 md:grid-cols-3 gap-4 w-full max-w-5xl">
@@ -188,13 +189,13 @@ export default function AICFOverviewPage() {
                   {
                     icon: <Workflow size={18} />,
                     title: "Path Selection",
-                    desc: "어떤 실행 경로가 가장 유효한가",
+                    desc: "어떤 실행 구조가 가장 타당한가",
                     accent: "text-blue-400 border-blue-500/20 bg-blue-500/5",
                   },
                   {
                     icon: <HardDrive size={18} />,
-                    title: "Traffic Control",
-                    desc: "어디까지 온칩에 머물 수 있는가",
+                    title: "Memory Planning",
+                    desc: "어떤 state를 local하게 유지할 수 있는가",
                     accent: "text-emerald-400 border-emerald-500/20 bg-emerald-500/5",
                   },
                 ].map((item) => (
@@ -217,10 +218,10 @@ export default function AICFOverviewPage() {
 
               <div className="mt-10 flex flex-wrap justify-center gap-4">
                 <Link
-                  to="/pipeline"
+                  to="/memory/pipeline"
                   className="inline-flex items-center gap-2 px-7 py-4 rounded-2xl bg-emerald-600 text-white font-bold text-sm uppercase tracking-widest shadow-lg hover:bg-emerald-500 transition-all active:scale-95"
                 >
-                  Pipeline 보기 <ArrowRight size={18} />
+                  Residency Pipeline 보기 <ArrowRight size={18} />
                 </Link>
 
                 <Link

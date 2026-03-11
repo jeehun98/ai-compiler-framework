@@ -30,7 +30,9 @@ export default function MemorySidebar({
   const isMethods = pathname.startsWith("/memory/methods");
   const isPipeline = pathname.startsWith("/memory/pipeline");
 
-  const [expandedMethod, setExpandedMethod] = useState(methodId || "online-norm");
+  const [expandedMethod, setExpandedMethod] = useState(
+    methodId || "online-norm"
+  );
 
   useEffect(() => {
     if (methodId) setExpandedMethod(methodId);
@@ -107,7 +109,7 @@ export default function MemorySidebar({
         <nav className="p-4 space-y-1 border-b border-slate-800">
           <SectionTitle>Navigation</SectionTitle>
           {navItem("/memory", "Overview", LayoutDashboard, { exact: true })}
-          {navItem("/memory/methods", "Optimization Methods", Library)}
+          {navItem("/memory/methods", "Pattern Catalog", Library)}
           {navItem("/memory/pipeline", "Residency Pipeline", GitMerge)}
         </nav>
 
@@ -115,7 +117,7 @@ export default function MemorySidebar({
         <div className="flex-1 overflow-y-auto p-4 space-y-2 scrollbar-thin scrollbar-thumb-slate-800">
           {isMethods && (
             <>
-              <SectionTitle>Method Library</SectionTitle>
+              <SectionTitle>Pattern Library</SectionTitle>
 
               {memoryMethodCatalog.map((method) => {
                 const NavIcon = method.navIcon;
@@ -236,8 +238,8 @@ export default function MemorySidebar({
                 </p>
                 <p className="mt-3 text-xs text-slate-500 leading-relaxed">
                   global memory round-trip을 줄이기 위해
-                  streaming execution, re-materialization, tiling residency를
-                  설계하는 memory 내부 계획 단계입니다.
+                  streaming execution, rematerialization, 그리고 tiled residency를
+                  어떤 순서와 구조로 배치할지 다루는 memory planning 단계입니다.
                 </p>
               </div>
             </>
@@ -253,7 +255,7 @@ export default function MemorySidebar({
                       Residency Engine
                     </span>
                     <span className="text-[9px] mt-0.5 uppercase tracking-tighter font-black text-emerald-500/70">
-                      Active Traffic Control
+                      Active Memory Planning
                     </span>
                   </div>
                   <Activity size={16} className="animate-pulse" />
@@ -265,9 +267,10 @@ export default function MemorySidebar({
                     Memory Optimization Domain
                   </p>
                   <p className="mt-3 text-xs text-slate-500 leading-relaxed">
-                    계산 자체보다 데이터 이동을 먼저 다룹니다.
-                    어떤 값이 저장되어야 하는지, 어떤 값이 다시 계산될 수
-                    있는지, 어떤 reduction이 streaming 가능한지를 정의합니다.
+                    이 영역은 계산량 자체보다 데이터 이동 구조를 먼저 다룹니다.
+                    어떤 값은 저장되어야 하고, 어떤 intermediate는 다시 계산될 수 있으며,
+                    어떤 reduction은 streaming 가능하고, 어떤 working set은 온칩에
+                    머무를 수 있는지를 정의합니다.
                   </p>
                 </div>
               </div>
@@ -278,7 +281,7 @@ export default function MemorySidebar({
             <div className="px-3 py-10 text-center opacity-40">
               <Layers size={24} className="mx-auto mb-2" />
               <p className="text-[10px] uppercase font-black tracking-widest text-slate-500">
-                No Active Memory Context
+                No Active Pattern Context
               </p>
             </div>
           )}
@@ -294,7 +297,7 @@ export default function MemorySidebar({
           </div>
 
           <p className="text-slate-600 font-medium leading-tight italic">
-            "Eliminating HBM round-trips <br /> through physical residency."
+            "Memory optimization begins with <br /> execution structure."
           </p>
         </div>
 
