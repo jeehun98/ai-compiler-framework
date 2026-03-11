@@ -17,7 +17,7 @@ import {
   Info,
 } from "lucide-react";
 
-import ComputeSidebar from "../../../components/ComputeSidebar.jsx";
+import ComputeSidebar from "../../../components/layout/ComputeSidebar.jsx";
 import { theoryByOpId, theoryOpIds } from "../../../data/theory/index.js";
 
 // Helper Component for equivalence cards

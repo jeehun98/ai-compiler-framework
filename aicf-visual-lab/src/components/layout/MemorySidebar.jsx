@@ -1,58 +1,40 @@
-import React, { useState, useEffect } from "react";
+import React, { useEffect, useState } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
-import { allAnalysisConfigs } from "../data/analysis/configs";
-import { allOpsData } from "../data/index.js";
-import { theoryByOpId } from "../data/theory/index.js";
-
 import {
-  Terminal,
-  BookOpen,
-  ArrowUpRight,
+  HardDrive,
   ChevronRight,
   ChevronDown,
-  Microscope,
-  Zap,
-  Beaker,
-  Layers,
-  GitMerge,
   ShieldCheck,
+  LayoutDashboard,
+  ArrowUpRight,
+  GitMerge,
+  Library,
+  Zap,
+  Database,
+  Layers,
+  Activity,
 } from "lucide-react";
+import { memoryMethodCatalog } from "../../data/memory/methodCatalog";
+import { memoryPhaseLabels } from "../../data/memory/phaseLabels";
 
-export default function ComputeSidebar({
+export default function MemorySidebar({
   isOpen,
   onClose,
   version = "v1.0.6 Lab-Ready",
 }) {
   const location = useLocation();
-  const { opId, kernelId } = useParams();
+  const { methodId, phaseId } = useParams();
   const pathname = location.pathname;
 
-  const isComputeHome = pathname === "/compute";
-  const isOps = pathname.startsWith("/compute/ops");
-  const isTheory = pathname.startsWith("/compute/theory");
-  const isPipeline = pathname.startsWith("/compute/pipeline");
-  const isAnalysis = pathname.startsWith("/compute/analysis");
+  const isMemoryHome = pathname === "/memory";
+  const isMethods = pathname.startsWith("/memory/methods");
+  const isPipeline = pathname.startsWith("/memory/pipeline");
 
-  const analysisData = Object.fromEntries(
-    Object.entries(allAnalysisConfigs).map(([op, cfg]) => [
-      op,
-      {
-        label: cfg.label,
-        category: cfg.category,
-        kernels: cfg.variants.map((v) => ({
-          id: v.id,
-          label: v.name,
-          tag: v.tag,
-        })),
-      },
-    ])
-  );
-
-  const [expandedOp, setExpandedOp] = useState(opId || "add");
+  const [expandedMethod, setExpandedMethod] = useState(methodId || "online-norm");
 
   useEffect(() => {
-    if (opId) setExpandedOp(opId);
-  }, [opId]);
+    if (methodId) setExpandedMethod(methodId);
+  }, [methodId]);
 
   const SectionTitle = ({ children }) => (
     <p className="px-3 text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2 mt-4 first:mt-0">
@@ -106,12 +88,13 @@ export default function ComputeSidebar({
             className="flex items-center gap-3 group"
             onClick={onClose}
           >
-            <div className="bg-emerald-600 p-2 rounded-xl group-hover:bg-emerald-500 transition shadow-lg shadow-emerald-600/20">
-              <Beaker size={20} className="text-white" />
+            <div className="bg-emerald-600 p-2 rounded-xl group-hover:bg-emerald-500 transition shadow-lg shadow-emerald-600/20 text-white">
+              <HardDrive size={20} />
             </div>
+
             <div>
               <h1 className="text-lg font-black tracking-tight text-white leading-none">
-                AICF COMPUTE
+                AICF MEMORY
               </h1>
               <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">
                 {version}
@@ -123,59 +106,70 @@ export default function ComputeSidebar({
         {/* Top Navigation */}
         <nav className="p-4 space-y-1 border-b border-slate-800">
           <SectionTitle>Navigation</SectionTitle>
-          {navItem("/compute", "Overview", Layers, { exact: true })}
-          {navItem("/compute/theory", "Theory Specs", BookOpen)}
-          {navItem("/compute/pipeline", "Compiler Pipeline", GitMerge)}
-          {navItem("/compute/ops", "Ops Explorer", Terminal)}
-          {navItem("/compute/analysis", "Kernel Analysis", Microscope)}
+          {navItem("/memory", "Overview", LayoutDashboard, { exact: true })}
+          {navItem("/memory/methods", "Optimization Methods", Library)}
+          {navItem("/memory/pipeline", "Residency Pipeline", GitMerge)}
         </nav>
 
         {/* Context Area */}
         <div className="flex-1 overflow-y-auto p-4 space-y-2 scrollbar-thin scrollbar-thumb-slate-800">
-          {isAnalysis && (
+          {isMethods && (
             <>
-              <SectionTitle>Laboratory Experiments</SectionTitle>
-              {Object.entries(analysisData).map(([id, op]) => {
-                const isExpanded = expandedOp === id;
-                const isOpActive = opId === id && !kernelId;
+              <SectionTitle>Method Library</SectionTitle>
+
+              {memoryMethodCatalog.map((method) => {
+                const NavIcon = method.navIcon;
+                const isExpanded = expandedMethod === method.id;
+                const isMethodActive = methodId === method.id && !phaseId;
+                const isMethodPath = methodId === method.id;
 
                 return (
-                  <div key={id} className="space-y-1">
+                  <div key={method.id} className="space-y-1">
                     <div
                       className={[
                         "w-full flex items-center justify-between rounded-xl transition-all font-bold text-sm",
-                        isOpActive
+                        isMethodActive
                           ? "bg-emerald-600 text-white shadow-lg shadow-emerald-600/20"
+                          : isMethodPath
+                          ? "bg-slate-800/70 text-slate-200"
                           : "text-slate-400 hover:bg-slate-800",
                       ].join(" ")}
                     >
                       <Link
-                        to={`/compute/analysis/${id}`}
+                        to={`/memory/methods/${method.id}`}
                         className="flex-1 text-left flex flex-col px-4 py-3"
                         onClick={onClose}
                       >
                         <span className="flex items-center gap-2">
-                          {op.label}
-                          {isOpActive && (
+                          <NavIcon size={16} />
+                          {method.label}
+                          {isMethodActive && (
                             <Zap
                               size={10}
                               className="text-yellow-300 animate-pulse fill-yellow-300"
                             />
                           )}
                         </span>
+
                         <span
                           className={`text-[9px] uppercase font-black ${
-                            isOpActive ? "text-emerald-100" : "text-slate-500"
+                            isMethodActive
+                              ? "text-emerald-100"
+                              : isMethodPath
+                              ? "text-slate-400"
+                              : "text-slate-500"
                           }`}
                         >
-                          {op.category}
+                          {method.category}
                         </span>
                       </Link>
 
                       <button
-                        onClick={() => setExpandedOp(isExpanded ? null : id)}
-                        className="p-3 hover:bg-white/10 rounded-r-xl"
                         type="button"
+                        onClick={() =>
+                          setExpandedMethod(isExpanded ? null : method.id)
+                        }
+                        className="p-3 hover:bg-white/10 rounded-r-xl"
                       >
                         {isExpanded ? (
                           <ChevronDown size={14} />
@@ -187,38 +181,39 @@ export default function ComputeSidebar({
 
                     {isExpanded && (
                       <div className="ml-4 pl-4 border-l border-slate-800 space-y-1 mt-1 animate-in slide-in-from-top-2 duration-200">
-                        {op.kernels.map((k) => {
-                          const isKernelActive = kernelId === k.id;
+                        {method.phases.map((phase) => {
+                          const isPhaseActive =
+                            methodId === method.id && phaseId === phase;
 
                           return (
                             <Link
-                              key={k.id}
-                              to={`/compute/analysis/${id}/${k.id}`}
+                              key={phase}
+                              to={`/memory/methods/${method.id}/${phase}`}
                               onClick={onClose}
                               className={[
                                 "flex items-center justify-between px-3 py-2 rounded-lg text-[13px] font-bold transition-all",
-                                isKernelActive
+                                isPhaseActive
                                   ? "text-emerald-400 bg-emerald-400/5"
                                   : "text-slate-500 hover:text-slate-300 hover:bg-slate-800/50",
                               ].join(" ")}
                             >
                               <span className="flex items-center gap-2">
-                                <Zap
+                                <Database
                                   size={12}
                                   className={
-                                    isKernelActive
-                                      ? "text-yellow-400 fill-yellow-400"
+                                    isPhaseActive
+                                      ? "text-emerald-400"
                                       : "text-slate-600"
                                   }
                                 />
-                                {k.label}
+                                {memoryPhaseLabels[phase]}
                               </span>
 
                               <div className="flex items-center gap-2">
                                 <span className="text-[8px] border border-slate-700 px-1.5 py-0.5 rounded uppercase tracking-tighter opacity-60">
-                                  {k.tag}
+                                  {phase}
                                 </span>
-                                {isKernelActive && <ArrowUpRight size={12} />}
+                                {isPhaseActive && <ArrowUpRight size={12} />}
                               </div>
                             </Link>
                           );
@@ -231,100 +226,88 @@ export default function ComputeSidebar({
             </>
           )}
 
-          {isOps && (
-            <>
-              <SectionTitle>Operator Library</SectionTitle>
-              {Object.keys(allOpsData).map((id) => (
-                <Link
-                  key={id}
-                  to={`/compute/ops?op=${id}`}
-                  onClick={onClose}
-                  className="w-full flex items-center justify-between px-4 py-3 rounded-xl transition-all font-bold text-sm mb-1 text-slate-400 hover:bg-slate-800 hover:text-slate-200"
-                >
-                  <div className="min-w-0 flex flex-col items-start text-left">
-                    <span className="truncate tracking-tight">{id}</span>
-                    <span className="text-[9px] mt-0.5 uppercase tracking-tighter font-black text-slate-500">
-                      {allOpsData[id]?.category || "Uncategorized"}
-                    </span>
-                  </div>
-                  <ChevronRight size={14} className="opacity-20" />
-                </Link>
-              ))}
-            </>
-          )}
-
-          {isTheory && (
-            <>
-              <SectionTitle>Mathematical Specs</SectionTitle>
-              {Object.keys(theoryByOpId).map((id) => (
-                <Link
-                  key={id}
-                  to={`/compute/theory?op=${id}`}
-                  onClick={onClose}
-                  className="w-full flex items-center justify-between px-4 py-3 rounded-xl transition-all font-bold text-sm mb-1 text-slate-400 hover:bg-slate-800 hover:text-slate-200"
-                >
-                  <div className="min-w-0 flex flex-col items-start text-left">
-                    <span className="truncate tracking-tight">{id}</span>
-                    <span className="text-[9px] mt-0.5 uppercase tracking-tighter font-black text-slate-500">
-                      {theoryByOpId[id]?.subtitle || "Spec"}
-                    </span>
-                  </div>
-                  <ChevronRight size={14} className="opacity-20" />
-                </Link>
-              ))}
-            </>
-          )}
-
- 
-
           {isPipeline && (
             <>
               <SectionTitle>Pipeline Context</SectionTitle>
               <div className="px-3 py-6 text-center opacity-60">
                 <GitMerge size={24} className="mx-auto mb-3 text-emerald-400" />
                 <p className="text-[10px] uppercase font-black tracking-widest text-slate-500">
-                  Execution Planning
+                  Residency Planning
                 </p>
                 <p className="mt-3 text-xs text-slate-500 leading-relaxed">
-                  semantic constraint와 hardware execution path를 연결하는
-                  compute 내부 실행 계획 단계입니다.
+                  global memory round-trip을 줄이기 위해
+                  streaming execution, re-materialization, tiling residency를
+                  설계하는 memory 내부 계획 단계입니다.
                 </p>
               </div>
             </>
           )}
 
-          {!isComputeHome && !isAnalysis && !isOps && !isTheory && !isPipeline && (
+          {isMemoryHome && (
+            <>
+              <SectionTitle>Memory Context</SectionTitle>
+              <div className="space-y-3">
+                <div className="w-full flex items-center justify-between px-4 py-3 rounded-xl border border-emerald-500/10 bg-emerald-500/5 text-emerald-300">
+                  <div className="flex flex-col items-start text-left">
+                    <span className="tracking-tight font-bold">
+                      Residency Engine
+                    </span>
+                    <span className="text-[9px] mt-0.5 uppercase tracking-tighter font-black text-emerald-500/70">
+                      Active Traffic Control
+                    </span>
+                  </div>
+                  <Activity size={16} className="animate-pulse" />
+                </div>
+
+                <div className="px-3 py-6 text-center opacity-60">
+                  <Layers size={24} className="mx-auto mb-3 text-emerald-400" />
+                  <p className="text-[10px] uppercase font-black tracking-widest text-slate-500">
+                    Memory Optimization Domain
+                  </p>
+                  <p className="mt-3 text-xs text-slate-500 leading-relaxed">
+                    계산 자체보다 데이터 이동을 먼저 다룹니다.
+                    어떤 값이 저장되어야 하는지, 어떤 값이 다시 계산될 수
+                    있는지, 어떤 reduction이 streaming 가능한지를 정의합니다.
+                  </p>
+                </div>
+              </div>
+            </>
+          )}
+
+          {!isMemoryHome && !isMethods && !isPipeline && (
             <div className="px-3 py-10 text-center opacity-40">
               <Layers size={24} className="mx-auto mb-2" />
               <p className="text-[10px] uppercase font-black tracking-widest text-slate-500">
-                No Active Compute Context
+                No Active Memory Context
               </p>
             </div>
           )}
         </div>
 
+        {/* Footer */}
         <div className="p-6 border-t border-slate-800 bg-[#0b0f1a] text-[10px]">
           <div className="flex items-center gap-2 mb-2 text-emerald-500">
             <ShieldCheck size={12} strokeWidth={3} />
             <span className="font-black uppercase tracking-widest">
-              Hardware Verified
+              Traffic Aware
             </span>
           </div>
+
           <p className="text-slate-600 font-medium leading-tight italic">
-            "Turning CUDA Kernels into <br /> Measurable Science."
+            "Eliminating HBM round-trips <br /> through physical residency."
           </p>
         </div>
-      </aside>
 
-      <style jsx="true">{`
-        .scrollbar-thin::-webkit-scrollbar {
-          width: 4px;
-        }
-        .scrollbar-thin::-webkit-scrollbar-thumb {
-          background: #1f2937;
-          border-radius: 10px;
-        }
-      `}</style>
+        <style jsx="true">{`
+          .scrollbar-thin::-webkit-scrollbar {
+            width: 4px;
+          }
+          .scrollbar-thin::-webkit-scrollbar-thumb {
+            background: #1f2937;
+            border-radius: 10px;
+          }
+        `}</style>
+      </aside>
     </>
   );
 }

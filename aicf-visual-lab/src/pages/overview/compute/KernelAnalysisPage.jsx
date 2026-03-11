@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { Microscope, FileCode, PieChart, Zap, Database, Activity, ShieldAlert, Menu } from 'lucide-react';
 
-import ComputeSidebar from '../../../components/ComputeSidebar.jsx';
+import ComputeSidebar from '../../../components/layout/ComputeSidebar.jsx';
 import OpsComparisonView from '../../../features/analysis/OpsComparisonView';
 import KernelDetailView from '../../../features/analysis/KernelDetailView';
 import { allAnalysisConfigs } from '../../../data/analysis/configs';

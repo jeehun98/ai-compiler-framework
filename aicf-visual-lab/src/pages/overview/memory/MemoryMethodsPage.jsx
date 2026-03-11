@@ -7,8 +7,9 @@ import {
   Menu,
 } from "lucide-react";
 
-import { memoryMethods } from "../../../data/memory/methods";
-import MemorySidebar from "../../../components/MemorySidebar.jsx";
+
+import { memoryMethodCatalog } from "../../../data/memory/methodCatalog";
+import MemorySidebar from "../../../components/layout/MemorySidebar.jsx";
 
 export default function MemoryMethodsPage() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
@@ -93,7 +94,7 @@ export default function MemoryMethodsPage() {
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                {memoryMethods.map((method) => {
+                {memoryMethodCatalog.map((method) => {
                   const Icon = method.icon;
 
                   return (

@@ -24,8 +24,8 @@ import {
 
 import { useSearchParams, Link } from 'react-router-dom';
 import { allOpsData } from '../../../data/index.js';
-import KernelDeepDive from '../../../components/KernelDeepDive.jsx';
-import ComputeSidebar from '../../../components/ComputeSidebar.jsx';
+import KernelDeepDive from '../../../components/common/KernelDeepDive.jsx';
+import ComputeSidebar from '../../../components/layout/ComputeSidebar.jsx';
 
 export default function OpsPage() {
   const [searchParams, setSearchParams] = useSearchParams();

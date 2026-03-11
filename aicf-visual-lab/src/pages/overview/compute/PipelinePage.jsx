@@ -3,7 +3,7 @@ import {
   GitMerge, Cpu, Code2, Zap, ArrowRight, 
   Settings2, Activity, ShieldCheck, Box
 } from 'lucide-react';
-import ComputeSidebar from '../../../components/ComputeSidebar.jsx';
+import ComputeSidebar from '../../../components/layout/ComputeSidebar.jsx';
 
 export default function PipelinePage() {
   const [activeStep, setActiveStep] = useState(0);

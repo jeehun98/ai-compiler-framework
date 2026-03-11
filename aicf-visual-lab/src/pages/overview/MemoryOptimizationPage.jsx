@@ -13,7 +13,7 @@ import {
   Database,
   Zap,
 } from "lucide-react";
-import MemorySidebar from "../../components/MemorySidebar.jsx";
+import MemorySidebar from "../../components/layout/MemorySidebar.jsx";
 
 export default function MemoryOptimizationPage() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
