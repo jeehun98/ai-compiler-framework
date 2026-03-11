@@ -1,14 +1,18 @@
-import React from "react";
-import { Link, useLocation } from "react-router-dom";
+import React, { useEffect, useState } from "react";
+import { Link, useLocation, useParams } from "react-router-dom";
 import {
-  LayoutDashboard,
   HardDrive,
   ChevronRight,
+  ChevronDown,
   ShieldCheck,
-  Layers,
-  Waypoints,
-  GitBranch,
-  Database,
+  Activity,
+  RotateCcw,
+  Maximize2,
+  LayoutDashboard,
+  ArrowUpRight,
+  GitMerge,
+  Zap,
+  Library,
 } from "lucide-react";
 
 export default function MemorySidebar({
@@ -18,6 +22,59 @@ export default function MemorySidebar({
 }) {
   const location = useLocation();
   const pathname = location.pathname;
+  const { methodId, phaseId } = useParams();
+
+  const methods = {
+    "online-norm": {
+      label: "Online Reducible Norm",
+      category: "Single-Pass Reduction",
+      icon: <Activity size={18} />,
+      phases: ["theory", "hardware", "compiler"],
+    },
+    "weighted-reduction": {
+      label: "Streaming Weighted Reduction",
+      category: "Flash-Style Optimization",
+      icon: <Zap size={18} />,
+      phases: ["theory", "hardware", "compiler"],
+    },
+    rematerialization: {
+      label: "Re-materializable Intermediate",
+      category: "VRAM Saving Strategy",
+      icon: <RotateCcw size={18} />,
+      phases: ["theory", "hardware", "compiler"],
+    },
+    "tile-compatible": {
+      label: "Tile-Compatible Compute",
+      category: "SRAM Residency Planning",
+      icon: <Maximize2 size={18} />,
+      phases: ["theory", "hardware", "compiler"],
+    },
+  };
+
+  const phaseLabels = {
+    theory: "Math & Logic",
+    hardware: "Physical Analysis",
+    compiler: "MCIR Implementation",
+  };
+
+  const isOverview = pathname === "/memory";
+  const isMethodsRoot = pathname === "/memory/methods";
+  const isMethodsSection = pathname.startsWith("/memory/methods");
+  const isPipeline = pathname.startsWith("/memory/pipeline");
+
+  const [methodsOpen, setMethodsOpen] = useState(isMethodsSection);
+  const [expandedMethod, setExpandedMethod] = useState(methodId || null);
+
+  useEffect(() => {
+    if (isMethodsSection) setMethodsOpen(true);
+  }, [isMethodsSection]);
+
+  useEffect(() => {
+    if (methodId) {
+      setMethodsOpen(true);
+      setExpandedMethod(methodId);
+    }
+  }, [methodId]);
 
   const SectionTitle = ({ children }) => (
     <p className="px-3 text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2 mt-4 first:mt-0">
@@ -27,7 +84,6 @@ export default function MemorySidebar({
 
   const navItem = (to, label, Icon, options = {}) => {
     const { exact = false } = options;
-
     const isActive = exact
       ? pathname === to
       : pathname === to || pathname.startsWith(`${to}/`);
@@ -43,7 +99,8 @@ export default function MemorySidebar({
             : "text-slate-400 hover:bg-slate-800 hover:text-white",
         ].join(" ")}
       >
-        <Icon size={18} /> {label}
+        <Icon size={18} />
+        {label}
       </Link>
     );
   };
@@ -64,14 +121,15 @@ export default function MemorySidebar({
           isOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0",
         ].join(" ")}
       >
+        {/* Header */}
         <div className="p-6 border-b border-slate-800 bg-[#0b0f1a]">
           <Link
             to="/"
             className="flex items-center gap-3 group"
             onClick={onClose}
           >
-            <div className="bg-emerald-600 p-2 rounded-xl group-hover:bg-emerald-500 transition shadow-lg shadow-emerald-600/20">
-              <HardDrive size={20} className="text-white" />
+            <div className="bg-emerald-600 p-2 rounded-xl group-hover:bg-emerald-500 transition shadow-lg shadow-emerald-600/20 text-white">
+              <HardDrive size={20} />
             </div>
             <div>
               <h1 className="text-lg font-black tracking-tight text-white leading-none">
@@ -84,74 +142,141 @@ export default function MemorySidebar({
           </Link>
         </div>
 
+        {/* Navigation */}
         <nav className="p-4 space-y-1 border-b border-slate-800">
           <SectionTitle>Navigation</SectionTitle>
+
           {navItem("/memory", "Overview", LayoutDashboard, { exact: true })}
+
+          <div className="space-y-1">
+            <div
+              className={[
+                "w-full flex items-center justify-between rounded-xl transition-all font-bold text-sm",
+                isMethodsRoot
+                  ? "bg-emerald-600/10 text-emerald-400 border border-emerald-500/20"
+                  : "text-slate-400 hover:bg-slate-800 hover:text-white",
+              ].join(" ")}
+            >
+              <Link
+                to="/memory/methods"
+                onClick={onClose}
+                className="flex-1 flex items-center gap-3 px-3 py-2.5"
+              >
+                <Library size={18} />
+                Optimization Methods
+              </Link>
+
+              <button
+                type="button"
+                onClick={() => setMethodsOpen((v) => !v)}
+                className="p-3 hover:bg-white/10 rounded-r-xl transition-colors"
+              >
+                {methodsOpen ? (
+                  <ChevronDown size={14} />
+                ) : (
+                  <ChevronRight size={14} />
+                )}
+              </button>
+            </div>
+
+            {methodsOpen && (
+              <div className="ml-5 pl-4 border-l border-slate-800 space-y-1 animate-in slide-in-from-top-2 duration-200">
+                {Object.entries(methods).map(([id, method]) => {
+                  const isExpanded = expandedMethod === id;
+                  const isMethodRootActive = methodId === id && !phaseId;
+                  const isMethodInPath = methodId === id;
+
+                  return (
+                    <div key={id} className="space-y-1">
+                      <div
+                        className={[
+                          "w-full flex items-center justify-between rounded-xl transition-all text-sm font-bold",
+                          isMethodRootActive
+                            ? "bg-emerald-600 text-white shadow-lg shadow-emerald-600/20"
+                            : isMethodInPath
+                            ? "bg-slate-800/70 text-slate-200"
+                            : "text-slate-500 hover:bg-slate-800 hover:text-slate-200",
+                        ].join(" ")}
+                      >
+                        <Link
+                          to={`/memory/methods/${id}`}
+                          onClick={onClose}
+                          className="flex-1 text-left flex flex-col px-4 py-3 min-w-0"
+                        >
+                          <span className="flex items-center gap-2 truncate">
+                            {method.icon}
+                            {method.label}
+                          </span>
+                          <span
+                            className={`text-[9px] uppercase font-black mt-0.5 ${
+                              isMethodRootActive
+                                ? "text-emerald-100"
+                                : isMethodInPath
+                                ? "text-slate-400"
+                                : "text-slate-600"
+                            }`}
+                          >
+                            {method.category}
+                          </span>
+                        </Link>
+
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setExpandedMethod(isExpanded ? null : id)
+                          }
+                          className="p-3 hover:bg-white/10 rounded-r-xl transition-colors"
+                        >
+                          {isExpanded ? (
+                            <ChevronDown size={14} />
+                          ) : (
+                            <ChevronRight size={14} />
+                          )}
+                        </button>
+                      </div>
+
+                      {isExpanded && (
+                        <div className="ml-5 pl-4 border-l border-slate-800 space-y-1 mt-1 animate-in slide-in-from-top-2 duration-200">
+                          {method.phases.map((phase) => {
+                            const isPhaseActive =
+                              methodId === id && phaseId === phase;
+
+                            return (
+                              <Link
+                                key={phase}
+                                to={`/memory/methods/${id}/${phase}`}
+                                onClick={onClose}
+                                className={[
+                                  "flex items-center justify-between px-3 py-2 rounded-lg text-[12px] font-bold transition-all",
+                                  isPhaseActive
+                                    ? "text-emerald-400 bg-emerald-400/5"
+                                    : "text-slate-500 hover:text-slate-300 hover:bg-slate-800/50",
+                                ].join(" ")}
+                              >
+                                <span>{phaseLabels[phase]}</span>
+                                {isPhaseActive && (
+                                  <ArrowUpRight
+                                    size={12}
+                                    className="animate-in fade-in zoom-in"
+                                  />
+                                )}
+                              </Link>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {navItem("/memory/pipeline", "Residency Pipeline", GitMerge)}
         </nav>
 
-        <div className="flex-1 overflow-y-auto p-4 space-y-2 scrollbar-thin scrollbar-thumb-slate-800">
-          <SectionTitle>Memory Sections</SectionTitle>
-
-          <div className="w-full flex items-center justify-between px-4 py-3 rounded-xl border border-emerald-500/10 bg-emerald-500/5 text-emerald-300">
-            <div className="flex flex-col items-start text-left">
-              <span className="tracking-tight font-bold">
-                Memory Optimization
-              </span>
-              <span className="text-[9px] mt-0.5 uppercase tracking-tighter font-black text-emerald-500/70">
-                Current Axis
-              </span>
-            </div>
-            <HardDrive size={16} />
-          </div>
-
-          {[
-            {
-              icon: <Waypoints size={16} />,
-              title: "Residency Model",
-              desc: "값을 가능한 오래 온칩에 머물게 하는 실행 관점",
-            },
-            {
-              icon: <GitBranch size={16} />,
-              title: "Boundary Elimination",
-              desc: "operator 경계를 물리 실행 경계와 분리하는 사고",
-            },
-            {
-              icon: <Database size={16} />,
-              title: "Traffic-Aware Planning",
-              desc: "HBM write/read를 최소화하는 dataflow 계획",
-            },
-          ].map((item) => (
-            <div
-              key={item.title}
-              className="w-full rounded-xl px-4 py-4 text-slate-400 border border-slate-800 bg-[#111827]"
-            >
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2 text-emerald-400 font-bold text-sm">
-                  {item.icon}
-                  {item.title}
-                </div>
-                <ChevronRight size={14} className="opacity-20" />
-              </div>
-              <p className="mt-3 text-xs leading-relaxed text-slate-500">
-                {item.desc}
-              </p>
-            </div>
-          ))}
-
-          <SectionTitle>Axis Summary</SectionTitle>
-          <div className="px-3 py-6 text-center opacity-80">
-            <Layers size={24} className="mx-auto mb-3 text-emerald-400" />
-            <p className="text-[10px] uppercase font-black tracking-widest text-slate-500">
-              Same Result, Less Movement
-            </p>
-            <p className="mt-3 text-xs text-slate-500 leading-relaxed">
-              Memory Optimization은 더 많은 연산이 아니라 더 적은 이동을 목표로
-              합니다. residency, fusion, traffic control이 이 축의 핵심입니다.
-            </p>
-          </div>
-        </div>
-
-        <div className="p-6 border-t border-slate-800 bg-[#0b0f1a] text-[10px]">
+        {/* Footer */}
+        <div className="mt-auto p-6 border-t border-slate-800 bg-[#0b0f1a] text-[10px]">
           <div className="flex items-center gap-2 mb-2 text-emerald-500">
             <ShieldCheck size={12} strokeWidth={3} />
             <span className="font-black uppercase tracking-widest">
@@ -159,7 +284,7 @@ export default function MemorySidebar({
             </span>
           </div>
           <p className="text-slate-600 font-medium leading-tight italic">
-            "Optimization begins when <br /> movement becomes visible."
+            "Eliminating HBM round-trips <br /> through physical residency."
           </p>
         </div>
       </aside>

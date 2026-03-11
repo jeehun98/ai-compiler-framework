@@ -11,22 +11,44 @@ import PipelinePage from "./pages/overview/compute/PipelinePage.jsx";
 import OpsPage from "./pages/overview/compute/OpsPage.jsx";
 import KernelAnalysisPage from "./pages/overview/compute/KernelAnalysisPage.jsx";
 
+// memory pages
+import MemoryMethodsPage from "./pages/overview/memory/MemoryMethodsPage.jsx";
+import MemoryMethodDetailPage from "./pages/overview/memory/MemoryMethodDetailPage.jsx";
+import MemoryPipelinePage from "./pages/overview/memory/MemoryPipelinePage.jsx";
+
 export default function App() {
   return (
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<AICFOverviewPage />} />
 
+        {/* top overview */}
         <Route path="/compute" element={<ComputeOptimizationPage />} />
         <Route path="/memory" element={<MemoryOptimizationPage />} />
 
+        {/* compute */}
         <Route path="/compute/theory" element={<TheoryPage />} />
         <Route path="/compute/pipeline" element={<PipelinePage />} />
         <Route path="/compute/ops" element={<OpsPage />} />
 
         <Route path="/compute/analysis" element={<KernelAnalysisPage />} />
         <Route path="/compute/analysis/:opId" element={<KernelAnalysisPage />} />
-        <Route path="/compute/analysis/:opId/:kernelId" element={<KernelAnalysisPage />} />
+        <Route
+          path="/compute/analysis/:opId/:kernelId"
+          element={<KernelAnalysisPage />}
+        />
+
+        {/* memory */}
+        <Route path="/memory/methods" element={<MemoryMethodsPage />} />
+        <Route
+          path="/memory/methods/:methodId"
+          element={<MemoryMethodDetailPage />}
+        />
+        <Route
+          path="/memory/methods/:methodId/:phaseId"
+          element={<MemoryMethodDetailPage />}
+        />
+        <Route path="/memory/pipeline" element={<MemoryPipelinePage />} />
 
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
