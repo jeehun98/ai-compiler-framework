@@ -15,6 +15,7 @@ import {
   XCircle,
   Layers,
   Info,
+  ArrowRight,
 } from "lucide-react";
 
 import ComputeSidebar from "../../../components/layout/ComputeSidebar.jsx";
@@ -48,7 +49,6 @@ export default function TheoryPage() {
   const isMain = !activeOpId;
   const spec = activeOpId ? theoryByOpId[activeOpId] : null;
 
-  // Render Error if op requested but not found
   if (activeOpId && !spec) {
     return (
       <div className="p-10 text-blue-400 bg-[#0f172a] min-h-screen flex flex-col items-center justify-center font-mono">
@@ -59,7 +59,7 @@ export default function TheoryPage() {
           data/theory에 "{activeOpId}" 스펙이 없습니다.
         </div>
         <Link
-          to="/theory"
+          to="/compute/theory"
           className="mt-6 px-4 py-2 rounded-xl bg-blue-600 text-white font-bold"
         >
           Back to Guide
@@ -82,13 +82,14 @@ export default function TheoryPage() {
                 AICF LAB
               </div>
               <div className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">
-                v1.0.4 Stable
+                v1.0.5 Semantic View
               </div>
             </div>
           </Link>
           <button
             onClick={() => setIsSidebarOpen(true)}
             className="p-2 rounded-xl border border-slate-700 bg-[#1e293b]"
+            aria-label="Open sidebar"
           >
             <Menu size={18} />
           </button>
@@ -99,6 +100,7 @@ export default function TheoryPage() {
         isOpen={isSidebarOpen}
         onClose={() => setIsSidebarOpen(false)}
         activeOpId={activeOpId}
+        version="v1.0.5 Semantic View"
       />
 
       <main className="flex-1 flex flex-col min-w-0">
@@ -106,32 +108,39 @@ export default function TheoryPage() {
 
         <div className="flex-1 overflow-y-auto p-6 sm:p-10 space-y-14 pb-32 bg-[linear-gradient(180deg,rgba(15,23,42,1),rgba(30,41,59,0.2))]">
           {isMain ? (
-            /* ============================================================
-               CASE 1: THEORY MAIN PAGE (INTERPRETATION GUIDE)
-               ============================================================ */
             <div className="max-w-5xl mx-auto space-y-20 animate-in fade-in duration-700">
               {/* Hero Section */}
               <section className="bg-[#1e293b] border border-slate-800 rounded-[2.5rem] p-10 sm:p-16 shadow-2xl relative overflow-hidden">
                 <div className="absolute -top-10 -right-10 text-[140px] font-black text-blue-500/5 pointer-events-none">
                   THEORY
                 </div>
+
                 <div className="flex items-center gap-2 text-blue-500 font-mono text-xs font-black uppercase tracking-[0.3em] mb-6">
                   <BookOpen size={16} /> Interpretation Guide
                 </div>
+
                 <h1 className="text-4xl sm:text-6xl font-black tracking-tight text-white leading-tight">
                   Mathematical Semantics <br />
                   <span className="text-blue-500 text-3xl sm:text-5xl">
                     of Operators
                   </span>
                 </h1>
+
                 <p className="mt-8 text-slate-400 text-lg sm:text-xl leading-relaxed max-w-3xl">
                   Theory는 각 연산을 단순한 코드 조각이 아닌,{" "}
                   <strong>
-                    특정한 구조를 보존하거나 변환하는 함수(Transformation)
+                    특정한 구조를 보존하거나 변환하는 수학적 함수
                   </strong>
-                  로 정의합니다. 이 페이지는 각 Theory 문서를 어떻게 해석해야
-                  하는지 설명하는 가이드입니다.
+                  로 정의합니다.
+                  <br />
+                  이 페이지는 구현이나 커널 최적화 이전에, 연산이 본질적으로 무엇을 의미하는지와
+                  어떤 성질이 최적화 과정에서도 보존되어야 하는지를 설명합니다.
                 </p>
+
+                <div className="mt-8 inline-flex items-center gap-2 rounded-2xl border border-blue-500/20 bg-blue-500/5 px-4 py-2 text-[11px] font-bold uppercase tracking-widest text-blue-300">
+                  <ShieldCheck size={14} />
+                  Semantic Anchor for Optimization
+                </div>
               </section>
 
               {/* Scope & Intent */}
@@ -143,26 +152,24 @@ export default function TheoryPage() {
                       What Theory Covers
                     </h2>
                   </div>
+
                   <ul className="space-y-4 text-slate-300">
                     <li className="flex gap-3 text-sm sm:text-base">
                       <div className="mt-1.5 w-1.5 h-1.5 bg-blue-500 rounded-full shrink-0" />
                       <span>
-                        <strong>Mathematical Definition:</strong> 연산을 함수 f:
-                        X to Y 로 정의하고 성질을 명시합니다.
+                        <strong>Mathematical Definition:</strong> 연산을 함수로 정의하고 입출력 도메인과 핵심 성질을 명시합니다.
                       </span>
                     </li>
                     <li className="flex gap-3 text-sm sm:text-base">
                       <div className="mt-1.5 w-1.5 h-1.5 bg-blue-500 rounded-full shrink-0" />
                       <span>
-                        <strong>Geometric Interpretation:</strong> 벡터
-                        공간에서 수행하는 기하학적 변환을 설명합니다.
+                        <strong>Geometric Interpretation:</strong> 벡터 공간 또는 확률 공간에서 수행하는 구조 변환의 의미를 설명합니다.
                       </span>
                     </li>
                     <li className="flex gap-3 text-sm sm:text-base">
                       <div className="mt-1.5 w-1.5 h-1.5 bg-blue-500 rounded-full shrink-0" />
                       <span>
-                        <strong>Structural Invariants:</strong> 연산 후에도
-                        보존되는 핵심 구조(거리, 순서 등)를 정의합니다.
+                        <strong>Structural Invariants:</strong> 연산 이후에도 보존되어야 하는 핵심 구조와 등가 조건을 정의합니다.
                       </span>
                     </li>
                   </ul>
@@ -175,6 +182,7 @@ export default function TheoryPage() {
                       What It Does NOT Contain
                     </h2>
                   </div>
+
                   <ul className="space-y-4 text-slate-500 italic">
                     <li className="flex gap-3 line-through decoration-slate-700">
                       <div className="mt-1.5 w-1.5 h-1.5 bg-red-900/50 rounded-full shrink-0" />
@@ -185,14 +193,59 @@ export default function TheoryPage() {
                       <span>컴파일러 정책 및 실행 그래프 최적화</span>
                     </li>
                   </ul>
+
                   <p className="mt-10 p-4 bg-slate-900/50 rounded-xl border border-slate-800 text-[12px] text-slate-400 leading-relaxed font-medium">
                     <span className="text-blue-400 font-bold block mb-1">
                       NOTE: Relationship with Ops Explorer
                     </span>
-                    Theory는 <strong>'무엇(What)'</strong>을 계산하는지
-                    설명하고, Ops Explorer는 <strong>'어떻게(How)'</strong>{" "}
-                    계산하는지 보여줍니다.
+                    Theory는 <strong>'무엇(What)'</strong>을 계산하는지와
+                    무엇이 반드시 보존되어야 하는지를 설명하고,
+                    Ops Explorer는 그 의미가 어떤 <strong>invariant-preserving lowering</strong>으로 이어지는지 보여줍니다.
                   </p>
+                </div>
+              </section>
+
+              {/* Why Theory Comes First */}
+              <section className="bg-blue-600/5 border border-blue-500/20 rounded-[2.5rem] p-8 sm:p-10">
+                <div className="flex items-center gap-3 text-blue-400 mb-4">
+                  <ShieldCheck size={22} />
+                  <h2 className="text-2xl font-black uppercase tracking-tight text-white">
+                    Why Theory Comes First
+                  </h2>
+                </div>
+
+                <p className="text-slate-400 leading-relaxed max-w-3xl">
+                  Theory는 AICF에서 모든 최적화가 따라야 하는 의미적 기준점입니다.
+                  어떤 연산 재배치, 융합, 근사, lowering도 이 계층에서 정의된 수학적 성질을 훼손해서는 안 됩니다.
+                </p>
+
+                <div className="mt-6 flex flex-col sm:flex-row gap-4">
+                  {[
+                    {
+                      title: "Mathematical Meaning",
+                      desc: "연산의 정의와 도메인을 규정합니다.",
+                    },
+                    {
+                      title: "Invariant Boundary",
+                      desc: "최적화가 침범할 수 없는 보존 조건을 정합니다.",
+                    },
+                    {
+                      title: "Optimization Legality",
+                      desc: "후속 lowering과 fusion의 합법성 기준이 됩니다.",
+                    },
+                  ].map((item) => (
+                    <div
+                      key={item.title}
+                      className="flex-1 bg-[#0f172a] border border-slate-800 rounded-2xl p-5"
+                    >
+                      <div className="text-white font-black uppercase text-sm mb-2">
+                        {item.title}
+                      </div>
+                      <p className="text-slate-400 text-sm leading-relaxed">
+                        {item.desc}
+                      </p>
+                    </div>
+                  ))}
                 </div>
               </section>
 
@@ -204,6 +257,7 @@ export default function TheoryPage() {
                     Theory Spec Structure
                   </h2>
                 </div>
+
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                   {[
                     {
@@ -258,36 +312,64 @@ export default function TheoryPage() {
                 <h2 className="text-2xl font-black text-white uppercase mb-8">
                   Operators Covered in Theory
                 </h2>
+
                 <div className="flex flex-wrap justify-center gap-4">
                   {theoryOpIds.map((id) => (
                     <Link
                       key={id}
-                      to={`/theory?op=${id}`}
+                      to={`/compute/theory?op=${id}`}
                       className="px-8 py-4 bg-[#0f172a] border border-slate-700 rounded-2xl text-blue-300 font-black hover:border-blue-500 hover:text-white transition shadow-xl uppercase tracking-wider"
                     >
                       {id}
                     </Link>
                   ))}
                 </div>
+
                 <p className="mt-10 text-slate-500 italic text-sm max-w-2xl mx-auto">
                   "Theory는 모든 연산을 다루지 않습니다. 수학적으로 핵심적인
                   기초 구조를 형성하는 연산만을 엄선하여 포함합니다."
                 </p>
               </section>
+
+              {/* CTA to Ops */}
+              <section className="bg-[#1e293b] border border-slate-800 rounded-[2.5rem] p-10 text-center">
+                <div className="flex items-center justify-center gap-2 text-emerald-400 mb-4">
+                  <ArrowRight size={18} />
+                  <span className="text-[11px] font-black uppercase tracking-widest">
+                    Next Layer
+                  </span>
+                </div>
+
+                <h2 className="text-2xl font-black text-white uppercase mb-4">
+                  See How Theory Becomes Lowering Choices
+                </h2>
+
+                <p className="text-slate-400 max-w-2xl mx-auto leading-relaxed mb-8">
+                  Theory가 연산의 의미와 보존 조건을 정의했다면,
+                  Ops Explorer는 그 의미가 어떤 invariant-preserving optimization space와
+                  lowering family로 이어지는지 보여줍니다.
+                </p>
+
+                <Link
+                  to="/compute/ops"
+                  className="inline-flex items-center gap-2 px-8 py-4 rounded-2xl bg-blue-600/10 border border-blue-500/20 text-blue-300 font-black uppercase tracking-widest hover:bg-blue-600/20 transition"
+                >
+                  Go to Ops Explorer <ArrowRight size={16} />
+                </Link>
+              </section>
             </div>
           ) : (
-            /* ============================================================
-               CASE 2: SPECIFIC THEORY DETAIL PAGE
-               ============================================================ */
             <div className="space-y-14 animate-in slide-in-from-bottom-4 duration-500">
               {/* DETAIL HERO */}
               <section className="bg-[#1e293b] border border-slate-800 rounded-[2.5rem] p-10 sm:p-12 shadow-2xl relative overflow-hidden">
                 <div className="absolute -top-10 -right-10 text-[140px] sm:text-[180px] font-black text-blue-500/5 pointer-events-none tracking-tighter uppercase">
                   {spec.id}
                 </div>
+
                 <div className="flex items-center gap-2 text-blue-500 font-mono text-[10px] font-black uppercase tracking-[0.35em]">
                   <Waypoints size={14} /> {spec.subtitle || "Theory Spec"}
                 </div>
+
                 <h1 className="mt-4 text-4xl sm:text-6xl font-black tracking-tight text-white leading-[1.05]">
                   {spec.title}
                 </h1>
@@ -348,6 +430,7 @@ export default function TheoryPage() {
                     <div className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-4 flex items-center gap-2">
                       <Info size={12} /> Property Preview
                     </div>
+
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       {spec.sections.projection.rulesPreview?.map((r, i) => (
                         <div
@@ -416,7 +499,7 @@ export default function TheoryPage() {
               {/* FOOTER NAV */}
               <div className="pt-10 border-t border-slate-800 flex justify-center">
                 <Link
-                  to="/theory"
+                  to="/compute/theory"
                   className="flex items-center gap-2 text-blue-400 font-black uppercase text-sm hover:text-white transition"
                 >
                   <BookOpen size={16} /> Back to Theory Guide
