@@ -6,7 +6,6 @@ import { softmaxData } from './softmax';
 import { adamStepData } from './adam_step';
 import { batchNormData } from './batch_norm';
 import { reluData } from './relu';
-import { gemmEpilogueData } from './gemm_epilogue';
 
 // Deep Dive 데이터 Import
 import { gemmDeepDive } from './deepdive/gemm';
@@ -16,7 +15,6 @@ import { batchNormDeepDive } from './deepdive/batchnorm';
 import { layerNormDeepDive } from './deepdive/layer_norm';
 import { reluDeepDive } from './deepdive/relu';
 import { softmaxDeepDive } from './deepdive/softmax';
-import { gemmEpilogueDeepDive } from './deepdive/gemm_epilogue';
 
 export const allOpsData = {
   AdamStep: {
@@ -37,11 +35,6 @@ export const allOpsData = {
   GEMM: {
     ...gemmData,
     ...gemmDeepDive,
-  },
-
-  GEMM_Epilogue: {
-    ...gemmEpilogueData,
-    ...gemmEpilogueDeepDive,
   },
   
   LayerNorm: {

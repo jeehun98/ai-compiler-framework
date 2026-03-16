@@ -5,57 +5,81 @@ export const biasAddData = {
   category: "상태 보정 / 경계 이동 (State Calibration)",
 
   descriptions: {
-    essence: "활성화 함수 진입 전, 데이터 분포의 중심(Centroid)을 이동시켜 결정 경계의 영점을 보정하는 필수적인 상태 조정 단계입니다.",
-    strategy: "단독 실행 대신 선행 연산(GEMM)의 에필로그나 후행 연산의 일부로 융합되어, 물리적인 커널 실행 자체를 제거하는 Zero-Cost 전략을 수행합니다.",
-    hardware: "메모리 대역폭이 병목인 연산이므로, 별도 커널 런치 없이 선행 연산의 레지스터 쓰기(Store) 직전 단계에 ALU 연산을 끼워 넣습니다."
+    essence:
+      "BiasAdd는 각 특징 채널에 대해 상수 bias를 더하여 활성값의 기준점을 이동시키는 채널별 affine shift 연산입니다. 값의 상대적 차이는 유지한 채, 결정 경계와 후행 비선형 연산의 작동 위치를 조정합니다.",
+    strategy:
+      "BiasAdd는 독립적인 채널 축에 대해 동일한 broadcast add를 수행하므로, 단독 커널보다 선행 연산의 epilogue 또는 후행 pointwise 연산과 결합된 lowering이 자연스럽습니다. 핵심은 별도 메모리 왕복 없이 의미를 그대로 유지하는 것입니다.",
+    hardware:
+      "이 연산은 주로 standalone compute보다 memory movement 비용이 큰 연산이므로, epilogue fusion 또는 pointwise fusion family로 연결되는 경우가 많습니다. 실제 register injection과 bandwidth 관측은 Deep Dive 계층에서 다룹니다.",
   },
-  
+
   canonical: {
-    formula: "Y = X + \\mathbf{b}_{broadcast}",
-    shapes: { X: "M x N", b: "1 x N", Y: "M x N" },
+    formula: "Y_{i,j} = X_{i,j} + b_j",
+    shapes: {
+      X: "M x N",
+      b: "1 x N",
+      Y: "M x N",
+    },
     interpretation: {
-      M: "입력 샘플 (Batch Size)",
-      N: "특징 채널 (Feature Dimension)",
-      b: "채널별 보정값 (Bias Term)",
-      y_ij: "보정된 활성 신호 (Calibrated Signal)",
+      M: "샘플 축 또는 행 단위 처리 축",
+      N: "채널/특징 축 (bias가 정의되는 축)",
+      b: "채널별 기준점 이동값",
+      "Y_{i,j}": "bias가 반영된 출력 활성값",
     },
   },
 
   semantics: {
-    thesis: "결정 경계(Decision Boundary)를 미세 조정하여 신호의 영점을 맞추는 보정 연산자",
+    thesis:
+      "BiasAdd는 각 채널에 대해 일정한 translation을 적용하는 affine-shift operator이며, 상대적 차이 구조를 유지하면서 후행 activation, normalization, residual merge의 기준점을 조정하는 역할을 합니다.",
+
     axes: {
-      M: { name: "샘플 (Samples)", role: "신호 처리 단위" },
-      N: { name: "특징 채널 (Features)", role: "보정 대상 차원" },
+      M: { name: "Samples", role: "독립적 데이터 행 또는 샘플 처리 축" },
+      N: { name: "Features", role: "bias가 broadcast되는 채널/특징 축" },
     },
 
     invariants: [
       {
-        id: "INV_DISTRIBUTION_SHIFT",
-        name: "분포 평행 이동 (Translation Invariance)",
-        metric: "상대적 거리(Relative Distance) 보존",
-        threshold: "분산(Variance) 변화량 0",
-        allows: ["벡터화된 로드", "스트리밍 융합"],
+        id: "INV_CHANNEL_TRANSLATION",
+        name: "채널별 평행 이동 (Channel-wise Translation)",
+        metric: "Y_{i,j} - X_{i,j} = b_j",
+        threshold: "Per-channel constant shift",
+        allows: ["Broadcast Fusion", "Epilogue Injection"],
       },
       {
-        id: "INV_ACTIVATION_THRESHOLD",
-        name: "활성 임계점 보장 (Threshold Integrity)",
-        metric: "부호 반전 비율 (Sign Flip Ratio)",
-        threshold: "허용 오차 범위 내 유지",
-        allows: ["고정밀도 누산기 사용"],
+        id: "INV_RELATIVE_DIFFERENCE_PRESERVATION",
+        name: "상대 차이 보존 (Relative Difference Preservation)",
+        metric: "(Y_{i_1,j} - Y_{i_2,j}) = (X_{i_1,j} - X_{i_2,j})",
+        threshold: "Difference-preserving shift",
+        allows: ["Vectorized Add", "Streaming Realization"],
+      },
+      {
+        id: "INV_BROADCAST_AXIS_CONSISTENCY",
+        name: "브로드캐스트 축 일관성 (Broadcast Axis Consistency)",
+        metric: "b_j \\text{ is shared across all } i \\text{ for fixed } j",
+        threshold: "Axis-consistent broadcast",
+        allows: ["Bias Cache Reuse", "Pointwise Fusion"],
       },
     ],
 
     sensitivity: {
       downstream: [
         {
-          name: "ReLU 불감 영역 (Dead-zone)",
-          rule: "보정 후 값이 음수(Y < 0)로 확정될 경우, 저장 없이 0으로 처리",
-          hint: "메모리 쓰기 생략 (Write Elision)",
+          name: "ReLU / GELU Activation Boundary",
+          rule:
+            "BiasAdd \\text{ 는 activation 이전 기준점을 이동시키므로, 후행 비선형 함수의 활성 영역 분포를 직접 바꾼다}",
+          hint: "Activation epilogue와 결합 우선",
         },
         {
-          name: "LayerNorm 정규화",
-          rule: "다음 연산이 정규화일 경우, Bias를 평균 계산 단계로 흡수 가능",
-          hint: "연산 융합 (Op Fusion)",
+          name: "LayerNorm / Mean-Centering",
+          rule:
+            "\\text{후행 연산이 평균 중심화(mean-centering)를 포함하면 일부 bias 효과는 정규화 단계에서 상쇄되거나 흡수될 수 있다}",
+          hint: "Normalization-aware fusion 검토",
+        },
+        {
+          name: "Residual Merge / Add Chain",
+          rule:
+            "\\text{후행 residual add와 연속된 pointwise chain에서는 standalone BiasAdd보다 fused pointwise realization이 유리하다}",
+          hint: "Pointwise chain fusion",
         },
       ],
     },
@@ -65,44 +89,64 @@ export const biasAddData = {
     chosen: {
       variant: "Fused_Epilogue_BiasAdd",
       reason: [
-        "메모리 병목(Memory Bound) 연산: 데이터를 다시 읽지 않고 GEMM 직후 처리",
-        "캐시 지역성 극대화: 레지스터에 남아있는 값에 즉시 더하기 수행",
-        "쓰기 비용 절감: 중간 버퍼(Intermediate Buffer) 생성 방지",
+        "\\text{채널 broadcast 구조: } b_j \\text{ 는 출력 채널 축에만 의존하므로 GEMM/Conv 결과의 epilogue에서 직접 주입 가능하다}",
+        "\\text{의미 보존 하의 통합: bias shift는 pointwise affine shift이므로 선행 연산 결과를 다시 읽지 않고 결합된 realization이 가능하다}",
+        "\\text{중간 버퍼 회피: standalone BiasAdd를 제거하면 추가 load/store를 줄일 수 있다}",
+        "\\text{따라서 } \\texttt{Fused\\_Epilogue\\_BiasAdd} \\text{ family가 자연스럽다}",
       ],
-      applied_rewrites: ["에필로그 융합 (Epilogue Fusion)", "벡터화 처리 (Vectorization)"],
+      applied_rewrites: [
+        "Epilogue Fusion",
+        "Broadcast Injection",
+        "Vectorized Pointwise Update",
+      ],
     },
   },
 
   kernel: {
-    strategy: "스트림 처리 및 벡터화 (Vectorized Streaming)",
+    strategy: "Vectorized Broadcast Shift",
     details: [
-      { technique: "128bit 벡터 로드", semantic_link: "메모리 대역폭 포화 방지" },
-      { technique: "레지스터 인젝션", semantic_link: "ALU 유휴 시간 활용 (Compute Hiding)" },
-      { technique: "브로드캐스트 최적화", semantic_link: "b 벡터의 L1 캐시 상주 유도" },
+      {
+        technique: "Epilogue Register Injection",
+        semantic_link: "출력 쓰기 직전 bias shift를 결합하여 별도 왕복 제거",
+      },
+      {
+        technique: "Vectorized Load/Store",
+        semantic_link: "연속 채널 구간에 대한 pointwise shift를 효율적으로 수행",
+      },
+      {
+        technique: "Bias Broadcast Reuse",
+        semantic_link: "동일 채널 bias를 여러 행에 재사용",
+      },
     ],
     metrics: {
-      memory_reuse: "N/A (Streaming)",
-      throughput: "Memory Bandwidth Limit (약 98%)",
-      occupancy: "99%"
+      memory_reuse: "Broadcast Reuse on N-axis",
+      throughput: "Memory Bound / Near-Free When Fused",
+      occupancy: "High",
     },
   },
 
   costModel: {
-    semanticLoss: "\\mathcal{L}_{calib} = \\lambda_{drift} \\| \\Delta_{boundary} \\| + \\epsilon_{quant}",
+    semanticLoss:
+      "\\mathcal{C}_{bias} = w_{axis} \\cdot \\Delta_{broadcast} + w_{fuse} \\cdot \\Delta_{fusion} + w_{num} \\cdot \\Delta_{numeric}",
     weights_hint: {
-      default: { drift: 0.8, quant_error: 0.2 }
+      default: {
+        axis: 45.0,
+        fuse: 35.0,
+        numeric: 20.0,
+      },
     },
     metrics: {
-      boundary_shift: "0.001%",
-      rel_error: "1e-6"
-    }
+      broadcast_consistency: "High",
+      epilogue_affinity: "Strong",
+      numeric_risk: "Low",
+    },
   },
 
   performance: {
     latency: {
       pytorch: 0.06,
       torch_compile: 0.03,
-      ours: 0.01 // 거의 공짜(Free)에 가까운 융합 성능 강조
-    }
-  }
+      ours: 0.01,
+    },
+  },
 };

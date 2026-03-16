@@ -34,7 +34,6 @@ export default function ComputeSidebar({
   const isComputeHome = pathname === "/compute";
   const isOps = pathname.startsWith("/compute/ops");
   const isTheory = pathname.startsWith("/compute/theory");
-  const isPipeline = pathname.startsWith("/compute/pipeline");
   const isAnalysis = pathname.startsWith("/compute/analysis");
 
   const analysisData = Object.fromEntries(
@@ -127,9 +126,7 @@ export default function ComputeSidebar({
           <SectionTitle>Navigation</SectionTitle>
           {navItem("/compute", "Overview", Layers, { exact: true })}
           {navItem("/compute/theory", "Theory Specs", BookOpen)}
-          {navItem("/compute/pipeline", "Compiler Pipeline", GitMerge)}
           {navItem("/compute/ops", "Ops Explorer", Terminal)}
-          {navItem("/compute/analysis", "Kernel Analysis", Microscope)}
         </nav>
 
         <div className="flex-1 overflow-y-auto p-4 space-y-2 scrollbar-thin scrollbar-thumb-slate-800">
@@ -322,22 +319,6 @@ export default function ComputeSidebar({
                   </Link>
                 );
               })}
-            </>
-          )}
-
-          {isPipeline && (
-            <>
-              <SectionTitle>Pipeline Context</SectionTitle>
-              <div className="px-3 py-6 text-center opacity-60">
-                <GitMerge size={24} className="mx-auto mb-3 text-emerald-400" />
-                <p className="text-[10px] uppercase font-black tracking-widest text-slate-500">
-                  Execution Planning
-                </p>
-                <p className="mt-3 text-xs text-slate-500 leading-relaxed">
-                  semantic constraint와 hardware execution path를 연결하는
-                  compute 내부 실행 계획 단계입니다.
-                </p>
-              </div>
             </>
           )}
 

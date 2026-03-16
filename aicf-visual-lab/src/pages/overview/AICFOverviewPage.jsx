@@ -31,11 +31,12 @@ export default function AICFOverviewPage() {
               </span>
             </h1>
 
-            <p className="mt-10 max-w-3xl text-xl sm:text-2xl text-slate-400 leading-relaxed font-medium">
+            <p className="mt-10 max-w-4xl text-xl sm:text-2xl text-slate-400 leading-relaxed font-medium">
               AICF는 최적화를 하나의 기술이 아니라
               <br className="hidden sm:block" />
-              <span className="text-cyan-400"> 같은 의미를 더 간결한 계산 구조로 실현하는 문제</span>와
-              <span className="text-emerald-400"> 같은 결과를 더 적은 데이터 이동으로 실현하는 문제</span>
+              <span className="text-cyan-400"> 불변성을 유지하며 최적의 실행 경로를 선택하는 문제</span>와
+              <br className="hidden sm:block" />
+              <span className="text-emerald-400"> 의미를 보존하며 데이터 이동의 물리적 구조를 설계하는 문제</span>
               로 나누어 다룹니다.
             </p>
 
@@ -80,18 +81,17 @@ export default function AICFOverviewPage() {
               </h2>
 
               <p className="mt-6 text-lg text-slate-400 leading-relaxed">
-                “같은 의미를 더 간결하게 계산할 수 있는가?”
+                “불변적 성질 안에서 최적의 실행 경로를 결정할 수 있는가?”
                 <br />
-                의미를 보존하면서 계산 구조를 더 단순하고 효율적으로 바꿉니다.
-                <br />
-                semantic contract, equivalent reduction, approximation boundary를 다룹니다.
+                연산의 의미를 훼손하지 않으면서, 런타임 상황에 따라 실제 연산 파라미터와 실행 경로를 동적으로 조정합니다.
               </p>
 
               <div className="mt-10 flex flex-wrap gap-2">
                 {[
-                  "Semantic Contract",
-                  "Equivalent Reduction",
-                  "Approximation Boundary",
+                  "Invariant Preservation",
+                  "Runtime Adaptive",
+                  "Path Selection",
+                  "Parameter Tuning",
                 ].map((tag) => (
                   <span
                     key={tag}
@@ -129,18 +129,17 @@ export default function AICFOverviewPage() {
               </h2>
               
               <p className="mt-6 text-lg text-slate-400 leading-relaxed">
-                “같은 결과를 더 적은 이동으로 실현할 수 있는가?”
+                “동일한 결과를 더 적은 데이터 이동으로 실현할 수 있는가?”
                 <br />
-                어떤 값은 local state로 유지하고, 어떤 intermediate는 제거하거나 다시 계산합니다.
-                <br />
-                residency, streaming reduction, rematerialization, traffic-aware planning을 다룹니다.
+                데이터의 물리적 배치와 재사용 구조를 최적화하여 하드웨어 제약 내에서 데이터 이동 비용을 최소화합니다.
               </p>
 
               <div className="mt-10 flex flex-wrap gap-2">
                 {[
                   "On-Chip Residency",
-                  "Streaming Reduction",
                   "Traffic-Aware Planning",
+                  "Memory-Centric IR",
+                  "Rematerialization",
                 ].map((tag) => (
                   <span
                     key={tag}
@@ -173,29 +172,29 @@ export default function AICFOverviewPage() {
               </h3>
 
               <p className="mt-5 max-w-3xl text-slate-400 text-lg leading-relaxed">
-                Compute 축의 의미 제약과 Memory 축의 물리 제약을 함께 평가하여
+                Compute의 알고리즘적 자유도와 Memory의 물리적 제약을 함께 평가하여
                 <br className="hidden sm:block" />
-                최종 execution path와 kernel plan을 결정합니다.
+                최종 execution path와 최적화된 kernel plan을 결정합니다.
               </p>
 
               <div className="mt-10 grid grid-cols-1 md:grid-cols-3 gap-4 w-full max-w-5xl">
                 {[
                   {
                     icon: <BrainCircuit size={18} />,
-                    title: "Semantic Analysis",
-                    desc: "무엇이 반드시 보존되어야 하는가",
+                    title: "Invariant Analysis",
+                    desc: "어떠한 수치적 성질이 보존되어야 하는가",
                     accent: "text-cyan-400 border-cyan-500/20 bg-cyan-500/5",
                   },
                   {
                     icon: <Workflow size={18} />,
                     title: "Path Selection",
-                    desc: "어떤 실행 구조가 가장 타당한가",
+                    desc: "런타임 상태에 기반한 최적의 경로 결정",
                     accent: "text-blue-400 border-blue-500/20 bg-blue-500/5",
                   },
                   {
                     icon: <HardDrive size={18} />,
                     title: "Memory Planning",
-                    desc: "어떤 state를 local하게 유지할 수 있는가",
+                    desc: "데이터 이동 비용을 최소화하는 하드웨어 매핑",
                     accent: "text-emerald-400 border-emerald-500/20 bg-emerald-500/5",
                   },
                 ].map((item) => (

@@ -7,7 +7,6 @@ import ComputeOptimizationPage from "./pages/overview/ComputeOptimizationPage.js
 import MemoryOptimizationPage from "./pages/overview/MemoryOptimizationPage.jsx";
 
 import TheoryPage from "./pages/overview/compute/TheoryPage.jsx";
-import PipelinePage from "./pages/overview/compute/PipelinePage.jsx";
 import OpsPage from "./pages/overview/compute/OpsPage.jsx";
 import KernelAnalysisPage from "./pages/overview/compute/KernelAnalysisPage.jsx";
 
@@ -26,7 +25,6 @@ export default function App() {
 
         {/* compute */}
         <Route path="/compute/theory" element={<TheoryPage />} />
-        <Route path="/compute/pipeline" element={<PipelinePage />} />
         <Route path="/compute/ops" element={<OpsPage />} />
         <Route path="/compute/analysis" element={<KernelAnalysisPage />} />
         <Route path="/compute/analysis/:opId" element={<KernelAnalysisPage />} />
