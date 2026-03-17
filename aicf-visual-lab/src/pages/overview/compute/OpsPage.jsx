@@ -23,7 +23,7 @@ import {
 } from "lucide-react";
 
 import { useSearchParams, Link } from "react-router-dom";
-import { allOpsData } from "../../../data/index.js";
+import { allOpsData } from "../../../data/ops/index.js";
 import KernelDeepDive from "../../../components/common/KernelDeepDive.jsx";
 import ComputeSidebar from "../../../components/layout/ComputeSidebar.jsx";
 

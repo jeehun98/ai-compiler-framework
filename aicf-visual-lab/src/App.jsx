@@ -3,15 +3,17 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 
 import AICFOverviewPage from "./pages/overview/AICFOverviewPage.jsx";
 
-import ComputeOptimizationPage from "./pages/overview/ComputeOptimizationPage.jsx";
-import MemoryOptimizationPage from "./pages/overview/MemoryOptimizationPage.jsx";
+import ComputeOverviewPage from "./pages/overview/ComputeOverviewPage.jsx";
+import MemoryOverviewPage from "./pages/overview/MemoryOverviewPage.jsx";
+import AICFLabPage from "./pages/overview/AICFLabPage.jsx";
 
 import TheoryPage from "./pages/overview/compute/TheoryPage.jsx";
 import OpsPage from "./pages/overview/compute/OpsPage.jsx";
-import KernelAnalysisPage from "./pages/overview/compute/KernelAnalysisPage.jsx";
 
 import MemoryMethodsPage from "./pages/overview/memory/MemoryMethodsPage.jsx";
 import MemoryMethodDetailPage from "./pages/overview/memory/MemoryMethodDetailPage.jsx";
+
+import LabAnalysisPage from "./pages/overview/lab/LabAnalysisPage.jsx";
 
 export default function App() {
   return (
@@ -20,18 +22,13 @@ export default function App() {
         <Route path="/" element={<AICFOverviewPage />} />
 
         {/* top overview */}
-        <Route path="/compute" element={<ComputeOptimizationPage />} />
-        <Route path="/memory" element={<MemoryOptimizationPage />} />
+        <Route path="/compute" element={<ComputeOverviewPage />} />
+        <Route path="/memory" element={<MemoryOverviewPage />} />
+        <Route path="/lab" element={<AICFLabPage />} />
 
         {/* compute */}
         <Route path="/compute/theory" element={<TheoryPage />} />
         <Route path="/compute/ops" element={<OpsPage />} />
-        <Route path="/compute/analysis" element={<KernelAnalysisPage />} />
-        <Route path="/compute/analysis/:opId" element={<KernelAnalysisPage />} />
-        <Route
-          path="/compute/analysis/:opId/:kernelId"
-          element={<KernelAnalysisPage />}
-        />
 
         {/* memory */}
         <Route path="/memory/methods" element={<MemoryMethodsPage />} />
@@ -44,8 +41,16 @@ export default function App() {
           element={<MemoryMethodDetailPage />}
         />
 
-        {/* temporary: pipeline page not created yet */}
-        <Route path="/memory/pipeline" element={<MemoryOptimizationPage />} />
+        {/* lab */}
+        <Route path="/lab/analysis" element={<LabAnalysisPage />} />
+        <Route path="/lab/analysis/:opId" element={<LabAnalysisPage />} />
+        <Route
+          path="/lab/analysis/:opId/:kernelId"
+          element={<LabAnalysisPage />}
+        />
+
+        {/* temporary */}
+        <Route path="/memory/pipeline" element={<MemoryOverviewPage />} />
 
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
