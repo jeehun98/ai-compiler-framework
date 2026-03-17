@@ -9,8 +9,8 @@ export const batchNormData = {
       "BatchNorm은 개별 샘플의 절대값이 아니라 배치 집단의 평균과 분산을 기준으로 활성값을 재정렬하여, 학습 중 표현 분포를 안정화하는 집단 통계 기반 정규화 연산입니다.",
     strategy:
       "BatchNorm은 학습 시 batch statistics, affine transform, running statistics update를 함께 다루는 상태성 연산이며, 추론 시에는 선행 선형 연산과의 수학적 결합을 통해 별도 연산 노드 없이 소거될 수 있습니다.",
-    hardware:
-      "이 연산은 training에서는 collective-statistics realization으로, inference에서는 folded-erasure realization으로 이어질 수 있으며, 실제 동기화 비용과 memory schedule은 Deep Dive 계층에서 다룹니다.",
+    realization:
+      "학습 시에는 collective-statistics normalization family로, 추론 시에는 folded-erasure family로 이어질 수 있습니다. 동기화 비용과 memory schedule, folding mechanism은 Deep Dive 계층에서 다룹니다.",
   },
 
   canonical: {
@@ -35,7 +35,7 @@ export const batchNormData = {
       "\\mu_B, \\sigma_B^2": "현재 집단이 형성하는 기준 분포",
       "\\gamma, \\beta": "정규화 이후 표현력을 복원하는 affine 파라미터",
       "RunningMean, RunningVar": "추론 시 사용할 장기 통계 상태",
-      "Folded": "선행 연산에 흡수되어 별도 노드가 사라진 형태",
+      Folded: "선행 연산에 흡수되어 별도 노드가 사라진 형태",
     },
   },
 
@@ -84,38 +84,38 @@ export const batchNormData = {
       },
     ],
 
-    sensitivity: {
-      downstream: [
-        {
-          name: "Small Batch Regime",
-          rule:
-            "B \\text{ 가 매우 작으면 } \\mu_B, \\sigma_B^2 \\text{ 의 추정 오차가 커져 정규화 효과가 불안정해진다}",
-          hint: "소배치 환경에서는 GroupNorm/LayerNorm 계열 검토",
-        },
-        {
-          name: "Distributed Sync Requirement",
-          rule:
-            "\\text{다중 장치 학습에서 전역 batch 통계를 유지하려면 장치 간 statistic synchronization이 필요하다}",
-          hint: "SyncBatchNorm 및 통신-연산 overlap 고려",
-        },
-        {
-          name: "Inference Folding Opportunity",
-          rule:
-            "\\text{선행 Conv/Linear와 affine-normalization 식이 결합 가능하면 BatchNorm 노드를 추론 그래프에서 제거할 수 있다}",
-          hint: "Inference graph folding 우선",
-        },
-      ],
-    },
+    downstreamConstraints: [
+      {
+        name: "Small Batch Regime",
+        rule:
+          "B \\text{ 가 매우 작으면 } \\mu_B, \\sigma_B^2 \\text{ 의 추정 오차가 커져 정규화 효과가 불안정해진다}",
+        hint: "소배치 환경에서는 GroupNorm/LayerNorm 계열 검토",
+      },
+      {
+        name: "Distributed Sync Requirement",
+        rule:
+          "\\text{다중 장치 학습에서 전역 batch 통계를 유지하려면 장치 간 statistic synchronization이 필요하다}",
+        hint: "SyncBatchNorm 및 통신-연산 overlap 고려",
+      },
+      {
+        name: "Inference Folding Opportunity",
+        rule:
+          "\\text{선행 Conv/Linear와 affine-normalization 식이 결합 가능하면 BatchNorm 노드를 추론 그래프에서 제거할 수 있다}",
+        hint: "Inference graph folding 우선",
+      },
+    ],
   },
 
   lowering: {
     chosen: {
       variant: "Training: Fused_SyncBatchNorm | Inference: Folded_Erasure",
+      summary:
+        "학습 시에는 채널별 통계 계산, 정규화, affine transform, running-state update가 collective path로 강하게 결합되고, 추론 시에는 선행 Conv/Linear와의 합성을 통해 standalone BatchNorm 노드를 제거할 수 있습니다.",
       reason: [
         "\\text{집단 통계 결합(Collective Statistic Coupling): } \\mu_B, \\sigma_B^2, \\gamma, \\beta, \\text{running stats} \\text{ 가 채널 기준으로 강하게 연결된다}",
-        "\\text{학습 시 } \\text{statistics reduction, normalization, affine transform, running-state update를 결합된 realization으로 유지할 수 있다}",
+        "\\text{학습 시 statistics reduction, normalization, affine transform, running-state update를 결합된 realization으로 유지할 수 있다}",
         "\\text{분산 학습에서는 global batch semantics 유지를 위해 synchronized statistics가 필요하다}",
-        "\\text{추론 시에는 affine-normalization 식이 선행 Conv/Linear와 합성 가능하므로 } \\texttt{Folded\\_Erasure} \\text{ family가 성립한다}",
+        "\\text{추론 시 affine-normalization 식이 선행 Conv/Linear와 합성 가능하므로 } \\texttt{Folded\\_Erasure} \\text{ family가 성립한다}",
       ],
       applied_rewrites: [
         "Persistent CTA Reduction",
@@ -125,31 +125,14 @@ export const batchNormData = {
     },
   },
 
-  kernel: {
-    strategy: "Persistent CTA Reduction & Statistic Sync",
-    details: [
-      {
-        technique: "Persistent Thread Block",
-        semantic_link: "채널별 통계 계산과 정규화를 재로딩 최소화 형태로 결합",
-      },
-      {
-        technique: "Warp / Block Reduction",
-        semantic_link: "채널 통계를 collective reduction 형태로 계산",
-      },
-      {
-        technique: "Cross-Device Statistic Sync",
-        semantic_link: "분산 학습 시 global batch semantics 유지",
-      },
-      {
-        technique: "Inference Folding",
-        semantic_link: "추론 그래프에서 BatchNorm 노드 소거",
-      },
+  realizationSnapshot: {
+    family: "Training: Collective Statistic Normalization | Inference: Folded Erasure",
+    highlights: [
+      "Per-channel collective reduction",
+      "Running-state update fusion",
+      "Cross-device statistic synchronization",
+      "Inference-time Conv/Linear folding",
     ],
-    metrics: {
-      memory_reuse: "High (Persistent)",
-      throughput: "Sync Bound (Distributed) / Memory Bound (Local)",
-      occupancy: "85%",
-    },
   },
 
   costModel: {

@@ -12,14 +12,12 @@ import {
   Scale,
   Eye,
   Focus,
-  History,
-  Boxes,
   Menu,
   ArrowUpRight,
   GitMerge,
   Search,
   BookOpen,
-  ArrowRightLeft,
+  Boxes,
 } from "lucide-react";
 
 import { useSearchParams, Link } from "react-router-dom";
@@ -65,10 +63,11 @@ export default function OpsPage() {
   const shapes = data?.canonical?.shapes ?? {};
   const interpretation = data?.canonical?.interpretation ?? {};
   const chosenVariant = data?.lowering?.chosen?.variant ?? "Standard_Kernel";
+  const chosenSummary = data?.lowering?.chosen?.summary ?? "";
   const hasDeepDive = !!(data?.kernel_evolution || data?.evolution);
 
   const invariants = semantic?.invariants ?? [];
-  const downstream = semantic?.sensitivity?.downstream ?? [];
+  const downstream = semantic?.downstreamConstraints ?? [];
   const loweringReasons = data?.lowering?.chosen?.reason ?? [];
   const costWeights = data?.costModel?.weights_hint?.default ?? {};
 
@@ -89,7 +88,7 @@ export default function OpsPage() {
         onClose={() => setIsSidebarOpen(false)}
         activeOpId={activeOpId || ""}
         quickOps={quickOps}
-        version="v1.0.5 Semantic View"
+        version="v1.0.7 Semantic View"
       />
 
       <main className="flex-1 flex flex-col min-w-0 font-sans">
@@ -104,7 +103,7 @@ export default function OpsPage() {
                   AICF LAB
                 </div>
                 <div className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">
-                  v1.0.5 Semantic View
+                  v1.0.7 Semantic View
                 </div>
               </div>
             </Link>
@@ -203,40 +202,6 @@ export default function OpsPage() {
                 </div>
               </section>
 
-              {/* Core cards */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                {[
-                  {
-                    title: "Semantic Anchor",
-                    icon: ShieldCheck,
-                    desc: "연산이 반드시 보존해야 할 수학적 의미와 축별 역할을 정의합니다.",
-                  },
-                  {
-                    title: "Invariant Space",
-                    icon: GitMerge,
-                    desc: "허용 가능한 최적화가 어떤 불변성 아래 성립하는지 분석합니다.",
-                  },
-                  {
-                    title: "Lowering Outlook",
-                    icon: Cpu,
-                    desc: "의미 보존 하에서 가능한 realization family를 요약하고 다음 계층으로 연결합니다.",
-                  },
-                ].map((item, idx) => (
-                  <div
-                    key={idx}
-                    className="bg-[#0b1120] border border-slate-800 p-8 rounded-3xl hover:border-blue-500/30 transition"
-                  >
-                    <item.icon className="text-blue-500 mb-6" size={28} />
-                    <h3 className="text-lg font-black text-white uppercase mb-3">
-                      {item.title}
-                    </h3>
-                    <p className="text-slate-400 text-sm leading-relaxed">
-                      {item.desc}
-                    </p>
-                  </div>
-                ))}
-              </div>
-
               {/* Analysis Framework */}
               <section className="space-y-8">
                 <div className="flex items-center gap-3 text-emerald-400">
@@ -266,12 +231,6 @@ export default function OpsPage() {
                       desc: "연쇄 구조와 downstream 민감도를 바탕으로 가능한 realization family를 좁힙니다.",
                       tag: "LOWERING",
                     },
-                    {
-                      step: "4",
-                      title: "실행 형태 요약",
-                      desc: "선택된 lowering family가 어떤 실행 스타일로 이어지는지 요약합니다. 세부 구현은 Deep Dive에서 다룹니다.",
-                      tag: "REALIZATION",
-                    },
                   ].map((item) => (
                     <div
                       key={item.step}
@@ -290,9 +249,6 @@ export default function OpsPage() {
                         <p className="text-slate-400 text-sm leading-relaxed">
                           {item.desc}
                         </p>
-                      </div>
-                      <div className="hidden lg:block">
-                        <ArrowUpRight className="text-slate-700" size={24} />
                       </div>
                     </div>
                   ))}
@@ -377,12 +333,12 @@ export default function OpsPage() {
                 </div>
               </section>
 
-              {/* Essence */}
+              {/* Spec + Invariants */}
               <section className="space-y-6">
                 <div className="flex items-center gap-3 text-blue-400">
                   <Share2 size={24} />
                   <h3 className="text-2xl font-black uppercase tracking-tight">
-                    1. 연산 본질 및 데이터 정의
+                    1. Canonical Spec & Invariant Space
                   </h3>
                 </div>
 
@@ -519,7 +475,7 @@ export default function OpsPage() {
                 <div className="flex items-center gap-3 text-purple-400">
                   <Eye size={24} />
                   <h3 className="text-2xl font-black uppercase tracking-tight">
-                    2. Downstream-Aware Lowering Strategy
+                    2. Constraint-Aware Lowering Strategy
                   </h3>
                 </div>
 
@@ -564,44 +520,53 @@ export default function OpsPage() {
                 </div>
               </section>
 
-              {/* Realization summary */}
+              {/* Lowering Decision */}
               <section className="space-y-6">
-                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                  <div className="flex items-center gap-3 text-emerald-400">
-                    <Zap size={24} />
-                    <h3 className="text-2xl font-black uppercase tracking-tight">
-                      3. Execution Realization Summary
-                    </h3>
-                  </div>
-
-                  {hasDeepDive && (
-                    <button
-                      onClick={() => setIsModalOpen(true)}
-                      className="w-fit flex items-center gap-2 px-5 py-2.5 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-bold uppercase tracking-widest border border-slate-700 transition"
-                    >
-                      <History size={14} />
-                      View Deep Dive
-                    </button>
-                  )}
+                <div className="flex items-center gap-3 text-emerald-400">
+                  <Zap size={24} />
+                  <h3 className="text-2xl font-black uppercase tracking-tight">
+                    3. Lowering Decision Snapshot
+                  </h3>
                 </div>
 
                 <p className="text-slate-500 text-sm leading-relaxed max-w-3xl">
-                  {data.descriptions?.hardware ??
-                    "이 섹션은 연산 의미와 제약 조건으로부터 어떤 realization family가 선택되었는지를 요약합니다. 실제 메모리 스케줄, 커널 메트릭, 하드웨어 성능 수치는 별도의 Deep Dive에서 다룹니다."}
+                  {data.descriptions?.realization ??
+                    "이 섹션은 실행 메커니즘 전체를 설명하지 않고, 현재 연산이 어떤 realization family로 이어지는지와 그 선택 근거를 compact하게 요약합니다."}
                 </p>
 
                 <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-                  <div className="lg:col-span-6 bg-[#1e293b] p-6 sm:p-8 rounded-[2.5rem] border border-slate-800 shadow-xl">
+                  <div className="lg:col-span-7 bg-[#1e293b] p-6 sm:p-8 rounded-[2.5rem] border border-slate-800 shadow-xl">
                     <div className="flex items-center gap-2 mb-6 text-emerald-400 font-black text-[10px] uppercase tracking-widest">
-                      <Terminal size={16} /> Lowering Family
+                      <Terminal size={16} /> Chosen Realization
                     </div>
 
-                    <p className="text-[10px] text-slate-500 uppercase font-black mb-2">
-                      Selected Realization
-                    </p>
-                    <div className="text-2xl font-black text-white mb-6 break-words">
-                      &quot;{chosenVariant}&quot;
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                      <CompactMetaCard
+                        label="Variant"
+                        value={chosenVariant}
+                        tone="blue"
+                      />
+                      <CompactMetaCard
+                        label="Invariant Count"
+                        value={`${invariants.length}`}
+                        tone="emerald"
+                      />
+                      <CompactMetaCard
+                        label="Downstream Rules"
+                        value={`${downstream.length}`}
+                        tone="purple"
+                      />
                     </div>
+
+                    {chosenSummary ? (
+                      <p className="text-sm text-slate-400 leading-relaxed mb-6">
+                        {chosenSummary}
+                      </p>
+                    ) : null}
+
+                    <p className="text-[10px] text-slate-500 uppercase font-black mb-3 tracking-widest">
+                      Why this family
+                    </p>
 
                     <div className="space-y-3">
                       {loweringReasons.length > 0 ? (
@@ -624,7 +589,7 @@ export default function OpsPage() {
                     </div>
                   </div>
 
-                  <div className="lg:col-span-6 bg-[#1e293b] p-6 sm:p-8 rounded-[2.5rem] border border-slate-800 shadow-xl">
+                  <div className="lg:col-span-5 bg-[#1e293b] p-6 sm:p-8 rounded-[2.5rem] border border-slate-800 shadow-xl">
                     <div className="flex items-center gap-2 text-slate-500 font-mono text-[10px] font-black uppercase mb-6">
                       <Scale size={18} /> Semantic Cost Model
                     </div>
@@ -661,12 +626,79 @@ export default function OpsPage() {
 
                     <div className="mt-6 pt-6 border-t border-slate-800">
                       <p className="text-xs text-slate-500 leading-relaxed">
-                        Detailed memory scheduling, kernel metrics, and physical
-                        performance results are handled in the Kernel / MCIR
-                        Deep Dive layer.
+                        커널 내부 scheduling, memory movement, physical metrics는
+                        Ops 페이지의 본체가 아니라 Deep Dive 계층에서 다룹니다.
                       </p>
                     </div>
                   </div>
+                </div>
+              </section>
+
+              {/* Related links */}
+              <section className="space-y-5">
+                <div className="flex items-center gap-3 text-blue-400">
+                  <BookOpen size={22} />
+                  <h3 className="text-2xl font-black uppercase tracking-tight">
+                    Related Views
+                  </h3>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                  <Link
+                    to={`/compute/theory?op=${data.id}`}
+                    className="group bg-[#1e293b] border border-slate-800 rounded-[2rem] p-6 hover:border-blue-500/30 transition"
+                  >
+                    <div className="text-[10px] font-black uppercase tracking-widest text-blue-500 mb-2">
+                      Meaning Layer
+                    </div>
+                    <div className="flex items-center justify-between gap-4">
+                      <div>
+                        <h4 className="text-lg font-black text-white uppercase mb-2">
+                          View Theory Spec
+                        </h4>
+                        <p className="text-sm text-slate-400 leading-relaxed">
+                          수학적 정의, 기하학적 해석, 등가 조건, 의미 거리 기준을
+                          확인합니다.
+                        </p>
+                      </div>
+                      <ArrowUpRight
+                        size={18}
+                        className="text-slate-600 group-hover:text-blue-400 transition shrink-0"
+                      />
+                    </div>
+                  </Link>
+
+                  <button
+                    type="button"
+                    onClick={() => hasDeepDive && setIsModalOpen(true)}
+                    disabled={!hasDeepDive}
+                    className={`text-left bg-[#1e293b] border rounded-[2rem] p-6 transition ${
+                      hasDeepDive
+                        ? "border-slate-800 hover:border-emerald-500/30"
+                        : "border-slate-800 opacity-60 cursor-not-allowed"
+                    }`}
+                  >
+                    <div className="text-[10px] font-black uppercase tracking-widest text-emerald-500 mb-2">
+                      Mechanism Layer
+                    </div>
+                    <div className="flex items-center justify-between gap-4">
+                      <div>
+                        <h4 className="text-lg font-black text-white uppercase mb-2">
+                          Kernel Deep Dive
+                        </h4>
+                        <p className="text-sm text-slate-400 leading-relaxed">
+                          구현 세부, scheduling, kernel evolution, memory path를
+                          별도 계층에서 확인합니다.
+                        </p>
+                      </div>
+                      <ArrowUpRight
+                        size={18}
+                        className={`transition shrink-0 ${
+                          hasDeepDive ? "text-slate-600" : "text-slate-700"
+                        }`}
+                      />
+                    </div>
+                  </button>
                 </div>
               </section>
 
@@ -683,22 +715,8 @@ export default function OpsPage() {
                   ← Back to Explorer Guide
                 </Link>
 
-                <div className="flex flex-wrap items-center justify-center gap-3">
-                  {hasDeepDive && (
-                    <button
-                      onClick={() => setIsModalOpen(true)}
-                      className="px-6 py-3 rounded-2xl bg-slate-800 border border-slate-700 text-slate-200 font-black text-xs uppercase tracking-widest hover:bg-slate-700 transition flex items-center gap-2"
-                    >
-                      View Deep Dive <History size={16} />
-                    </button>
-                  )}
-
-                  <Link
-                    to={`/compute/theory?op=${data.id}`}
-                    className="px-6 py-3 rounded-2xl bg-blue-600/10 border border-blue-500/20 text-blue-300 font-black text-xs uppercase tracking-widest hover:bg-blue-600/20 transition flex items-center gap-2"
-                  >
-                    View Theory Spec <ArrowUpRight size={16} />
-                  </Link>
+                <div className="text-[10px] text-slate-700 uppercase tracking-[0.2em] font-bold">
+                  Meaning → Realization → Mechanism
                 </div>
               </div>
             </div>
@@ -721,6 +739,23 @@ export default function OpsPage() {
           scrollbar-width: none;
         }
       `}</style>
+    </div>
+  );
+}
+
+function CompactMetaCard({ label, value, tone = "blue" }) {
+  const toneClass = {
+    blue: "text-blue-300 bg-blue-500/5 border-blue-500/10",
+    emerald: "text-emerald-300 bg-emerald-500/5 border-emerald-500/10",
+    purple: "text-purple-300 bg-purple-500/5 border-purple-500/10",
+  }[tone];
+
+  return (
+    <div className={`rounded-2xl border p-4 ${toneClass}`}>
+      <div className="text-[9px] font-black uppercase tracking-widest mb-2 opacity-70">
+        {label}
+      </div>
+      <div className="text-sm font-black break-words">{value}</div>
     </div>
   );
 }

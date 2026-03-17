@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import "katex/dist/katex.min.css";
 import { BlockMath, InlineMath } from "react-katex";
 import { Link, useSearchParams } from "react-router-dom";
@@ -16,6 +16,7 @@ import {
   Layers,
   Info,
   ArrowRight,
+  Scale,
 } from "lucide-react";
 
 import ComputeSidebar from "../../../components/layout/ComputeSidebar.jsx";
@@ -41,6 +42,11 @@ export default function TheoryPage() {
   const [searchParams] = useSearchParams();
   const activeOpId = searchParams.get("op");
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+
+  const quickOps = useMemo(
+    () => ["AdamStep", "LayerNorm", "Softmax", "GEMM"],
+    []
+  );
 
   useEffect(() => {
     setIsSidebarOpen(false);
@@ -82,7 +88,7 @@ export default function TheoryPage() {
                 AICF LAB
               </div>
               <div className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">
-                v1.0.5 Semantic View
+                v1.0.6 Semantic View
               </div>
             </div>
           </Link>
@@ -99,8 +105,9 @@ export default function TheoryPage() {
       <ComputeSidebar
         isOpen={isSidebarOpen}
         onClose={() => setIsSidebarOpen(false)}
-        activeOpId={activeOpId}
-        version="v1.0.5 Semantic View"
+        activeOpId={activeOpId || ""}
+        quickOps={quickOps}
+        version="v1.0.6 Semantic View"
       />
 
       <main className="flex-1 flex flex-col min-w-0">
@@ -133,8 +140,9 @@ export default function TheoryPage() {
                   </strong>
                   로 정의합니다.
                   <br />
-                  이 페이지는 구현이나 커널 최적화 이전에, 연산이 본질적으로 무엇을 의미하는지와
-                  어떤 성질이 최적화 과정에서도 보존되어야 하는지를 설명합니다.
+                  이 페이지는 구현이나 커널 최적화 이전에, 연산이 본질적으로
+                  무엇을 의미하는지와 어떤 성질이 최적화 과정에서도 보존되어야
+                  하는지를 설명합니다.
                 </p>
 
                 <div className="mt-8 inline-flex items-center gap-2 rounded-2xl border border-blue-500/20 bg-blue-500/5 px-4 py-2 text-[11px] font-bold uppercase tracking-widest text-blue-300">
@@ -157,19 +165,30 @@ export default function TheoryPage() {
                     <li className="flex gap-3 text-sm sm:text-base">
                       <div className="mt-1.5 w-1.5 h-1.5 bg-blue-500 rounded-full shrink-0" />
                       <span>
-                        <strong>Mathematical Definition:</strong> 연산을 함수로 정의하고 입출력 도메인과 핵심 성질을 명시합니다.
+                        <strong>Mathematical Definition:</strong> 연산을
+                        함수로 정의하고 입출력 도메인과 핵심 성질을 명시합니다.
                       </span>
                     </li>
                     <li className="flex gap-3 text-sm sm:text-base">
                       <div className="mt-1.5 w-1.5 h-1.5 bg-blue-500 rounded-full shrink-0" />
                       <span>
-                        <strong>Geometric Interpretation:</strong> 벡터 공간 또는 확률 공간에서 수행하는 구조 변환의 의미를 설명합니다.
+                        <strong>Geometric Interpretation:</strong> 벡터 공간
+                        또는 확률 공간에서 수행하는 구조 변환의 의미를
+                        설명합니다.
                       </span>
                     </li>
                     <li className="flex gap-3 text-sm sm:text-base">
                       <div className="mt-1.5 w-1.5 h-1.5 bg-blue-500 rounded-full shrink-0" />
                       <span>
-                        <strong>Structural Invariants:</strong> 연산 이후에도 보존되어야 하는 핵심 구조와 등가 조건을 정의합니다.
+                        <strong>Structural Invariants:</strong> 연산 이후에도
+                        보존되어야 하는 핵심 구조와 등가 조건을 정의합니다.
+                      </span>
+                    </li>
+                    <li className="flex gap-3 text-sm sm:text-base">
+                      <div className="mt-1.5 w-1.5 h-1.5 bg-blue-500 rounded-full shrink-0" />
+                      <span>
+                        <strong>Semantic Distance:</strong> 수치값 차이를
+                        넘어, 의미 보존이 얼마나 유지되는지의 기준을 제시합니다.
                       </span>
                     </li>
                   </ul>
@@ -192,60 +211,22 @@ export default function TheoryPage() {
                       <div className="mt-1.5 w-1.5 h-1.5 bg-red-900/50 rounded-full shrink-0" />
                       <span>컴파일러 정책 및 실행 그래프 최적화</span>
                     </li>
+                    <li className="flex gap-3 line-through decoration-slate-700">
+                      <div className="mt-1.5 w-1.5 h-1.5 bg-red-900/50 rounded-full shrink-0" />
+                      <span>특정 realization family, kernel variant, 성능 수치</span>
+                    </li>
                   </ul>
 
                   <p className="mt-10 p-4 bg-slate-900/50 rounded-xl border border-slate-800 text-[12px] text-slate-400 leading-relaxed font-medium">
                     <span className="text-blue-400 font-bold block mb-1">
                       NOTE: Relationship with Ops Explorer
                     </span>
-                    Theory는 <strong>'무엇(What)'</strong>을 계산하는지와
-                    무엇이 반드시 보존되어야 하는지를 설명하고,
-                    Ops Explorer는 그 의미가 어떤 <strong>invariant-preserving lowering</strong>으로 이어지는지 보여줍니다.
+                    Theory는 <strong>"무엇(What)"</strong>을 계산하는지와
+                    무엇이 반드시 보존되어야 하는지를 설명하고, Ops Explorer는
+                    그 의미가 어떤{" "}
+                    <strong>invariant-preserving lowering</strong>으로
+                    이어지는지 보여줍니다.
                   </p>
-                </div>
-              </section>
-
-              {/* Why Theory Comes First */}
-              <section className="bg-blue-600/5 border border-blue-500/20 rounded-[2.5rem] p-8 sm:p-10">
-                <div className="flex items-center gap-3 text-blue-400 mb-4">
-                  <ShieldCheck size={22} />
-                  <h2 className="text-2xl font-black uppercase tracking-tight text-white">
-                    Why Theory Comes First
-                  </h2>
-                </div>
-
-                <p className="text-slate-400 leading-relaxed max-w-3xl">
-                  Theory는 AICF에서 모든 최적화가 따라야 하는 의미적 기준점입니다.
-                  어떤 연산 재배치, 융합, 근사, lowering도 이 계층에서 정의된 수학적 성질을 훼손해서는 안 됩니다.
-                </p>
-
-                <div className="mt-6 flex flex-col sm:flex-row gap-4">
-                  {[
-                    {
-                      title: "Mathematical Meaning",
-                      desc: "연산의 정의와 도메인을 규정합니다.",
-                    },
-                    {
-                      title: "Invariant Boundary",
-                      desc: "최적화가 침범할 수 없는 보존 조건을 정합니다.",
-                    },
-                    {
-                      title: "Optimization Legality",
-                      desc: "후속 lowering과 fusion의 합법성 기준이 됩니다.",
-                    },
-                  ].map((item) => (
-                    <div
-                      key={item.title}
-                      className="flex-1 bg-[#0f172a] border border-slate-800 rounded-2xl p-5"
-                    >
-                      <div className="text-white font-black uppercase text-sm mb-2">
-                        {item.title}
-                      </div>
-                      <p className="text-slate-400 text-sm leading-relaxed">
-                        {item.desc}
-                      </p>
-                    </div>
-                  ))}
                 </div>
               </section>
 
@@ -326,8 +307,8 @@ export default function TheoryPage() {
                 </div>
 
                 <p className="mt-10 text-slate-500 italic text-sm max-w-2xl mx-auto">
-                  "Theory는 모든 연산을 다루지 않습니다. 수학적으로 핵심적인
-                  기초 구조를 형성하는 연산만을 엄선하여 포함합니다."
+                  Theory는 모든 연산을 다루지 않습니다. 수학적으로 핵심적인
+                  기초 구조를 형성하는 연산만을 엄선하여 포함합니다.
                 </p>
               </section>
 
@@ -345,8 +326,8 @@ export default function TheoryPage() {
                 </h2>
 
                 <p className="text-slate-400 max-w-2xl mx-auto leading-relaxed mb-8">
-                  Theory가 연산의 의미와 보존 조건을 정의했다면,
-                  Ops Explorer는 그 의미가 어떤 invariant-preserving optimization space와
+                  Theory가 연산의 의미와 보존 조건을 정의했다면, Ops Explorer는
+                  그 의미가 어떤 invariant-preserving optimization space와
                   lowering family로 이어지는지 보여줍니다.
                 </p>
 
@@ -490,25 +471,95 @@ export default function TheoryPage() {
                             </div>
                           </div>
                         )}
+
+                        {c.note && (
+                          <div className="mt-4 text-[11px] text-emerald-400 font-bold uppercase tracking-widest">
+                            {c.note}
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>
                 </section>
               )}
 
+              {/* SECTION: Semantic Distance */}
+              {spec.sections?.cost && (
+                <section className="space-y-8">
+                  <div className="flex items-center gap-3 text-amber-400">
+                    <Scale size={22} />
+                    <h2 className="text-2xl font-black uppercase tracking-tight text-white">
+                      Semantic Distance
+                    </h2>
+                  </div>
+
+                  {spec.sections.cost.latex && (
+                    <div className="bg-[#1e293b] p-8 rounded-[2.5rem] border border-slate-800 shadow-xl overflow-x-auto scrollbar-hide">
+                      <div className="w-max min-w-full text-blue-300 text-center">
+                        <BlockMath math={spec.sections.cost.latex} />
+                      </div>
+                    </div>
+                  )}
+
+                  {spec.sections.cost.pills?.length > 0 && (
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+                      {spec.sections.cost.pills.map((p, i) => (
+                        <div
+                          key={i}
+                          className="bg-[#0f172a] border border-slate-800 rounded-2xl p-6"
+                        >
+                          <div className="text-[10px] font-black uppercase tracking-widest text-amber-400 mb-2">
+                            {p.tag}
+                          </div>
+                          <h3 className="text-white font-black uppercase mb-2">
+                            {p.title}
+                          </h3>
+                          <p className="text-sm text-slate-400 leading-relaxed">
+                            {p.desc}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {spec.sections.cost.foot && (
+                    <p className="text-sm text-slate-500 leading-relaxed max-w-3xl">
+                      {spec.sections.cost.foot}
+                    </p>
+                  )}
+                </section>
+              )}
+
               {/* FOOTER NAV */}
-              <div className="pt-10 border-t border-slate-800 flex justify-center">
+              <div className="pt-10 border-t border-slate-800 flex flex-col sm:flex-row justify-center items-center gap-4">
                 <Link
                   to="/compute/theory"
                   className="flex items-center gap-2 text-blue-400 font-black uppercase text-sm hover:text-white transition"
                 >
                   <BookOpen size={16} /> Back to Theory Guide
                 </Link>
+
+                <Link
+                  to={`/compute/ops?op=${spec.id}`}
+                  className="flex items-center gap-2 text-emerald-400 font-black uppercase text-sm hover:text-white transition"
+                >
+                  <ArrowRight size={16} /> View Ops Explorer
+                </Link>
               </div>
             </div>
           )}
         </div>
       </main>
+
+      <style jsx="true">{`
+        .scrollbar-hide::-webkit-scrollbar {
+          display: none;
+        }
+        .scrollbar-hide {
+          -ms-overflow-style: none;
+          scrollbar-width: none;
+        }
+      `}</style>
     </div>
   );
 }

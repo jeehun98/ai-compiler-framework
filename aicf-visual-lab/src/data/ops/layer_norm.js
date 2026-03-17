@@ -9,8 +9,8 @@ export const layerNormData = {
       "LayerNorm은 각 샘플 내부의 feature 축 통계를 기준으로 평균을 제거하고 분산을 정규화하여, 표현의 절대 스케일을 줄이고 상대적 구조를 안정화하는 샘플 단위 정규화 연산입니다.",
     strategy:
       "LayerNorm은 sample-local reduction과 output-local affine transform이 결합된 구조이므로, mean/variance 계산과 normalization, affine 적용을 하나의 realization으로 묶는 lowering이 중요합니다. 핵심은 통계 계산의 정확성을 유지하면서 추가 메모리 왕복을 줄이는 것입니다.",
-    hardware:
-      "이 연산은 보통 row-wise reduction + pointwise affine family로 연결되며, 실제 one-pass statistics, warp/block reduction, vectorized I/O 같은 구현 세부는 Deep Dive 계층에서 다룹니다.",
+    realization:
+      "주로 row-wise reduction + fused affine family로 연결되며, one-pass statistics와 numerically stable variance evaluation이 중요합니다. warp/block reduction, vectorized I/O, stable online statistics의 상세 구현은 Deep Dive 계층에서 다룹니다.",
   },
 
   canonical: {
@@ -64,8 +64,7 @@ export const layerNormData = {
       {
         id: "INV_AFFINE_RESTORE",
         name: "Affine 복원성 (Affine Restore)",
-        metric:
-          "y_{i,j} = \\gamma_j \\hat{x}_{i,j} + \\beta_j",
+        metric: "y_{i,j} = \\gamma_j \\hat{x}_{i,j} + \\beta_j",
         threshold: "Feature-wise affine consistency",
         allows: ["Affine Fusion", "Vectorized Affine Apply"],
       },
@@ -78,38 +77,37 @@ export const layerNormData = {
       },
     ],
 
-    sensitivity: {
-      downstream: [
-        {
-          name: "Attention / QKV Projection",
-          rule:
-            "\\text{LayerNorm 출력이 Q/K/V projection으로 직접 연결되면 작은 통계 오차도 후행 score 분포에 영향을 줄 수 있다}",
-          hint: "통계 정확도 우선 및 numerically stable realization",
-        },
-        {
-          name: "Residual Add + LayerNorm Chain",
-          rule:
-            "\\text{입력이 residual add 결과라면 add와 normalization이 연속된 pointwise-reduction 구조를 이루므로 fused Add+LN lowering이 유리하다}",
-          hint: "Residual-aware fusion 검토",
-        },
-        {
-          name: "Large Feature Dimension",
-          rule:
-            "N \\text{ 이 커질수록 row-wise reduction 비용과 메모리 접근 패턴이 성능에 더 큰 영향을 준다}",
-          hint: "One-pass statistics 및 vectorized reduction 우선",
-        },
-      ],
-    },
+    downstreamConstraints: [
+      {
+        name: "Attention / QKV Projection",
+        rule:
+          "\\text{LayerNorm 출력이 Q/K/V projection으로 직접 연결되면 작은 통계 오차도 후행 score 분포에 영향을 줄 수 있다}",
+        hint: "통계 정확도 우선 및 numerically stable realization",
+      },
+      {
+        name: "Residual Add + LayerNorm Chain",
+        rule:
+          "\\text{입력이 residual add 결과라면 add와 normalization이 연속된 pointwise-reduction 구조를 이루므로 fused Add+LN lowering이 유리하다}",
+        hint: "Residual-aware fusion 검토",
+      },
+      {
+        name: "Large Feature Dimension",
+        rule:
+          "N \\text{ 이 커질수록 row-wise reduction 비용과 메모리 접근 패턴이 성능에 더 큰 영향을 준다}",
+        hint: "One-pass statistics 및 vectorized reduction 우선",
+      },
+    ],
   },
 
   lowering: {
     chosen: {
       variant: "Fused_LayerNorm_Welford",
+      summary:
+        "LayerNorm은 샘플별 feature 축에서 통계를 계산하는 row-wise reduction 구조와 output-local affine apply가 결합된 형태이므로, stable one-pass statistics 기반 fused realization이 자연스럽습니다.",
       reason: [
         "\\text{샘플 국소 통계 구조: } \\mu_i, \\sigma_i^2 \\text{ 는 각 샘플의 feature 축에서만 계산되므로 row-wise reduction realization이 자연스럽다}",
         "\\text{정규화와 affine 결합: statistics 계산 이후 normalization과 affine apply를 하나의 패스로 유지할 수 있다}",
         "\\text{수치 안정성 요구: variance 계산은 stable online statistics family와 잘 맞는다}",
-        "\\text{따라서 } \\texttt{Fused\\_LayerNorm\\_Welford} \\text{ family가 적합하다}",
       ],
       applied_rewrites: [
         "One-Pass Welford Statistics",
@@ -119,31 +117,14 @@ export const layerNormData = {
     },
   },
 
-  kernel: {
-    strategy: "Row-Wise Reduction & Affine Fusion",
-    details: [
-      {
-        technique: "One-Pass Welford Statistics",
-        semantic_link: "샘플별 mean/variance를 안정적으로 계산",
-      },
-      {
-        technique: "Warp / Block Reduction",
-        semantic_link: "feature 축 reduction을 sample-local하게 수행",
-      },
-      {
-        technique: "Vectorized Load/Store",
-        semantic_link: "연속 feature 구간의 normalization 및 affine 적용 효율화",
-      },
-      {
-        technique: "Fused Affine Apply",
-        semantic_link: "정규화 직후 gamma/beta 적용을 결합",
-      },
+  realizationSnapshot: {
+    family: "Row-Wise Reduction & Affine Fusion",
+    highlights: [
+      "One-pass Welford statistics",
+      "Sample-local row reduction",
+      "Vectorized normalization / affine apply",
+      "Lower memory traffic than two-pass realization",
     ],
-    metrics: {
-      memory_reuse: "Higher than Two-Pass",
-      throughput: "Memory Bound / Reduction Dominant",
-      occupancy: "High",
-    },
   },
 
   costModel: {

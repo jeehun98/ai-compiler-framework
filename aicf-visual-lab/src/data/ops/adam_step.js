@@ -9,8 +9,8 @@ export const adamStepData = {
       "AdamStep은 gradient, momentum, variance state를 함께 사용하여 각 파라미터의 업데이트 크기와 방향을 안정적으로 조정하는 상태 기반 최적화 연산입니다.",
     strategy:
       "AdamStep은 파라미터 자체뿐 아니라 momentum, variance, step count와 같은 상태를 함께 갱신하므로, 단일 elementwise 연산이 아니라 상태 일관성과 수치 안정성을 함께 보존하는 lowering 전략이 중요합니다.",
-    hardware:
-      "이 연산은 state update, adaptive scaling, weight decay 적용이 하나의 realization family로 결합될 수 있으며, 실제 memory schedule과 kernel metric은 Deep Dive 계층에서 다룹니다.",
+    realization:
+      "주로 fused multi-state update family로 연결되며, state update·adaptive scaling·weight decay를 하나의 realization path로 결합할 수 있습니다. 상세 memory schedule과 kernel mechanism은 Deep Dive 계층에서 다룹니다.",
   },
 
   canonical: {
@@ -29,9 +29,9 @@ export const adamStepData = {
       "t": "Scalar (Time Step)",
     },
     interpretation: {
-      "g": "현재 관측된 gradient",
-      "m": "누적된 1차 추세 상태",
-      "v": "gradient scale에 대한 적응적 상태",
+      g: "현재 관측된 gradient",
+      m: "누적된 1차 추세 상태",
+      v: "gradient scale에 대한 적응적 상태",
       "\\epsilon": "수치 안정성 확보를 위한 안전 항",
       "\\theta": "갱신 대상 파라미터",
     },
@@ -71,30 +71,37 @@ export const adamStepData = {
       },
     ],
 
-    sensitivity: {
-      downstream: [
-        {
-          name: "초기 학습 단계 (Early Phase)",
-          rule: "t \\text{ 가 작을 때 } \\hat{m}_t, \\hat{v}_t \\text{ 의 bias correction 영향이 크다}",
-          hint: "Bias correction 정확도 우선",
-        },
-        {
-          name: "Epsilon 민감도",
-          rule: "\\hat{v}_t \\to 0 \\text{ 인 구간에서는 } \\epsilon \\text{ 선택이 update 안정성에 직접 영향을 준다}",
-          hint: "Epsilon floor 및 수치 안정성 우선",
-        },
-      ],
-    },
+    downstreamConstraints: [
+      {
+        name: "초기 학습 단계 (Early Phase)",
+        rule:
+          "t \\text{ 가 작을 때 } \\hat{m}_t, \\hat{v}_t \\text{ 의 bias correction 영향이 크다}",
+        hint: "Bias correction 정확도 우선",
+      },
+      {
+        name: "Epsilon 민감도",
+        rule:
+          "\\hat{v}_t \\to 0 \\text{ 인 구간에서는 } \\epsilon \\text{ 선택이 update 안정성에 직접 영향을 준다}",
+        hint: "Epsilon floor 및 수치 안정성 우선",
+      },
+      {
+        name: "Weight Decay 결합",
+        rule:
+          "\\text{weight decay term이 동일 parameter-local update 식에 포함되면 state update와 단일 realization path로 결합 가능하다}",
+        hint: "Fused AdamW 경로 우선",
+      },
+    ],
   },
 
   lowering: {
     chosen: {
       variant: "Fused_AdamW_1Pass",
+      summary:
+        "상태 정렬성, 분모 안정성, 시간 단계 단조성이 동시에 중요하며, m·v·g·theta가 동일 parameter 축에서 함께 갱신되므로 fused multi-state update family가 자연스럽습니다.",
       reason: [
         "\\text{상태 결합도(State Coupling): } m, v, g, \\theta \\text{ 가 동일 파라미터 축에서 함께 갱신된다}",
         "\\text{의미 보존 하의 통합 갱신: state transition과 parameter update를 단일 패스로 유지할 수 있다}",
         "\\text{Bias correction 및 weight decay가 동일 update 식에 결합 가능하다}",
-        "\\text{따라서 } \\texttt{Fused\\_AdamW\\_1Pass} \\text{ family가 적합하다}",
       ],
       applied_rewrites: [
         "Multi-State Fusion",
@@ -104,27 +111,14 @@ export const adamStepData = {
     },
   },
 
-  kernel: {
-    strategy: "Vectorized Multi-State Update",
-    details: [
-      {
-        technique: "128-bit Vector Load/Store",
-        semantic_link: "동일 파라미터 축의 상태를 결합된 형태로 갱신",
-      },
-      {
-        technique: "Fast Inverse Sqrt (rsqrt)",
-        semantic_link: "분모 안정성 유지 범위 내 근사 가속",
-      },
-      {
-        technique: "Unroll & Pipeline",
-        semantic_link: "상태 갱신 패턴의 연속성 활용",
-      },
+  realizationSnapshot: {
+    family: "Vectorized Multi-State Update",
+    highlights: [
+      "128-bit vector load/store",
+      "Fast inverse sqrt (rsqrt)",
+      "State-aligned fused update",
+      "Single-pass parameter writeback",
     ],
-    metrics: {
-      memory_reuse: "4.0x (Fused vs Separate)",
-      throughput: "Memory Bandwidth Saturation (98%)",
-      occupancy: "90%",
-    },
   },
 
   costModel: {

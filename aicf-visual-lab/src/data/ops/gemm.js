@@ -6,13 +6,14 @@ export const gemmData = {
     essence:
       "GEMM은 입력 표현을 새로운 특징 공간으로 투영하고, 샘플 축과 출력 채널 축 사이의 선형 결합을 생성하는 핵심 선형 연산입니다. 대부분의 딥러닝 블록에서 projection, mixing, scoring의 기본 단위를 이룹니다.",
     strategy:
-      "GEMM은 K축 reduction과 출력 타일 축적을 중심으로 이루어지는 연산이므로, standalone matmul 자체뿐 아니라 bias, activation, residual add 같은 후행 pointwise 연산을 epilogue에 결합하는 lowering이 자연스럽습니다. 핵심은 중간 출력을 별도 메모리에 기록하지 않고 의미를 유지한 채 realization을 결합하는 것입니다.",
-    hardware:
-      "이 연산은 보통 Tensor Core / tiled reduction family로 연결되며, 실제 shared-memory tiling, register accumulation, pipeline staging 같은 구현 세부는 Deep Dive 계층에서 다룹니다.",
+      "GEMM은 K축 reduction과 출력 타일 축적을 중심으로 이루어지므로, standalone matmul뿐 아니라 bias, activation, residual add 같은 output-local 후행 연산을 epilogue에 결합하는 lowering이 자연스럽습니다. 핵심은 중간 출력을 별도 메모리에 기록하지 않고 의미를 유지한 채 realization을 결합하는 것입니다.",
+    realization:
+      "주로 Tensor Core 기반 tiled reduction family로 연결되며, 상세 kernel mechanism은 Deep Dive 계층에서 다룹니다.",
   },
 
   canonical: {
-    formula: "C_{i,j} = \\alpha \\sum_{k=1}^{K} A_{i,k} B_{k,j} + \\beta C_{i,j}",
+    formula:
+      "C_{i,j} = \\alpha \\sum_{k=1}^{K} A_{i,k} B_{k,j} + \\beta C_{i,j}",
     shapes: {
       A: "M x K",
       B: "K x N",
@@ -30,11 +31,14 @@ export const gemmData = {
 
   semantics: {
     thesis:
-      "GEMM은 K축을 따라 누적된 선형 결합을 통해 입력 표현을 새로운 출력 공간으로 사상하는 reduction-based projection operator이며, 후행 affine/activation 연산과 결합되기 쉬운 강한 epilogue 친화성을 가집니다.",
+      "GEMM은 K축을 따라 누적된 선형 결합을 통해 입력 표현을 새로운 출력 공간으로 사상하는 reduction-based projection operator이며, output-local 후행 연산과 결합되기 쉬운 강한 epilogue 친화성을 가집니다.",
 
     axes: {
       M: { name: "Samples", role: "독립적 출력 행을 형성하는 축" },
-      K: { name: "Reduction Axis", role: "누적 곱셈-덧셈이 이루어지는 내부 축" },
+      K: {
+        name: "Reduction Axis",
+        role: "누적 곱셈-덧셈이 이루어지는 내부 축",
+      },
       N: { name: "Output Features", role: "출력 채널 또는 투영 목적 축" },
     },
 
@@ -43,7 +47,7 @@ export const gemmData = {
         id: "INV_REDUCTION_EQUIVALENCE",
         name: "Reduction 동치성 (Reduction Equivalence)",
         metric:
-          "C_{i,j} = \\sum_k A_{i,k}B_{k,j} \\text{ with equivalent accumulation over } K",
+          "C_{i,j} = \\sum_k A_{i,k} B_{k,j} \\text{ with equivalent accumulation over } K",
         threshold: "Equivalent reduction result",
         allows: ["Tiled Reduction", "Split-K", "TensorCore Accumulation"],
       },
@@ -65,38 +69,37 @@ export const gemmData = {
       },
     ],
 
-    sensitivity: {
-      downstream: [
-        {
-          name: "Bias / Activation Epilogue",
-          rule:
-            "\\text{후행 연산이 output-local pointwise 형태이면 } C_{i,j} \\text{ writeback 이전에 epilogue로 결합 가능하다}",
-          hint: "Epilogue fusion 우선",
-        },
-        {
-          name: "Softmax / Attention Score Use",
-          rule:
-            "\\text{출력이 softmax 입력으로 직접 사용되면 row-wise ordering과 numeric range가 후행 안정성에 큰 영향을 준다}",
-          hint: "Numeric-stable GEMM epilogue 및 scaling 고려",
-        },
-        {
-          name: "LayerNorm / Mean-Centering",
-          rule:
-            "\\text{후행 정규화가 출력 분포를 다시 조정하더라도 GEMM 자체의 reduction semantics와 output layout은 유지되어야 한다}",
-          hint: "Normalization-aware lowering 검토",
-        },
-      ],
-    },
+    downstreamConstraints: [
+      {
+        name: "Bias / Activation Epilogue",
+        rule:
+          "\\text{후행 연산이 output-local pointwise 형태이면 } C_{i,j} \\text{ writeback 이전에 epilogue로 결합 가능하다}",
+        hint: "Epilogue fusion 우선",
+      },
+      {
+        name: "Softmax / Attention Score Use",
+        rule:
+          "\\text{출력이 softmax 입력으로 직접 사용되면 row-wise ordering과 numeric range가 후행 안정성에 큰 영향을 준다}",
+        hint: "Numeric-stable GEMM epilogue 및 scaling 고려",
+      },
+      {
+        name: "LayerNorm / Mean-Centering",
+        rule:
+          "\\text{후행 정규화가 출력 분포를 다시 조정하더라도 GEMM 자체의 reduction semantics와 output layout은 유지되어야 한다}",
+        hint: "Normalization-aware lowering 검토",
+      },
+    ],
   },
 
   lowering: {
     chosen: {
       variant: "TensorCore_GEMM_EpilogueFused",
+      summary:
+        "Reduction equivalence, output tile locality, epilogue affinity가 동시에 강하게 성립하므로 TensorCore epilogue-fused family가 자연스럽습니다.",
       reason: [
-        "\\text{K축 reduction 구조: } A_{i,k}B_{k,j} \\text{ 누적은 tiled matmul realization으로 자연스럽게 분해 가능하다}",
-        "\\text{출력 타일 독립성: } C \\text{ 의 부분 타일을 register/shared-memory에서 축적한 뒤 최종 writeback 할 수 있다}",
-        "\\text{에필로그 결합성: bias/activation/residual과 같은 output-local transform은 matmul 결과 writeback 직전에 결합 가능하다}",
-        "\\text{따라서 } \\texttt{TensorCore\\_GEMM\\_EpilogueFused} \\text{ family가 적합하다}",
+        "\\text{K축 reduction 구조는 tiled matmul realization으로 자연스럽게 분해 가능하다}",
+        "\\text{출력 타일은 register/shared-memory에서 축적 후 최종 writeback 가능하다}",
+        "\\text{Bias/activation/residual과 같은 output-local transform은 writeback 직전에 결합 가능하다}",
       ],
       applied_rewrites: [
         "TensorCore Tiled Lowering",
@@ -106,31 +109,14 @@ export const gemmData = {
     },
   },
 
-  kernel: {
-    strategy: "Hierarchical Tiled Reduction",
-    details: [
-      {
-        technique: "Shared Memory Tiling",
-        semantic_link: "K축 reduction에 필요한 A/B 조각 재사용",
-      },
-      {
-        technique: "Register Accumulation",
-        semantic_link: "출력 타일을 writeback 전까지 로컬하게 유지",
-      },
-      {
-        technique: "Warp / TensorCore MMA",
-        semantic_link: "작은 타일 단위의 선형 결합을 고처리량으로 실현",
-      },
-      {
-        technique: "Epilogue Fusion",
-        semantic_link: "출력-local 후행 연산을 별도 메모리 왕복 없이 결합",
-      },
+  realizationSnapshot: {
+    family: "Hierarchical Tiled Reduction",
+    highlights: [
+      "Shared-memory tiling",
+      "Register accumulation",
+      "Warp / TensorCore MMA",
+      "Epilogue fusion",
     ],
-    metrics: {
-      memory_reuse: "High (Tiled K-axis Reuse)",
-      throughput: "TensorCore-Dominant",
-      occupancy: "High",
-    },
   },
 
   costModel: {
