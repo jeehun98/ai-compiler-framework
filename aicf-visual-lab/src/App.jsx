@@ -36,10 +36,6 @@ export default function App() {
           path="/memory/methods/:methodId"
           element={<MemoryMethodDetailPage />}
         />
-        <Route
-          path="/memory/methods/:methodId/:phaseId"
-          element={<MemoryMethodDetailPage />}
-        />
 
         {/* lab */}
         <Route path="/lab/analysis" element={<LabAnalysisPage />} />

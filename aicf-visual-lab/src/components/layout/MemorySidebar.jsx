@@ -1,21 +1,16 @@
-import React, { useEffect, useState } from "react";
+import React from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
 import {
   HardDrive,
-  ChevronRight,
-  ChevronDown,
   ShieldCheck,
   LayoutDashboard,
-  ArrowUpRight,
   GitMerge,
   Library,
   Zap,
-  Database,
   Layers,
   Activity,
 } from "lucide-react";
 import { memoryMethodCatalog } from "../../data/memory/methodCatalog";
-import { memoryPhaseLabels } from "../../data/memory/phaseLabels";
 
 export default function MemorySidebar({
   isOpen,
@@ -23,20 +18,12 @@ export default function MemorySidebar({
   version = "v1.0.6 Lab-Ready",
 }) {
   const location = useLocation();
-  const { methodId, phaseId } = useParams();
+  const { methodId } = useParams();
   const pathname = location.pathname;
 
   const isMemoryHome = pathname === "/memory";
   const isMethods = pathname.startsWith("/memory/methods");
   const isPipeline = pathname.startsWith("/memory/pipeline");
-
-  const [expandedMethod, setExpandedMethod] = useState(
-    methodId || "online-norm"
-  );
-
-  useEffect(() => {
-    if (methodId) setExpandedMethod(methodId);
-  }, [methodId]);
 
   const SectionTitle = ({ children }) => (
     <p className="px-3 text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2 mt-4 first:mt-0">
@@ -110,7 +97,6 @@ export default function MemorySidebar({
           <SectionTitle>Navigation</SectionTitle>
           {navItem("/memory", "Overview", LayoutDashboard, { exact: true })}
           {navItem("/memory/methods", "Pattern Catalog", Library)}
-          {navItem("/memory/pipeline", "Residency Pipeline", GitMerge)}
         </nav>
 
         {/* Context Area */}
@@ -121,108 +107,43 @@ export default function MemorySidebar({
 
               {memoryMethodCatalog.map((method) => {
                 const NavIcon = method.navIcon;
-                const isExpanded = expandedMethod === method.id;
-                const isMethodActive = methodId === method.id && !phaseId;
-                const isMethodPath = methodId === method.id;
+                const isMethodActive = methodId === method.id;
 
                 return (
-                  <div key={method.id} className="space-y-1">
-                    <div
-                      className={[
-                        "w-full flex items-center justify-between rounded-xl transition-all font-bold text-sm",
-                        isMethodActive
-                          ? "bg-emerald-600 text-white shadow-lg shadow-emerald-600/20"
-                          : isMethodPath
-                          ? "bg-slate-800/70 text-slate-200"
-                          : "text-slate-400 hover:bg-slate-800",
-                      ].join(" ")}
-                    >
-                      <Link
-                        to={`/memory/methods/${method.id}`}
-                        className="flex-1 text-left flex flex-col px-4 py-3"
-                        onClick={onClose}
-                      >
-                        <span className="flex items-center gap-2">
-                          <NavIcon size={16} />
-                          {method.label}
-                          {isMethodActive && (
-                            <Zap
-                              size={10}
-                              className="text-yellow-300 animate-pulse fill-yellow-300"
-                            />
-                          )}
-                        </span>
-
-                        <span
-                          className={`text-[9px] uppercase font-black ${
-                            isMethodActive
-                              ? "text-emerald-100"
-                              : isMethodPath
-                              ? "text-slate-400"
-                              : "text-slate-500"
-                          }`}
-                        >
-                          {method.category}
-                        </span>
-                      </Link>
-
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setExpandedMethod(isExpanded ? null : method.id)
-                        }
-                        className="p-3 hover:bg-white/10 rounded-r-xl"
-                      >
-                        {isExpanded ? (
-                          <ChevronDown size={14} />
-                        ) : (
-                          <ChevronRight size={14} />
+                  <Link
+                    key={method.id}
+                    to={`/memory/methods/${method.id}`}
+                    onClick={onClose}
+                    className={[
+                      "w-full flex items-center justify-between rounded-xl transition-all font-bold text-sm px-4 py-3",
+                      isMethodActive
+                        ? "bg-emerald-600 text-white shadow-lg shadow-emerald-600/20"
+                        : "text-slate-400 hover:bg-slate-800 hover:text-white",
+                    ].join(" ")}
+                  >
+                    <div className="flex flex-col items-start text-left min-w-0">
+                      <span className="flex items-center gap-2">
+                        <NavIcon size={16} />
+                        <span className="truncate">{method.label}</span>
+                        {isMethodActive && (
+                          <Zap
+                            size={10}
+                            className="text-yellow-300 animate-pulse fill-yellow-300"
+                          />
                         )}
-                      </button>
+                      </span>
+
+                      <span
+                        className={`text-[9px] uppercase font-black ${
+                          isMethodActive
+                            ? "text-emerald-100"
+                            : "text-slate-500"
+                        }`}
+                      >
+                        {method.category}
+                      </span>
                     </div>
-
-                    {isExpanded && (
-                      <div className="ml-4 pl-4 border-l border-slate-800 space-y-1 mt-1 animate-in slide-in-from-top-2 duration-200">
-                        {method.phases.map((phase) => {
-                          const isPhaseActive =
-                            methodId === method.id && phaseId === phase;
-
-                          return (
-                            <Link
-                              key={phase}
-                              to={`/memory/methods/${method.id}/${phase}`}
-                              onClick={onClose}
-                              className={[
-                                "flex items-center justify-between px-3 py-2 rounded-lg text-[13px] font-bold transition-all",
-                                isPhaseActive
-                                  ? "text-emerald-400 bg-emerald-400/5"
-                                  : "text-slate-500 hover:text-slate-300 hover:bg-slate-800/50",
-                              ].join(" ")}
-                            >
-                              <span className="flex items-center gap-2">
-                                <Database
-                                  size={12}
-                                  className={
-                                    isPhaseActive
-                                      ? "text-emerald-400"
-                                      : "text-slate-600"
-                                  }
-                                />
-                                {memoryPhaseLabels[phase]}
-                              </span>
-
-                              <div className="flex items-center gap-2">
-                                <span className="text-[8px] border border-slate-700 px-1.5 py-0.5 rounded uppercase tracking-tighter opacity-60">
-                                  {phase}
-                                </span>
-                                {isPhaseActive && <ArrowUpRight size={12} />}
-                              </div>
-                            </Link>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
+                  </Link>
                 );
               })}
             </>
@@ -237,9 +158,9 @@ export default function MemorySidebar({
                   Residency Planning
                 </p>
                 <p className="mt-3 text-xs text-slate-500 leading-relaxed">
-                  global memory round-trip을 줄이기 위해
-                  streaming execution, rematerialization, 그리고 tiled residency를
-                  어떤 순서와 구조로 배치할지 다루는 memory planning 단계입니다.
+                  global memory round-trip을 줄이기 위해 streaming execution,
+                  rematerialization, 그리고 tiled residency를 어떤 순서와 구조로
+                  배치할지 다루는 memory planning 단계입니다.
                 </p>
               </div>
             </>
@@ -268,9 +189,9 @@ export default function MemorySidebar({
                   </p>
                   <p className="mt-3 text-xs text-slate-500 leading-relaxed">
                     이 영역은 계산량 자체보다 데이터 이동 구조를 먼저 다룹니다.
-                    어떤 값은 저장되어야 하고, 어떤 intermediate는 다시 계산될 수 있으며,
-                    어떤 reduction은 streaming 가능하고, 어떤 working set은 온칩에
-                    머무를 수 있는지를 정의합니다.
+                    어떤 값은 저장되어야 하고, 어떤 intermediate는 다시 계산될 수
+                    있으며, 어떤 reduction은 streaming 가능하고, 어떤 working
+                    set은 온칩에 머무를 수 있는지를 정의합니다.
                   </p>
                 </div>
               </div>

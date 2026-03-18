@@ -71,11 +71,13 @@ export default function MemoryMethodsPage() {
               </h1>
 
               <p className="mt-8 text-slate-400 text-lg sm:text-xl leading-relaxed max-w-3xl font-light">
-                AICF는 메모리 최적화를 개별 커널 트릭의 모음이 아니라,
-                연산의 수학적 성질과 데이터 이동 구조로 분해해 다룹니다.
+                AICF는 메모리 최적화를 개별 커널 트릭의 모음으로 보지 않습니다.
+                대신 연산의 수학적 성질, intermediate의 생존 방식, 그리고
+                데이터 이동 구조를 기준으로 memory optimization pattern을
+                해석합니다.
                 <br />
-                아래의 네 가지 method는 이러한 관점을 바탕으로 정리한
-                핵심 memory optimization pattern catalog입니다.
+                아래의 네 가지 pattern은 이러한 관점을 바탕으로 정리한
+                AICF MEMORY의 핵심 catalog입니다.
               </p>
             </section>
 
@@ -86,7 +88,7 @@ export default function MemoryMethodsPage() {
                   01. Mathematical Property
                 </div>
                 <p className="text-sm leading-relaxed text-slate-400">
-                  각 method는 단순한 구현 기법이 아니라, mergeable state,
+                  각 pattern은 단순한 구현 요령이 아니라, mergeable state,
                   rescaling invariance, recompute safety, tile closure와 같은
                   수학적 또는 구조적 성질에서 출발합니다.
                 </p>
@@ -97,9 +99,11 @@ export default function MemoryMethodsPage() {
                   02. Compiler Transformation
                 </div>
                 <p className="text-sm leading-relaxed text-slate-400">
-                  AICF는 이러한 성질을 compiler-recognizable property로 다루며,
-                  multi-pass reduction, materialized intermediate, naive loop
-                  ordering을 더 효율적인 실행 구조로 변환합니다.
+                  AICF는 이러한 성질을 compiler-recognizable property로
+                  다루며, 연산을 단순 operator sequence가 아니라 변환 가능한
+                  구조로 해석합니다. 그 결과 multi-pass reduction,
+                  materialized intermediate, naive loop ordering은 더 나은
+                  memory execution form으로 재구성될 수 있습니다.
                 </p>
               </div>
 
@@ -108,7 +112,7 @@ export default function MemoryMethodsPage() {
                   03. Hardware Realization
                 </div>
                 <p className="text-sm leading-relaxed text-slate-400">
-                  최종 목적은 HBM traffic을 줄이고 on-chip reuse를 높이며,
+                  최종 목표는 HBM traffic을 줄이고 on-chip reuse를 높이며,
                   실제 하드웨어에서 memory-bound bottleneck을 완화할 수 있는
                   kernel execution structure를 만드는 데 있습니다.
                 </p>
@@ -185,17 +189,17 @@ export default function MemoryMethodsPage() {
                 </h2>
 
                 <p className="text-slate-400 text-sm sm:text-base leading-relaxed">
-                  이 네 가지 method는 서로 다른 최적화 기법처럼 보이지만,
-                  실제로는 모두 같은 질문에 답합니다.
-                  어떤 연산은 streaming 가능하고,
-                  어떤 intermediate는 다시 계산할 수 있으며,
-                  어떤 working set은 온칩에 머무를 수 있는가.
+                  이 네 가지 pattern은 서로 다른 최적화 기법처럼 보이지만,
+                  실제로는 모두 같은 질문에 답합니다. 무엇을 streaming state로
+                  축약할 수 있는가, 무엇을 저장하지 않고 다시 계산할 수
+                  있는가, 무엇을 tile 안에 가두어 on-chip reuse를 극대화할 수
+                  있는가.
                   <br className="hidden sm:block" />
                   <br className="hidden sm:block" />
                   AICF는 이러한 판단을 개별 구현 트릭이 아니라
                   compiler-recognizable property로 다루는 것을 목표로 합니다.
-                  즉, 메모리 최적화는 사후적인 커널 미세조정이 아니라,
-                  연산의 구조를 다시 표현하고 lowering하는 방식의 문제로 봅니다.
+                  메모리 최적화는 사후적인 커널 미세조정이 아니라, 연산 구조를
+                  다시 표현하고 lowering하는 방식의 문제입니다.
                 </p>
               </div>
             </section>
@@ -217,7 +221,8 @@ export default function MemoryMethodsPage() {
                   <p className="text-sm leading-relaxed text-slate-400">
                     Online Reducible Norm은 LayerNorm, RMSNorm과 같은 통계 기반
                     normalization kernel에서 나타나는 single-pass reduction
-                    패턴을 설명합니다.
+                    구조를 다룹니다. 핵심은 full materialization이 아니라
+                    streaming state update로 통계량을 유지하는 데 있습니다.
                   </p>
                 </div>
 
@@ -227,8 +232,9 @@ export default function MemoryMethodsPage() {
                   </h3>
                   <p className="text-sm leading-relaxed text-slate-400">
                     Streaming Weighted Reduction은 FlashAttention과 같은
-                    attention kernel에서 나타나는 online softmax 기반 streaming
-                    reduction 구조를 일반화합니다.
+                    attention kernel에서 나타나는 online softmax 기반 weighted
+                    reduction 구조를 일반화합니다. 핵심은 large reduction을
+                    rescaling-aware streaming form으로 바꾸는 데 있습니다.
                   </p>
                 </div>
 
@@ -237,9 +243,10 @@ export default function MemoryMethodsPage() {
                     Recomputation Tradeoff
                   </h3>
                   <p className="text-sm leading-relaxed text-slate-400">
-                    Rematerialization은 activation checkpointing이나 fused
-                    epilogue처럼 intermediate storage를 줄이기 위해 일부 계산을
-                    다시 수행하는 전략과 연결됩니다.
+                    Re-materializable Intermediate는 activation checkpointing,
+                    fused epilogue, temporary tensor elimination과 같이
+                    intermediate storage를 줄이기 위해 일부 계산을 다시
+                    수행하는 전략과 연결됩니다.
                   </p>
                 </div>
 
@@ -249,10 +256,33 @@ export default function MemoryMethodsPage() {
                   </h3>
                   <p className="text-sm leading-relaxed text-slate-400">
                     Tile-Compatible Compute는 GEMM, convolution, attention과
-                    같이 working set의 온칩 체류성과 local reuse가 성능의 핵심이
-                    되는 커널 구조를 설명합니다.
+                    같이 working set의 온칩 체류성과 local reuse가 성능의
+                    핵심이 되는 구조를 다룹니다. 핵심은 연산 순서를
+                    재구성하여 tile-local execution을 성립시키는 데 있습니다.
                   </p>
                 </div>
+              </div>
+            </section>
+
+            {/* Composability Note */}
+            <section className="rounded-[2.5rem] border border-slate-800 bg-[#1e293b]/40 p-10">
+              <div className="max-w-4xl space-y-4">
+                <div className="text-xs font-black uppercase tracking-[0.25em] text-emerald-400">
+                  Patterns Are Composable
+                </div>
+                <h2 className="text-2xl font-black text-white">
+                  하나의 연산은 하나의 pattern에만 속하지 않습니다.
+                </h2>
+                <p className="text-slate-400 text-sm sm:text-base leading-relaxed">
+                  실제 고성능 kernel은 여러 memory property가 동시에 결합될 때
+                  나타나는 경우가 많습니다. 예를 들어 attention은 weighted
+                  streaming, rematerialization, tile-compatible execution을 함께
+                  가질 수 있고, normalization 계열 역시 online reduction과
+                  tile-local scheduling이 동시에 중요할 수 있습니다.
+                  <br />
+                  AICF MEMORY는 이러한 구조를 상호배타적인 분류가 아니라,
+                  조합 가능한 pattern system으로 다루는 방향을 지향합니다.
+                </p>
               </div>
             </section>
           </div>
