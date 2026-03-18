@@ -1,170 +1,139 @@
-// src/data/softmax.js
+// src/data/residual_add.js
 
-export const softmaxData = {
-  id: "Softmax",
-  category: "가설 경쟁 / 확률적 선택 (Hypothesis Competition)",
+export const residualAddData = {
+  id: "ResidualAdd",
+  category: "잔차 병합 / 경로 합류 (Residual Path Merge)",
 
   descriptions: {
     essence:
-      "Softmax는 각 후보의 logit을 정규화된 확률 분포로 변환하여, 동일 행(row) 안의 후보들이 서로 경쟁하는 선택 구조를 만드는 확률화 연산입니다. 값의 절대 크기보다 상대적 차이가 선택 확률을 결정합니다.",
+      "ResidualAdd는 기존 경로의 상태(identity path)와 새로 계산된 변화량(residual path)을 같은 좌표계에서 합쳐, 표현을 보존하면서도 점진적으로 갱신하는 경로 병합 연산입니다.",
     strategy:
-      "Softmax는 row-wise max reduction, exponentiation, normalization이 결합된 구조이므로, 수치 안정성을 유지하면서 통계 계산과 정규화를 결합하는 lowering이 중요합니다. 특히 후행 연산이 attention-style weighted sum이면 확률 행렬 자체를 별도 저장하지 않는 realization이 가능해집니다.",
-    hardware:
-      "이 연산은 보통 row-wise reduction + normalization family로 연결되며, 실제 online update, exp approximation, fused attention-style realization 같은 구현 세부는 Deep Dive 계층에서 다룹니다.",
+      "ResidualAdd는 단순한 element-wise add처럼 보이지만 실제로는 두 실행 경로의 합류 지점이므로, standalone add보다 선행 연산의 epilogue 또는 후행 normalization과 결합된 lowering이 중요합니다. 핵심은 별도 중간 버퍼 없이 경로 병합 의미를 유지하는 것입니다.",
+    realization:
+      "주로 same-shape pointwise merge family로 연결되며, fused residual merge나 Add+Norm preparation path가 자연스럽습니다. in-place accumulate, epilogue path merge, fused add+norm의 상세 메커니즘은 Deep Dive 계층에서 다룹니다.",
   },
 
   canonical: {
-    formula: [
-      "m_i = \\max_j x_{i,j}",
-      "p_{i,j} = \\frac{e^{x_{i,j} - m_i}}{\\sum_{k=1}^{N} e^{x_{i,k} - m_i}}",
-    ].join("\\\\"),
+    formula: "Y_{i,j} = R_{i,j} + X_{i,j}",
     shapes: {
-      x: "M x N",
-      p: "M x N",
-      "m": "M x 1 (Row-wise Stabilizer)",
+      R: "M x N",
+      X: "M x N",
+      Y: "M x N",
     },
     interpretation: {
-      M: "독립적으로 경쟁이 일어나는 row/query 축",
-      N: "경쟁하는 후보/candidate 축",
-      x: "정규화 전 경쟁 점수 (logits)",
-      p: "정규화된 선택 확률",
-      "m_i": "수치 안정성을 위한 row별 기준점",
+      M: "샘플/토큰 축",
+      N: "특징/채널 축",
+      R: "기존 상태를 전달하는 identity 경로",
+      X: "새로 계산된 residual 변화량",
+      "Y_{i,j}": "두 경로가 병합된 최종 상태",
     },
   },
 
   semantics: {
     thesis:
-      "Softmax는 각 row 내부 후보들의 상대적 에너지를 probability simplex 위의 분포로 변환하는 row-wise competitive normalization operator이며, 순위 구조를 보존하면서 선택 집중도와 엔트로피를 재조정합니다.",
+      "ResidualAdd는 기존 표현을 완전히 대체하지 않고 identity path와 residual path를 합쳐 상태를 진화시키는 path-merge operator입니다. 이 연산은 skip connection의 의미를 보존하며, 깊은 네트워크에서 정보 전달과 gradient flow를 안정화하는 구조적 역할을 가집니다.",
 
     axes: {
-      M: { name: "Queries", role: "독립적인 경쟁이 수행되는 row/query 축" },
-      N: { name: "Candidates", role: "각 row 안에서 경쟁하는 후보 축" },
+      M: { name: "Samples", role: "독립적으로 병합되는 샘플/토큰 축" },
+      N: { name: "Features", role: "동일 좌표계에서 더해지는 특징/채널 축" },
     },
 
     invariants: [
       {
-        id: "INV_TRANSLATION_INVARIANCE",
-        name: "이동 불변성 (Translation Invariance)",
-        metric:
-          "\\mathrm{Softmax}(x_i) = \\mathrm{Softmax}(x_i - c_i \\mathbf{1})",
-        threshold: "Exact row-wise equivalence",
-        allows: ["Max Subtraction", "Online Stabilized Update"],
+        id: "INV_SHAPE_ALIGNMENT",
+        name: "형상 정렬성 (Shape Alignment)",
+        metric: "shape(R) = shape(X) = shape(Y)",
+        threshold: "Exact elementwise merge legality",
+        allows: ["Pointwise Fusion", "In-Place Accumulation"],
       },
       {
-        id: "INV_SIMPLEX_CONSTRAINT",
-        name: "확률 단체성 (Simplex Constraint)",
-        metric: "\\sum_{j=1}^{N} p_{i,j} = 1",
-        threshold: "Row-wise normalized distribution",
-        allows: ["Row Normalization Fusion", "Probability-Constrained Approximation"],
+        id: "INV_IDENTITY_PRESERVATION",
+        name: "정체 경로 보존성 (Identity Preservation)",
+        metric: "\\frac{\\partial Y}{\\partial R} = 1",
+        threshold: "Exact identity contribution",
+        allows: ["Residual Path Merge", "Gradient Highway Preservation"],
       },
       {
-        id: "INV_ORDER_MONOTONICITY",
-        name: "순위 단조성 (Order Monotonicity)",
-        metric:
-          "x_{i,j_1} > x_{i,j_2} \\Rightarrow p_{i,j_1} > p_{i,j_2}",
-        threshold: "No rank inversion under exact softmax",
-        allows: ["Top-K Approximation", "Sparse Candidate Pruning"],
+        id: "INV_ADDITIVE_COMPOSITION",
+        name: "가법 합성성 (Additive Composition)",
+        metric: "Y_{i,j} = R_{i,j} + X_{i,j}",
+        threshold: "Elementwise additive consistency",
+        allows: ["Epilogue Accumulate", "Fused Add+Norm"],
       },
     ],
 
-    sensitivity: {
-      downstream: [
-        {
-          name: "Attention Weighted Sum",
-          rule:
-            "\\text{Softmax 출력이 즉시 value-weighted sum에 사용되면 } p \\text{ 전체를 별도 메모리에 기록하지 않고 streaming realization이 가능하다}",
-          hint: "Softmax-V fusion 또는 FlashAttention-style lowering 검토",
-        },
-        {
-          name: "Top-K / Sampling Regime",
-          rule:
-            "\\text{큰 row에서 일부 상위 후보가 분포 질량 대부분을 차지하면 하위 후보에 대한 근사/생략 전략이 성립할 수 있다}",
-          hint: "Sparse / Top-K aware softmax 검토",
-        },
-        {
-          name: "Numeric Range Sensitivity",
-          rule:
-            "\\text{row 내 logit range가 매우 크면 exponentiation 이전 stabilizing transform의 정확성이 중요하다}",
-          hint: "Max-subtracted numerically stable realization 우선",
-        },
-      ],
-    },
+    downstreamConstraints: [
+      {
+        name: "LayerNorm / RMSNorm Coupling",
+        rule:
+          "\\text{ResidualAdd 이후 바로 normalization이 오면 path merge와 row-wise statistics가 연속되므로 fused Add+Norm lowering이 유리하다}",
+        hint: "Add+Norm fusion 우선 검토",
+      },
+      {
+        name: "Transformer Residual Block",
+        rule:
+          "\\text{attention/MLP 출력이 identity path와 합쳐지는 경우 standalone add보다 block-level merge realization이 더 자연스럽다}",
+        hint: "Residual block aware lowering",
+      },
+      {
+        name: "In-Place Legality",
+        rule:
+          "\\text{identity buffer가 이후 독립적으로 재사용되지 않는다면 } Y \\leftarrow R + X \\text{ 형태의 in-place accumulate가 가능할 수 있다}",
+        hint: "Alias / buffer reuse 검토",
+      },
+    ],
   },
 
   lowering: {
     chosen: {
-      variant: "Online_Softmax_Fused",
+      variant: "Fused_Epilogue_ResidualAdd",
+      summary:
+        "ResidualAdd는 동일 shape의 identity path와 residual path를 output-local하게 병합하는 구조이므로, standalone add보다 fused residual merge나 Add+Norm 준비 경로가 더 자연스럽습니다.",
       reason: [
-        "\\text{row-wise 경쟁 구조: } \\max \\text{ 와 } \\sum \\exp(\\cdot) \\text{ 는 동일 row 내부에서 결합된 reduction으로 계산된다}",
-        "\\text{이동 불변성: row별 상수 이동은 확률 결과를 바꾸지 않으므로 stabilized realization이 가능하다}",
-        "\\text{정규화 결합성: max/sum 계산과 확률 정규화를 streaming 형태로 결합할 수 있다}",
-        "\\text{후행 weighted sum과 연결될 경우 } \\texttt{Online\\_Softmax\\_Fused} \\text{ family가 특히 유리하다}",
+        "\\text{경로 병합 구조: } R \\text{ 과 } X \\text{ 는 동일 shape의 상태 텐서이므로 output-local merge가 가능하다}",
+        "\\text{의미 보존 하의 통합: 선행 연산 결과 } X \\text{ 를 별도 버퍼에 기록하기 전에 identity path } R \\text{ 와 결합할 수 있다}",
+        "\\text{중간 버퍼 제거: standalone residual add를 없애면 추가 load/store를 줄일 수 있다}",
       ],
       applied_rewrites: [
-        "Online Stabilized Update",
-        "Row-Wise Reduction Fusion",
-        "Streaming Normalization",
+        "Residual Path Fusion",
+        "In-Place Accumulation",
+        "Add+Norm Ready Merge",
       ],
     },
   },
 
-  kernel: {
-    strategy: "Row-Wise Online Normalization",
-    details: [
-      {
-        technique: "Online Max/Sum Update",
-        semantic_link: "row 통계를 스트리밍 방식으로 안정적으로 갱신",
-      },
-      {
-        technique: "Register / Shared Reduction",
-        semantic_link: "row 내부 후보들에 대한 collective reduction 수행",
-      },
-      {
-        technique: "Fast Exp Approximation",
-        semantic_link: "순위 및 분포 품질 허용 범위 내에서 exp 비용 완화",
-      },
-      {
-        technique: "Fused Weighted Sum Path",
-        semantic_link: "softmax 결과를 즉시 후행 연산에 소비하여 중간 materialization 제거",
-      },
+  realizationSnapshot: {
+    family: "Same-Shape Pointwise Path Merge",
+    highlights: [
+      "Residual path fusion",
+      "Vectorized same-shape add",
+      "Optional in-place accumulation",
+      "Add+Norm ready merge path",
     ],
-    metrics: {
-      memory_reuse: "High in Streaming/Fused Path",
-      throughput: "Reduction + Exp Dominant",
-      occupancy: "High",
-    },
   },
 
   costModel: {
     semanticLoss:
-      "\\mathcal{C}_{softmax} = w_{norm} \\cdot \\Delta_{simplex} + w_{rank} \\cdot \\Delta_{order} + w_{dist} \\cdot \\Delta_{distribution}",
+      "\\mathcal{C}_{res} = w_{id} \\cdot \\Delta_{identity} + w_{merge} \\cdot \\Delta_{merge} + w_{alias} \\cdot \\Delta_{buffer}",
     weights_hint: {
       default: {
-        norm: 35.0,
-        rank: 30.0,
-        distribution: 35.0,
+        identity: 45.0,
+        merge: 35.0,
+        alias: 20.0,
       },
     },
     metrics: {
-      simplex_consistency: "High",
-      order_preservation: "High",
-      fusion_affinity: "Strong",
+      identity_preservation: "High",
+      merge_affinity: "Strong",
+      in_place_potential: "Moderate-High",
     },
   },
 
   performance: {
     latency: {
-      pytorch: 0.15,
-      torch_compile: 0.1,
-      ours: 0.04,
+      pytorch: 0.08,
+      torch_compile: 0.04,
+      ours: 0.0,
     },
   },
-
-  cudaCode: `// AICF: Online Softmax (Streaming Realization)
-__global__ void online_softmax_kernel(...) {
-  // 1. Maintain row-wise running max and running exp-sum
-  // 2. Apply numerically stable update while streaming logits
-  // 3. Normalize probabilities in the same realization path
-  // 4. Optionally consume probabilities immediately in the next op
-}`,
 };
