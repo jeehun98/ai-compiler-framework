@@ -1,82 +1,91 @@
+// src/data/theory/properties/local_accumulable.js
+
 const localAccumulable = {
   id: "LocalAccumulable",
-  title: "Local-Accumulable",
-  subtitle: "Accumulation Property",
+  group: "structural",
+  title: "Local Accumulable",
+  subtitle: "Local Summary Property",
   hero: {
     lead:
-      "A computation is local-accumulable when intermediate contributions can be accumulated locally before a later global materialization.",
+      "A computation is local-accumulable when a global result can be constructed from locally accumulated summaries without requiring full immediate materialization of all intermediate interactions.",
     canonicalLatex:
-      "y = Writeback\\left(\\sum_t a_t\\right)",
+      "F(X)=C\\big(A(X_1),A(X_2),\\dots,A(X_n)\\big)",
   },
   sections: {
     definition: {
       bullets: [
         {
-          k: "Meaning",
-          v: "중간 기여값을 register/shared memory 같은 로컬 공간에 먼저 누적할 수 있다.",
+          k: "Local Summary",
+          v: "입력의 각 부분은 전체 결과를 구성하기 위한 유효한 local state로 축약될 수 있어야 한다.",
         },
         {
-          k: "Benefit",
-          v: "global write 횟수를 줄이고 locality를 높인다.",
+          k: "Composable Combination",
+          v: "local state들은 후속 결합 연산을 통해 전체 결과로 연결 가능해야 한다.",
+        },
+        {
+          k: "Deferred Globalization",
+          v: "전역 결과는 모든 세부 상호작용을 즉시 물질화하지 않고도 단계적으로 구성될 수 있어야 한다.",
         },
       ],
       preview: [
         {
-          k: "Why It Matters",
-          v: "fused local accumulation, delayed writeback, blockwise reduction에 중요하다.",
+          k: "Mathematical Consequence",
+          v: "전체 계산을 local accumulation과 later combination 구조로 분해할 수 있다.",
         },
         {
-          k: "System View",
-          v: "실행 구조를 global-materialize-first에서 local-accumulate-first로 바꿀 수 있게 한다.",
+          k: "Compilation Consequence",
+          v: "blockwise accumulation, staged aggregation, on-chip partial state construction을 정당화할 수 있다.",
         },
       ],
-      latex: "y = Writeback\\left(\\sum_t a_t\\right)",
+      latex:
+        "F(X)=C\\big(A(X_1),A(X_2),\\dots,A(X_n)\\big)",
     },
     legality: {
       cards: [
         {
           id: "01",
-          icon: "merge",
-          title: "Accumulate Safety",
-          desc: "로컬 누적 결과가 최종 semantic result와 일치해야 한다.",
+          icon: "boxes",
+          title: "Valid Local Summary",
+          desc: "각 지역 부분계산은 전체 의미를 복원하는 데 필요한 충분한 partial state를 생성해야 한다.",
         },
         {
           id: "02",
-          icon: "shield",
-          title: "Delayed Writeback Safety",
-          desc: "writeback 지연이 의미 contract를 바꾸지 않아야 한다.",
+          icon: "merge",
+          title: "Composable Combination",
+          desc: "local state들을 결합하는 절차가 전체 semantic result와 일치해야 한다.",
+          metric: "F(X)=C\\big(A(X_1),\\dots,A(X_n)\\big)",
         },
         {
           id: "03",
-          icon: "boxes",
-          title: "Local Capacity Fit",
-          desc: "로컬 누적이 가능한 표현과 범위를 가져야 한다.",
+          icon: "shield",
+          title: "No Lost Dependency",
+          desc: "local accumulation 과정에서 이후 결과에 필요한 핵심 의존성이 소실되면 안 된다.",
         },
       ],
     },
     enables: {
       items: [
-        "Register accumulation",
-        "Shared-memory accumulation",
-        "Delayed global writeback",
-        "Fused block compute",
+        "Blockwise accumulation",
+        "Staged aggregation",
+        "On-chip partial state construction",
+        "Deferred global writeback",
       ],
     },
     boundary: {
       items: [
-        "중간 상태가 외부적으로 관찰되어야 하는 경우",
-        "즉시 materialization이 필요한 경우",
-        "local storage footprint가 과도한 경우",
+        "전체 상호작용을 즉시 물질화해야만 의미를 유지할 수 있다면 local accumulation은 성립하지 않는다.",
+        "local summary가 이후 결합에 필요한 정보를 충분히 보존하지 못하면 불법이다.",
+        "cross-region dependency가 local state로 요약되지 않으면 staged accumulation은 정당화되지 않는다.",
       ],
     },
-    relatedOps: {
-      items: ["GEMM", "Softmax"],
+    relatedConstructions: {
+      items: ["BlockwiseAttention", "OnlineSoftmaxState", "TileLocalReduction"],
     },
     relatedTransforms: {
       items: [
-        "Local accumulation",
-        "Writeback minimization",
-        "Blockwise fused compute",
+        "Local partial accumulation",
+        "Blockwise state staging",
+        "Late materialization of global result",
       ],
     },
   },

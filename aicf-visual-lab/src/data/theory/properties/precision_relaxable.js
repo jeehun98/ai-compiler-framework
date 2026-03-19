@@ -1,83 +1,92 @@
+// src/data/theory/properties/precision_relaxable.js
+
 const precisionRelaxable = {
   id: "PrecisionRelaxable",
-  title: "Precision-Relaxable",
-  subtitle: "Numerical Property",
+  group: "foundational",
+  title: "Precision Relaxable",
+  subtitle: "Numerical Relaxation Property",
   hero: {
     lead:
-      "A computation is precision-relaxable when lower precision or bounded approximation is acceptable under a preserved semantic contract.",
+      "A computation is precision-relaxable when reduced numerical precision remains within an admissible semantic error envelope for the intended result.",
     canonicalLatex:
-      "\\|F(x)-\\tilde{F}(x)\\| \\leq \\epsilon",
+      "\\tilde{F}(X) \\approx F(X),\\qquad d\\big(\\tilde{F}(X),F(X)\\big) \\le \\varepsilon",
   },
   sections: {
     definition: {
       bullets: [
         {
-          k: "Meaning",
-          v: "낮은 정밀도나 bounded approximation이 허용 범위 안에서 받아들여질 수 있다.",
+          k: "Reference Semantics",
+          v: "원래 계산 F와 그 결과를 평가할 기준 의미가 정의되어야 한다.",
         },
         {
-          k: "Important Distinction",
-          v: "exact-preserving legality와는 별도의 numerical contract가 필요하다.",
+          k: "Relaxed Evaluation",
+          v: "축약된 정밀도의 계산 \\u1d46F 또는 등가 수치 경로가 존재해야 한다.",
+        },
+        {
+          k: "Admissible Error Envelope",
+          v: "완화된 계산이 허용 가능한 오차 경계 ε 안에 남아야 한다.",
         },
       ],
       preview: [
         {
-          k: "Why It Matters",
-          v: "mixed precision, fast math, reduced accumulation path를 가능하게 한다.",
+          k: "Mathematical Consequence",
+          v: "정확한 동치가 아니라 bounded deviation 아래에서 대체 계산을 허용할 수 있다.",
         },
         {
-          k: "Risk",
-          v: "semantic legality와 numerical error budget을 분리하지 않으면 검증 구조가 무너진다.",
+          k: "Compilation Consequence",
+          v: "mixed precision, approximate accumulation, precision-specialized lowering을 정당화할 수 있다.",
         },
       ],
-      latex: "\\|F(x)-\\tilde{F}(x)\\| \\le \\epsilon",
+      latex:
+        "\\tilde{F}(X) \\approx F(X),\\qquad d\\big(\\tilde{F}(X),F(X)\\big) \\le \\varepsilon",
     },
     legality: {
       cards: [
         {
           id: "01",
-          icon: "target",
-          title: "Bounded Error",
-          desc: "오차가 정의된 허용 범위 안에 있어야 한다.",
-          metric: "\\|F(x)-\\tilde{F}(x)\\|\\le\\epsilon",
+          icon: "binary",
+          title: "Reference Result",
+          desc: "완화 전 기준 계산 F와 비교 의미가 먼저 정의되어야 한다.",
         },
         {
           id: "02",
           icon: "shield",
-          title: "Contract Awareness",
-          desc: "precision relaxation이 downstream contract를 깨지 않아야 한다.",
+          title: "Bounded Error",
+          desc: "완화된 계산 결과는 허용된 오차 경계 안에 남아 있어야 한다.",
+          metric:
+            "d\\big(\\tilde{F}(X),F(X)\\big) \\le \\varepsilon",
         },
         {
           id: "03",
-          icon: "binary",
-          title: "Stability Guard",
-          desc: "불안정한 수치 영역을 별도로 방어할 수 있어야 한다.",
+          icon: "target",
+          title: "Task-Compatible Tolerance",
+          desc: "허용 오차는 downstream task 또는 algorithmic contract와 양립 가능해야 한다.",
         },
       ],
     },
     enables: {
       items: [
-        "Mixed precision execution",
-        "Approximate intrinsic path",
-        "Reduced-precision accumulation",
-        "Fast-math dispatch",
+        "Mixed-precision evaluation",
+        "Approximate accumulation",
+        "Reduced-precision storage or compute",
+        "Precision-specialized dispatch",
       ],
     },
     boundary: {
       items: [
-        "strict exact semantics required",
-        "error amplification이 큰 recurrence",
-        "stability-critical region",
+        "작은 수치 오차도 의미적 실패로 이어지는 계산에서는 precision relaxation이 허용되지 않을 수 있다.",
+        "오차 누적이 허용 envelope를 넘으면 transform은 불법이다.",
+        "비교 기준이나 tolerance가 정의되지 않으면 relaxation legality를 주장할 수 없다.",
       ],
     },
-    relatedOps: {
-      items: ["Softmax", "GEMM", "LayerNorm"],
+    relatedConstructions: {
+      items: ["MixedPrecisionGEMM", "FP16Accumulation", "ApproximateNorm"],
     },
     relatedTransforms: {
       items: [
-        "FP16/BF16 specialization",
-        "Fast math dispatch",
-        "Bounded numerical transform",
+        "Mixed-precision lowering",
+        "Reduced-precision accumulation",
+        "Tolerance-aware dispatch",
       ],
     },
   },

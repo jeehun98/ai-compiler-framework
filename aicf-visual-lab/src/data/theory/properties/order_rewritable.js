@@ -1,82 +1,91 @@
+// src/data/theory/properties/order_rewritable.js
+
 const orderRewritable = {
   id: "OrderRewritable",
-  title: "Order-Rewritable",
-  subtitle: "Reduction Property",
+  group: "foundational",
+  title: "Order Rewritable",
+  subtitle: "Ordering Invariance Property",
   hero: {
     lead:
-      "A computation is order-rewritable when its execution order can be rearranged without changing the preserved semantic result.",
-    canonicalLatex: "F(x_1, x_2, \\dots, x_n) = F(\\pi(x_1, x_2, \\dots, x_n))",
+      "A computation is order-rewritable when evaluation order may be rearranged without changing the preserved semantic result, provided the governing dependency law is respected.",
+    canonicalLatex:
+      "\\pi \\in \\Pi_{valid} \\Rightarrow F(x_1,\\dots,x_n)=F(x_{\\pi(1)},\\dots,x_{\\pi(n)})",
   },
   sections: {
     definition: {
       bullets: [
         {
-          k: "Meaning",
-          v: "연산의 계산 순서를 바꾸어도 보존되는 의미가 동일하다.",
+          k: "Admissible Reordering",
+          v: "연산 순서를 바꿀 수 있는 유효한 순열 집합 Π_valid 가 정의되어야 한다.",
         },
         {
-          k: "Typical Basis",
-          v: "대개 associative 성질에 기대며, 경우에 따라 commutative 성질도 함께 요구된다.",
+          k: "Semantic Invariance",
+          v: "허용된 순서 변화 아래에서 계산 결과는 동일해야 한다.",
+        },
+        {
+          k: "Dependency Preservation",
+          v: "재배치는 데이터 또는 의미 의존성을 깨지 않는 범위에서만 허용된다.",
         },
       ],
       preview: [
         {
-          k: "Why It Matters",
-          v: "reduction reorder, split accumulation, tree reduction의 정당화 근거가 된다.",
+          k: "Mathematical Consequence",
+          v: "계산을 여러 순서로 재표현해도 동일한 semantic object를 유지할 수 있다.",
         },
         {
-          k: "Compiler View",
-          v: "semantic legality와 execution order를 분리하여 다룰 수 있게 한다.",
+          k: "Compilation Consequence",
+          v: "loop interchange, reassociation, traversal reordering, evaluation schedule rewrite를 정당화할 수 있다.",
         },
       ],
-      latex: "F(X) = F(\\pi(X))",
+      latex:
+        "\\pi \\in \\Pi_{valid} \\Rightarrow F(x_1,\\dots,x_n)=F(x_{\\pi(1)},\\dots,x_{\\pi(n)})",
     },
     legality: {
       cards: [
         {
           id: "01",
           icon: "arrow",
-          title: "Permutation Safety",
-          desc: "입력 순서 재배치가 최종 의미를 바꾸지 않아야 한다.",
-          metric: "F(X) = F(\\pi(X))",
+          title: "Admissible Permutation",
+          desc: "재배치는 허용된 dependency-preserving 순열에 속해야 한다.",
+          metric: "\\pi \\in \\Pi_{valid}",
         },
         {
           id: "02",
-          icon: "merge",
-          title: "Merge Compatibility",
-          desc: "순서를 바꾼 부분 결과들이 다시 유효하게 합쳐질 수 있어야 한다.",
+          icon: "shield",
+          title: "Semantic Invariance",
+          desc: "허용된 순서 변화는 최종 semantic result를 바꾸지 않아야 한다.",
         },
         {
           id: "03",
-          icon: "shield",
-          title: "Semantic Stability",
-          desc: "단순한 실행 순서 변경이 아니라 의미 보존적 재구성임이 보장되어야 한다.",
+          icon: "target",
+          title: "Dependency Respect",
+          desc: "필수적인 causality, dataflow, reduction law를 깨는 재배치는 불법이다.",
         },
       ],
     },
     enables: {
       items: [
-        "Tree reduction",
-        "Split-K style accumulation",
-        "Parallel reduction merge",
-        "Reduction reordering",
+        "Loop reordering",
+        "Traversal rewrite",
+        "Reassociation under dependency law",
+        "Order-specialized evaluation",
       ],
     },
     boundary: {
       items: [
-        "prefix dependency가 있는 경우",
-        "순서 자체가 의미인 recurrence",
-        "strict sequential state update",
+        "계산 결과가 순서 자체에 의존하면 reorder는 semantic-preserving transform이 아니다.",
+        "side effect 또는 history-sensitive state가 존재하면 order rewrite의 자유도는 제한된다.",
+        "허용되지 않은 permutation이 hidden dependency를 깨면 transform은 불법이다.",
       ],
     },
-    relatedOps: {
-      items: ["LayerNorm", "Softmax", "GEMM"],
+    relatedConstructions: {
+      items: ["ReduceSum", "CommutativeAggregation", "OrderIndependentMapReduce"],
     },
     relatedTransforms: {
       items: [
-        "Reduction reordering",
-        "Associative parallelization",
-        "Blockwise partial merge",
+        "Loop interchange",
+        "Dependency-preserving reorder",
+        "Associative / commutative reassociation",
       ],
     },
   },

@@ -1,82 +1,90 @@
+// src/data/theory/properties/rematerializable.js
+
 const rematerializable = {
   id: "Rematerializable",
+  group: "reconstructive",
   title: "Rematerializable",
-  subtitle: "Memory–Compute Bridge",
+  subtitle: "Reconstruction Property",
   hero: {
     lead:
-      "A computation is rematerializable when an intermediate can be recomputed later instead of being stored explicitly.",
+      "A computation is rematerializable when an intermediate value may be discarded and later reconstructed from still-available semantic dependencies at acceptable recomputation scope.",
     canonicalLatex:
-      "Store(z) \\;\\leftrightarrow\\; Recompute(z=g(x))",
+      "Y = G(X),\\qquad Y \\text{ need not be stored if } Y \\text{ can be reconstructed from } X",
   },
   sections: {
     definition: {
       bullets: [
         {
-          k: "Meaning",
-          v: "중간값을 저장하지 않고 나중에 다시 계산할 수 있다.",
+          k: "Reconstructible Intermediate",
+          v: "중간값 Y가 이후 시점에도 남아 있는 의존성으로부터 다시 계산 가능해야 한다.",
         },
         {
-          k: "Trade-off",
-          v: "memory를 줄이는 대신 compute를 늘리는 교환 구조를 가진다.",
+          k: "Dependency Sufficiency",
+          v: "재구성에 필요한 입력 또는 상태가 보존되어 있어야 한다.",
+        },
+        {
+          k: "Semantic Equivalence by Recompute",
+          v: "저장된 intermediate 대신 재계산된 값이 동일한 semantic role을 수행해야 한다.",
         },
       ],
       preview: [
         {
-          k: "Why It Matters",
-          v: "checkpointing, saved tensor minimization, epilogue intermediate elimination을 가능하게 한다.",
+          k: "Mathematical Consequence",
+          v: "저장과 재구성을 교환하는 방식으로 동일한 의미를 유지할 수 있다.",
         },
         {
-          k: "System View",
-          v: "memory optimization과 compute overhead를 직접 연결하는 property다.",
+          k: "Compilation Consequence",
+          v: "checkpointing, saved-tensor elimination, memory-pressure-aware recomputation을 정당화할 수 있다.",
         },
       ],
-      latex: "Store(z)\\;\\leftrightarrow\\;Recompute(z=g(x))",
+      latex:
+        "Y = G(X),\\qquad Y \\text{ need not be stored if } Y \\text{ can be reconstructed from } X",
     },
     legality: {
       cards: [
         {
           id: "01",
-          icon: "binary",
-          title: "Recompute Availability",
-          desc: "중간값이 upstream 정보로부터 다시 생성 가능해야 한다.",
+          icon: "workflow",
+          title: "Reconstructibility",
+          desc: "중간값은 이후에도 접근 가능한 semantic dependencies로부터 다시 계산 가능해야 한다.",
         },
         {
           id: "02",
           icon: "shield",
-          title: "Observation Safety",
-          desc: "저장 생략이 externally observable semantic을 깨면 안 된다.",
+          title: "Dependency Preservation",
+          desc: "재구성에 필요한 입력, state, control condition이 손실되지 않아야 한다.",
         },
         {
           id: "03",
-          icon: "merge",
-          title: "State Independence",
-          desc: "재계산이 숨은 mutable state나 비결정적 상태에 의존하면 안 된다.",
+          icon: "target",
+          title: "Equivalent Reuse",
+          desc: "재구성된 값은 저장된 intermediate와 동일한 downstream semantic role을 수행해야 한다.",
         },
       ],
     },
     enables: {
       items: [
         "Activation checkpointing",
-        "Backward recompute",
-        "Saved tensor minimization",
-        "Intermediate elimination",
+        "Saved-intermediate elimination",
+        "Memory-for-recompute tradeoff",
+        "Recompute-based backward support",
       ],
     },
     boundary: {
       items: [
-        "stateful / random dependency",
-        "재계산 비용이 지나치게 큰 경우",
-        "intermediate가 외부 contract인 경우",
+        "재구성에 필요한 upstream dependency가 이미 소실되면 rematerialization은 불가능하다.",
+        "재계산 경로가 원래 intermediate와 다른 semantic state를 만들면 불법이다.",
+        "hidden randomness, side effect, external state dependency가 있으면 재구성 가능성은 제한된다.",
       ],
     },
-    relatedOps: {
-      items: ["LayerNorm", "AdamStep", "GEMM"],
+    relatedConstructions: {
+      items: ["ActivationCheckpoint", "BackwardRecompute", "NormFactorRebuild"],
     },
     relatedTransforms: {
       items: [
-        "Checkpointing",
-        "Recompute-heavy low-memory mode",
-        "Intermediate elimination",
+        "Checkpoint insertion",
+        "Intermediate eviction with recompute",
+        "Backward rematerialization",
       ],
     },
   },

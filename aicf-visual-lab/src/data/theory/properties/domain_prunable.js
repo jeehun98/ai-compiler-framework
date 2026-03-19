@@ -1,82 +1,92 @@
+// src/data/theory/properties/domain_prunable.js
+
 const domainPrunable = {
   id: "DomainPrunable",
-  title: "Domain-Prunable",
-  subtitle: "Domain Property",
+  group: "foundational",
+  title: "Domain Prunable",
+  subtitle: "Domain Restriction Property",
   hero: {
     lead:
-      "A computation is domain-prunable when part of the input domain permits semantic simplification or compute elimination.",
+      "A computation is domain-prunable when there exists a restricted input region on which the original function can be replaced by a semantically equivalent simpler form.",
     canonicalLatex:
-      "x \\in D_0 \\Rightarrow F(x)=c \\;\\text{or}\\; Skip(x)",
+      "\\exists D_0 \\subseteq D,\\; \\exists G\\; \\text{s.t.}\\; x \\in D_0 \\Rightarrow F(x)=G(x)",
   },
   sections: {
     definition: {
       bullets: [
         {
-          k: "Meaning",
-          v: "입력 domain 일부에서 계산을 단순화하거나 생략할 수 있다.",
+          k: "Restricted Domain",
+          v: "전체 입력 공간 D 안에 의미적으로 단순화 가능한 부분집합 D₀가 존재해야 한다.",
         },
         {
-          k: "Typical Cases",
-          v: "ReLU, mask, clamp, zero-aware path, sparse-aware execution과 연결된다.",
+          k: "Equivalent Reduced Form",
+          v: "x ∈ D₀ 에 대해 원래 계산 F(x)는 더 단순한 표현 G(x)와 의미적으로 동치여야 한다.",
+        },
+        {
+          k: "Guardable Membership",
+          v: "입력이 D₀에 속하는지 판단하는 조건이 정의 가능해야 한다.",
         },
       ],
       preview: [
         {
-          k: "Why It Matters",
-          v: "branch pruning, mask-based skip, dead-region elimination의 기반이다.",
+          k: "Mathematical Consequence",
+          v: "입력 domain의 일부에서는 원래 함수 대신 더 단순한 동치 표현을 사용할 수 있다.",
         },
         {
-          k: "Runtime View",
-          v: "실제 입력 분포에 따라 fast path가 열릴 수 있다.",
+          k: "Compilation Consequence",
+          v: "guarded specialization, branch pruning, region-specific lowering을 구성할 수 있다.",
         },
       ],
-      latex: "x\\in D_0 \\Rightarrow F(x)=c\\;\\text{or}\\;Skip(x)",
+      latex:
+        "\\exists D_0 \\subseteq D,\\; \\exists G\\; \\text{s.t.}\\; x \\in D_0 \\Rightarrow F(x)=G(x)",
     },
     legality: {
       cards: [
         {
           id: "01",
           icon: "target",
-          title: "Domain Restriction",
-          desc: "특정 입력 영역에서 결과가 고정되거나 단순화 가능해야 한다.",
+          title: "Restricted Semantic Region",
+          desc: "입력의 특정 부분집합 D₀ 위에서 함수가 더 단순한 의미 형태로 축약 가능해야 한다.",
+          metric: "x \\in D_0 \\Rightarrow F(x)=G(x)",
         },
         {
           id: "02",
           icon: "shield",
-          title: "Safe Elimination",
-          desc: "생략된 계산이 최종 의미를 바꾸지 않아야 한다.",
+          title: "Semantic Equivalence",
+          desc: "축약된 형태 G는 해당 영역에서 원래 계산 F와 동일한 결과를 만들어야 한다.",
+          metric: "\\forall x \\in D_0,\\; F(x)=G(x)",
         },
         {
           id: "03",
           icon: "binary",
           title: "Guard Validity",
-          desc: "어떤 입력이 pruneable domain에 속하는지 판단 기준이 유효해야 한다.",
+          desc: "입력이 단순화 가능한 영역에 속하는지 판단하는 guard가 유효하고 의미적으로 정당해야 한다.",
         },
       ],
     },
     enables: {
       items: [
-        "Branch elimination",
-        "Mask-aware skip",
-        "Zero-region pruning",
-        "Sparse-aware execution",
+        "Guarded specialization",
+        "Branch pruning",
+        "Region-specific simplification",
+        "Sparse / zero-aware execution",
       ],
     },
     boundary: {
       items: [
-        "global nonlinear coupling",
-        "skip가 downstream semantics를 바꾸는 경우",
-        "guard cost가 prune benefit보다 큰 경우",
+        "출력 의미가 전체 domain에 걸쳐 강하게 결합되어 있으면 지역적 simplification이 성립하지 않을 수 있다.",
+        "축약된 branch가 downstream semantics를 바꾸면 pruning은 불법이다.",
+        "domain membership guard가 원래 의미와 정확히 대응하지 않으면 specialization은 불법이다.",
       ],
     },
-    relatedOps: {
-      items: ["ReLU", "Softmax"],
+    relatedConstructions: {
+      items: ["ReLU", "Clamp", "MaskedSelect", "ZeroAwareMultiply"],
     },
     relatedTransforms: {
       items: [
         "Dead-region pruning",
-        "Mask specialization",
-        "Sparse-aware execution",
+        "Mask-guided specialization",
+        "Sparse-aware lowering",
       ],
     },
   },
