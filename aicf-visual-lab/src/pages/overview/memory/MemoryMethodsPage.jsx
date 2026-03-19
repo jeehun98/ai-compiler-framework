@@ -219,10 +219,9 @@ export default function MemoryMethodsPage() {
                     Statistical Streaming
                   </h3>
                   <p className="text-sm leading-relaxed text-slate-400">
-                    Online Reducible Norm은 LayerNorm, RMSNorm과 같은 통계 기반
-                    normalization kernel에서 나타나는 single-pass reduction
-                    구조를 다룹니다. 핵심은 full materialization이 아니라
-                    streaming state update로 통계량을 유지하는 데 있습니다.
+                    LayerNorm, RMSNorm, batch statistics computation처럼
+                    통계량 축약이 핵심인 normalization 계열에서 대표적으로
+                    나타나는 pattern입니다.
                   </p>
                 </div>
 
@@ -231,10 +230,9 @@ export default function MemoryMethodsPage() {
                     Weighted Streaming
                   </h3>
                   <p className="text-sm leading-relaxed text-slate-400">
-                    Streaming Weighted Reduction은 FlashAttention과 같은
-                    attention kernel에서 나타나는 online softmax 기반 weighted
-                    reduction 구조를 일반화합니다. 핵심은 large reduction을
-                    rescaling-aware streaming form으로 바꾸는 데 있습니다.
+                    FlashAttention, blockwise attention, numerically stable
+                    weighted accumulation과 같이 large weighted reduction이
+                    등장하는 attention 계열에서 대표적으로 나타납니다.
                   </p>
                 </div>
 
@@ -243,10 +241,9 @@ export default function MemoryMethodsPage() {
                     Recomputation Tradeoff
                   </h3>
                   <p className="text-sm leading-relaxed text-slate-400">
-                    Re-materializable Intermediate는 activation checkpointing,
-                    fused epilogue, temporary tensor elimination과 같이
-                    intermediate storage를 줄이기 위해 일부 계산을 다시
-                    수행하는 전략과 연결됩니다.
+                    Activation checkpointing, fused epilogue, backward saved
+                    tensor minimization 등 intermediate 저장을 줄이기 위한
+                    recompute 전략과 직접적으로 연결됩니다.
                   </p>
                 </div>
 
@@ -255,10 +252,9 @@ export default function MemoryMethodsPage() {
                     On-Chip Residency
                   </h3>
                   <p className="text-sm leading-relaxed text-slate-400">
-                    Tile-Compatible Compute는 GEMM, convolution, attention과
-                    같이 working set의 온칩 체류성과 local reuse가 성능의
-                    핵심이 되는 구조를 다룹니다. 핵심은 연산 순서를
-                    재구성하여 tile-local execution을 성립시키는 데 있습니다.
+                    GEMM, convolution, blockwise attention처럼 tile-local reuse와
+                    working set의 on-chip 체류성이 성능을 좌우하는 kernel
+                    구조에서 핵심적으로 나타납니다.
                   </p>
                 </div>
               </div>
@@ -274,14 +270,16 @@ export default function MemoryMethodsPage() {
                   하나의 연산은 하나의 pattern에만 속하지 않습니다.
                 </h2>
                 <p className="text-slate-400 text-sm sm:text-base leading-relaxed">
-                  실제 고성능 kernel은 여러 memory property가 동시에 결합될 때
-                  나타나는 경우가 많습니다. 예를 들어 attention은 weighted
-                  streaming, rematerialization, tile-compatible execution을 함께
-                  가질 수 있고, normalization 계열 역시 online reduction과
-                  tile-local scheduling이 동시에 중요할 수 있습니다.
+                  실제 고성능 kernel은 하나의 label로 깔끔하게 분류되지 않는
+                  경우가 많습니다. AICF MEMORY는 pattern을 상호배타적인
+                  taxonomy가 아니라, 하나의 연산이 동시에 가질 수 있는 property의
+                  조합으로 다룹니다.
                   <br />
-                  AICF MEMORY는 이러한 구조를 상호배타적인 분류가 아니라,
-                  조합 가능한 pattern system으로 다루는 방향을 지향합니다.
+                  <br />
+                  따라서 compiler의 역할은 커널에 단일 이름을 붙이는 것이
+                  아니라, 어떤 property set이 성립하는지를 판별하고 그에 맞는
+                  lowering, scheduling, materialization 전략을 선택하는 데
+                  있습니다.
                 </p>
               </div>
             </section>
