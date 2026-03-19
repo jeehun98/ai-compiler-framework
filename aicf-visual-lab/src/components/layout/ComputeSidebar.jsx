@@ -1,7 +1,7 @@
 import React from "react";
 import { Link, useLocation } from "react-router-dom";
 import { allOpsData } from "../../data/ops/index.js";
-import { theoryByOpId } from "../../data/theory/index.js";
+import { theoryByPropertyId } from "../../data/theory/index.js";
 
 import {
   Terminal,
@@ -23,11 +23,13 @@ export default function ComputeSidebar({
 
   const searchParams = new URLSearchParams(location.search);
   const selectedOpId = searchParams.get("op");
+  const selectedTheoryPropertyId = searchParams.get("property");
 
   const isComputeHome = pathname === "/compute";
   const isTheory =
     pathname === "/compute/theory" || pathname.startsWith("/compute/theory/");
-  const isOps = pathname === "/compute/ops" || pathname.startsWith("/compute/ops/");
+  const isOps =
+    pathname === "/compute/ops" || pathname.startsWith("/compute/ops/");
 
   const SectionTitle = ({ children }) => (
     <p className="px-3 text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2 mt-4 first:mt-0">
@@ -98,21 +100,23 @@ export default function ComputeSidebar({
         <nav className="p-4 space-y-1 border-b border-slate-800">
           <SectionTitle>Navigation</SectionTitle>
           {navItem("/compute", "Overview", Layers, { exact: true })}
-          {navItem("/compute/theory", "Theory Specs", BookOpen)}
+          {navItem("/compute/theory", "Property Atlas", BookOpen)}
           {navItem("/compute/ops", "Ops Explorer", Terminal)}
         </nav>
 
         <div className="flex-1 overflow-y-auto p-4 space-y-2 scrollbar-thin scrollbar-thumb-slate-800">
           {isTheory && (
             <>
-              <SectionTitle>Theory Specifications</SectionTitle>
-              {Object.keys(theoryByOpId).map((id) => {
-                const isSelected = selectedOpId === id;
+              <SectionTitle>Compute Properties</SectionTitle>
+
+              {Object.keys(theoryByPropertyId).map((id) => {
+                const isSelected = selectedTheoryPropertyId === id;
+                const spec = theoryByPropertyId[id];
 
                 return (
                   <Link
                     key={id}
-                    to={`/compute/theory?op=${id}`}
+                    to={`/compute/theory?property=${id}`}
                     onClick={onClose}
                     className={[
                       "w-full flex items-center justify-between px-4 py-3 rounded-xl transition-all font-bold text-sm mb-1 border",
@@ -131,12 +135,13 @@ export default function ComputeSidebar({
                           />
                         )}
                       </span>
+
                       <span
                         className={`text-[9px] mt-0.5 uppercase tracking-tighter font-black ${
                           isSelected ? "text-emerald-200/80" : "text-slate-500"
                         }`}
                       >
-                        {theoryByOpId[id]?.subtitle || "Spec"}
+                        {spec?.subtitle || "Property"}
                       </span>
                     </div>
 
@@ -153,6 +158,7 @@ export default function ComputeSidebar({
           {isOps && (
             <>
               <SectionTitle>Operator Library</SectionTitle>
+
               {Object.keys(allOpsData).map((id) => {
                 const isSelected = selectedOpId === id;
 
@@ -178,6 +184,7 @@ export default function ComputeSidebar({
                           />
                         )}
                       </span>
+
                       <span
                         className={`text-[9px] mt-0.5 uppercase tracking-tighter font-black ${
                           isSelected ? "text-emerald-200/80" : "text-slate-500"
@@ -206,11 +213,12 @@ export default function ComputeSidebar({
                   <p className="text-[10px] uppercase tracking-widest font-black text-slate-500">
                     Structure
                   </p>
+
                   <div className="mt-3 space-y-2">
                     {[
-                      "Theory defines invariant meaning",
-                      "Ops expands executable forms",
-                      "Compute focuses on semantic structure",
+                      "Theory defines semantic properties",
+                      "Ops maps operators to property profiles",
+                      "Compute focuses on invariant-preserving execution",
                     ].map((line) => (
                       <div
                         key={line}
@@ -222,7 +230,6 @@ export default function ComputeSidebar({
                     ))}
                   </div>
                 </div>
-
               </div>
             </>
           )}
@@ -244,8 +251,9 @@ export default function ComputeSidebar({
               Semantic Boundary
             </span>
           </div>
+
           <p className="text-slate-600 font-medium leading-tight italic">
-            "From invariant meaning
+            "From semantic property
             <br />
             to executable form."
           </p>

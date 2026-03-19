@@ -45,7 +45,7 @@ export default function App() {
           element={<LabAnalysisPage />}
         />
 
-        {/* temporary */}
+        {/* temporary alias until pipeline page is implemented */}
         <Route path="/memory/pipeline" element={<MemoryOverviewPage />} />
 
         <Route path="*" element={<Navigate to="/" replace />} />
