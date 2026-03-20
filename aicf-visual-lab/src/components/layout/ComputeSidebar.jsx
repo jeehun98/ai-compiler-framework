@@ -2,6 +2,7 @@ import React from "react";
 import { Link, useLocation } from "react-router-dom";
 import { allOpsData } from "../../data/ops/index.js";
 import { theoryPropertyGroups as propertyAtlasGroups } from "../../data/properties/index.js";
+import { theoryInvariantGroups as invariantAtlasGroups } from "../../data/invariants/index.js";
 
 import {
   Terminal,
@@ -14,6 +15,8 @@ import {
   Boxes,
   RefreshCw,
   GitBranch,
+  Lock,
+  Sigma,
 } from "lucide-react";
 
 export default function ComputeSidebar({
@@ -27,10 +30,15 @@ export default function ComputeSidebar({
   const searchParams = new URLSearchParams(location.search);
   const selectedOpId = searchParams.get("op");
   const selectedPropertyId = searchParams.get("property");
+  const selectedInvariantId = searchParams.get("invariant");
 
   const isComputeHome = pathname === "/compute";
   const isPropertyAtlas =
-    pathname === "/compute/property" || pathname.startsWith("/compute/property/");
+    pathname === "/compute/properties" ||
+    pathname.startsWith("/compute/properties/");
+  const isInvariantAtlas =
+    pathname === "/compute/invariants" ||
+    pathname.startsWith("/compute/invariants/");
   const isOps =
     pathname === "/compute/ops" || pathname.startsWith("/compute/ops/");
 
@@ -41,11 +49,13 @@ export default function ComputeSidebar({
   );
 
   const navItem = (to, label, Icon, options = {}) => {
-    const { exact = false } = options;
+    const { exact = false, activeMatchers = [] } = options;
 
-    const isActive = exact
-      ? pathname === to
-      : pathname === to || pathname.startsWith(`${to}/`);
+    const isActive =
+      exact
+        ? pathname === to
+        : pathname === to || pathname.startsWith(`${to}/`) ||
+          activeMatchers.some((matcher) => matcher(pathname));
 
     return (
       <Link
@@ -64,7 +74,7 @@ export default function ComputeSidebar({
     );
   };
 
-  const groupMeta = {
+  const propertyGroupMeta = {
     foundational: {
       title: "Foundational",
       icon: Boxes,
@@ -89,6 +99,43 @@ export default function ComputeSidebar({
       itemActiveClass: "border-amber-500/20 bg-amber-600/10 text-amber-300",
       itemActiveSubClass: "text-amber-200/80",
       chevronClass: "text-amber-400",
+    },
+  };
+
+  const invariantGroupMeta = {
+    semantic: {
+      title: "Semantic",
+      icon: Lock,
+      chipClass: "border-blue-500/20 bg-blue-500/5 text-blue-300",
+      itemActiveClass: "border-blue-500/20 bg-blue-600/10 text-blue-300",
+      itemActiveSubClass: "text-blue-200/80",
+      chevronClass: "text-blue-400",
+    },
+    numeric: {
+      title: "Numeric",
+      icon: Sigma,
+      chipClass: "border-purple-500/20 bg-purple-500/5 text-purple-300",
+      itemActiveClass:
+        "border-purple-500/20 bg-purple-600/10 text-purple-300",
+      itemActiveSubClass: "text-purple-200/80",
+      chevronClass: "text-purple-400",
+    },
+    structural: {
+      title: "Structural",
+      icon: GitBranch,
+      chipClass: "border-amber-500/20 bg-amber-500/5 text-amber-300",
+      itemActiveClass: "border-amber-500/20 bg-amber-600/10 text-amber-300",
+      itemActiveSubClass: "text-amber-200/80",
+      chevronClass: "text-amber-400",
+    },
+    stateful: {
+      title: "Stateful",
+      icon: RefreshCw,
+      chipClass: "border-emerald-500/20 bg-emerald-500/5 text-emerald-300",
+      itemActiveClass:
+        "border-emerald-500/20 bg-emerald-600/10 text-emerald-300",
+      itemActiveSubClass: "text-emerald-200/80",
+      chevronClass: "text-emerald-400",
     },
   };
 
@@ -130,7 +177,18 @@ export default function ComputeSidebar({
         <nav className="space-y-1 border-b border-slate-800 p-4">
           <SectionTitle>Navigation</SectionTitle>
           {navItem("/compute", "Overview", Layers, { exact: true })}
-          {navItem("/compute/property", "Property Atlas", BookOpen)}
+          {navItem("/compute/properties", "Property Atlas", BookOpen, {
+            activeMatchers: [
+              (p) => p === "/compute/property",
+              (p) => p.startsWith("/compute/property/"),
+            ],
+          })}
+          {navItem("/compute/invariants", "Invariant Atlas", ShieldCheck, {
+            activeMatchers: [
+              (p) => p === "/compute/invariant",
+              (p) => p.startsWith("/compute/invariant/"),
+            ],
+          })}
           {navItem("/compute/ops", "Ops Explorer", Terminal)}
         </nav>
 
@@ -140,7 +198,7 @@ export default function ComputeSidebar({
               <SectionTitle>Property Atlas</SectionTitle>
 
               {propertyAtlasGroups.map((group) => {
-                const meta = groupMeta[group.id] ?? groupMeta.foundational;
+                const meta = propertyGroupMeta[group.id] ?? propertyGroupMeta.foundational;
                 const GroupIcon = meta.icon;
 
                 return (
@@ -164,7 +222,7 @@ export default function ComputeSidebar({
                         return (
                           <Link
                             key={spec.id}
-                            to={`/compute/property?property=${spec.id}`}
+                            to={`/compute/properties?property=${spec.id}`}
                             onClick={onClose}
                             className={[
                               "mb-1 flex w-full items-center justify-between rounded-xl border px-4 py-3 text-sm font-bold transition-all",
@@ -193,6 +251,86 @@ export default function ComputeSidebar({
                                 ].join(" ")}
                               >
                                 {spec?.subtitle || "Property"}
+                              </span>
+                            </div>
+
+                            <ChevronRight
+                              size={14}
+                              className={
+                                isSelected ? meta.chevronClass : "opacity-20"
+                              }
+                            />
+                          </Link>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </>
+          )}
+
+          {isInvariantAtlas && (
+            <>
+              <SectionTitle>Invariant Atlas</SectionTitle>
+
+              {invariantAtlasGroups.map((group) => {
+                if (!group.items?.length) return null;
+
+                const meta =
+                  invariantGroupMeta[group.id] ?? invariantGroupMeta.semantic;
+                const GroupIcon = meta.icon;
+
+                return (
+                  <div key={group.id} className="mb-4">
+                    <div className="mb-2 flex items-center gap-2 px-3">
+                      <div
+                        className={[
+                          "inline-flex items-center gap-1.5 rounded-xl border px-2.5 py-1 text-[9px] font-black uppercase tracking-widest",
+                          meta.chipClass,
+                        ].join(" ")}
+                      >
+                        <GroupIcon size={10} />
+                        {meta.title}
+                      </div>
+                    </div>
+
+                    <div className="space-y-1">
+                      {group.items.map((spec) => {
+                        const isSelected = selectedInvariantId === spec.id;
+
+                        return (
+                          <Link
+                            key={spec.id}
+                            to={`/compute/invariants?invariant=${spec.id}`}
+                            onClick={onClose}
+                            className={[
+                              "mb-1 flex w-full items-center justify-between rounded-xl border px-4 py-3 text-sm font-bold transition-all",
+                              isSelected
+                                ? meta.itemActiveClass
+                                : "border-transparent text-slate-400 hover:bg-slate-800 hover:text-slate-200",
+                            ].join(" ")}
+                          >
+                            <div className="min-w-0 flex flex-col items-start text-left">
+                              <span className="flex items-center gap-2 truncate tracking-tight">
+                                {spec.id}
+                                {isSelected && (
+                                  <Zap
+                                    size={10}
+                                    className="animate-pulse fill-yellow-300 text-yellow-300"
+                                  />
+                                )}
+                              </span>
+
+                              <span
+                                className={[
+                                  "mt-0.5 text-[9px] font-black uppercase tracking-tighter",
+                                  isSelected
+                                    ? meta.itemActiveSubClass
+                                    : "text-slate-500",
+                                ].join(" ")}
+                              >
+                                {spec?.subtitle || "Invariant"}
                               </span>
                             </div>
 
@@ -273,10 +411,10 @@ export default function ComputeSidebar({
 
                   <div className="mt-3 space-y-2">
                     {[
-                      "Property Atlas defines reusable semantic properties",
-                      "Properties are grouped as foundational, reconstructive, and structural",
-                      "Ops Explorer maps operators to property profiles",
-                      "Compute focuses on property-guided, meaning-preserving execution",
+                      "Property Atlas defines reusable transformation permissions",
+                      "Invariant Atlas defines conditions that must remain preserved",
+                      "Ops Explorer maps operators to property and invariant profiles",
+                      "Compute focuses on guarded, meaning-preserving execution",
                     ].map((line) => (
                       <div
                         key={line}
@@ -292,7 +430,7 @@ export default function ComputeSidebar({
             </>
           )}
 
-          {!isComputeHome && !isPropertyAtlas && !isOps && (
+          {!isComputeHome && !isPropertyAtlas && !isInvariantAtlas && !isOps && (
             <div className="px-3 py-10 text-center opacity-40">
               <Layers size={24} className="mx-auto mb-2" />
               <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">
@@ -306,14 +444,14 @@ export default function ComputeSidebar({
           <div className="mb-2 flex items-center gap-2 text-emerald-500">
             <ShieldCheck size={12} strokeWidth={3} />
             <span className="font-black uppercase tracking-widest">
-              Property Boundary
+              Compute Boundary
             </span>
           </div>
 
           <p className="font-medium italic leading-tight text-slate-600">
-            "From reusable property
+            "From allowed transformation
             <br />
-            to executable form."
+            to guarded execution."
           </p>
         </div>
       </aside>

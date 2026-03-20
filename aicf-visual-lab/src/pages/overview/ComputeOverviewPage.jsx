@@ -6,11 +6,12 @@ import {
   Sparkles,
   Waypoints,
   Menu,
-  Binary,
   Shapes,
   Gauge,
   ShieldCheck,
   Boxes,
+  Workflow,
+  Orbit,
 } from "lucide-react";
 import AppSidebar from "../../components/layout/ComputeSidebar.jsx";
 
@@ -22,11 +23,10 @@ export default function ComputeOverviewPage() {
       <AppSidebar
         isOpen={isSidebarOpen}
         onClose={() => setIsSidebarOpen(false)}
-        version="v1.1.0 Semantic"
+        version="v1.1.0 Property View"
       />
 
       <main className="flex-1 flex flex-col min-w-0">
-        {/* Mobile Header */}
         <header className="md:hidden fixed top-0 left-0 right-0 z-40 border-b border-slate-800 bg-[#0f172a]/90 backdrop-blur">
           <div className="flex items-center justify-between px-6 py-4">
             <div className="font-black text-blue-400 tracking-tighter uppercase">
@@ -45,43 +45,49 @@ export default function ComputeOverviewPage() {
         <div className="md:hidden h-[68px]" />
 
         <div className="flex-1 overflow-y-auto p-6 sm:p-10 space-y-16">
-          {/* Hero Section */}
           <section className="bg-gradient-to-br from-[#1e293b] to-[#0f172a] border border-slate-800 rounded-[2.5rem] p-8 sm:p-12 shadow-2xl relative overflow-hidden">
             <div className="absolute -top-10 -right-10 text-[140px] sm:text-[160px] font-black text-blue-500/5 pointer-events-none tracking-tighter uppercase">
-              Semantic
+              Property
             </div>
 
             <div className="flex items-center gap-2 text-blue-400 font-mono text-xs uppercase tracking-[0.35em] font-black">
-              <Cpu size={16} /> Meaning to Computational Form
+              <Cpu size={16} /> Property to Executable Form
             </div>
 
             <h1 className="mt-6 text-4xl sm:text-6xl font-black tracking-tight leading-[1.08] text-white">
-              수학적 본질이
+              연산이 허용하는 성질과
               <br />
-              <span className="text-blue-500">계산 가능한 구조</span>로 전개되는 공간
+              <span className="text-blue-500">반드시 지켜야 할 조건</span>이
+              계산 구조를 결정하는 공간
             </h1>
 
             <p className="mt-6 max-w-3xl text-slate-400 text-base sm:text-lg leading-relaxed">
               Compute 레이어는 연산을 단순한 커널 호출로 보지 않습니다.
+              먼저 연산이나 구조가 어떤 변환을 허용하는지{" "}
               <span className="text-slate-100 font-semibold italic">
-                {" "}
-                연산의 수학적 정의(Theory)
+                Property
               </span>
-              에서 시작해, 그 의미를 훼손하지 않는
+              로 보고, 그 과정에서도 반드시 유지되어야 하는 의미적 조건을{" "}
               <span className="text-slate-100 font-semibold italic">
-                {" "}
-                다양한 계산 구조(Ops)
+                Invariant
               </span>
-              로 전개합니다. 그리고 마지막에는 실제 런타임 조건 아래에서 가장
-              경제적인 실행 경로를 선택합니다.
+              로 고정합니다. 그리고 개별 operator는 이 성질과 조건 위에서 어떤
+              lowering family로 이어질 수 있는지 분석됩니다.
             </p>
 
             <div className="mt-10 flex flex-wrap gap-4">
               <Link
-                to="/compute/theory"
+                to="/compute/properties"
                 className="inline-flex items-center gap-2 px-7 py-4 rounded-2xl bg-blue-600 text-white font-bold text-sm uppercase tracking-widest shadow-lg hover:bg-blue-500 transition-all active:scale-95"
               >
-                Theory Specs 탐색 <ArrowRight size={18} />
+                Property Atlas 탐색 <ArrowRight size={18} />
+              </Link>
+
+              <Link
+                to="/compute/invariants"
+                className="inline-flex items-center gap-2 px-7 py-4 rounded-2xl bg-purple-600 text-white font-bold text-sm uppercase tracking-widest shadow-lg hover:bg-purple-500 transition-all active:scale-95"
+              >
+                Invariant Atlas 탐색 <ArrowRight size={18} />
               </Link>
 
               <Link
@@ -93,99 +99,137 @@ export default function ComputeOverviewPage() {
             </div>
           </section>
 
-          {/* Core Layers */}
           <section className="space-y-8">
             <div className="flex items-center gap-2 text-blue-400 font-black uppercase tracking-widest text-xs">
-              <Waypoints size={16} /> Two Layers of Compute
+              <Waypoints size={16} /> Core Structure of Compute
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-              {/* Theory Layer */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
               <div className="bg-[#1e293b]/60 border border-slate-800 rounded-[2rem] p-8 hover:border-blue-500/30 transition group">
                 <div className="w-12 h-12 rounded-xl bg-blue-500/10 flex items-center justify-center text-blue-400 mb-6">
-                  <Binary size={24} />
-                </div>
-
-                <h3 className="text-2xl font-black text-white">
-                  Theory: The Meaning
-                </h3>
-
-                <p className="mt-4 text-slate-400 leading-relaxed text-[15px]">
-                  연산이 보존해야 하는 <strong>수학적 불변성</strong>과{" "}
-                  <strong>동치 조건</strong>을 정의합니다. 하드웨어나 구현 제약을
-                  잠시 뒤로 미루고, 연산의 본질이 무엇인지 먼저 고정합니다.
-                </p>
-
-                <ul className="mt-6 space-y-2 text-sm text-slate-500 font-mono">
-                  <li className="flex items-center gap-2">
-                    <Sparkles size={14} className="text-blue-500" />
-                    Canonical Formulas
-                  </li>
-                  <li className="flex items-center gap-2">
-                    <Sparkles size={14} className="text-blue-500" />
-                    Geometric Interpretation
-                  </li>
-                  <li className="flex items-center gap-2">
-                    <Sparkles size={14} className="text-blue-500" />
-                    Invariant Constraints
-                  </li>
-                </ul>
-              </div>
-
-              {/* Ops Layer */}
-              <div className="bg-[#1e293b]/60 border border-slate-800 rounded-[2rem] p-8 hover:border-emerald-500/30 transition group">
-                <div className="w-12 h-12 rounded-xl bg-emerald-500/10 flex items-center justify-center text-emerald-400 mb-6">
                   <Shapes size={24} />
                 </div>
 
                 <h3 className="text-2xl font-black text-white">
-                  Ops: The Form
+                  Property: What Is Allowed
                 </h3>
 
                 <p className="mt-4 text-slate-400 leading-relaxed text-[15px]">
-                  Theory에서 고정된 의미를 <strong>실제 계산 가능한 형태</strong>
-                  로 전개합니다. 동일한 의미를 유지하면서도 fusion, tiling,
-                  tensor core 같은 가속 구조에 맞게 변환 가능한 후보들을
-                  구성합니다.
+                  Property는 이 연산이나 구조가 어떤 변환을 허용하는지를
+                  나타냅니다. 재배치, 분해, 병합, 타일링, 재구성 같은 변환이
+                  의미 보존 아래에서 가능한지 규정합니다.
+                </p>
+
+                <ul className="mt-6 space-y-2 text-sm text-slate-500 font-mono">
+                  <li className="flex items-center gap-2">
+                    <Sparkles size={14} className="text-blue-500" />
+                    Order Rewritable
+                  </li>
+                  <li className="flex items-center gap-2">
+                    <Sparkles size={14} className="text-blue-500" />
+                    Tile Composable
+                  </li>
+                  <li className="flex items-center gap-2">
+                    <Sparkles size={14} className="text-blue-500" />
+                    Rematerializable
+                  </li>
+                </ul>
+              </div>
+
+              <div className="bg-[#1e293b]/60 border border-slate-800 rounded-[2rem] p-8 hover:border-purple-500/30 transition group">
+                <div className="w-12 h-12 rounded-xl bg-purple-500/10 flex items-center justify-center text-purple-400 mb-6">
+                  <ShieldCheck size={24} />
+                </div>
+
+                <h3 className="text-2xl font-black text-white">
+                  Invariant: What Must Remain
+                </h3>
+
+                <p className="mt-4 text-slate-400 leading-relaxed text-[15px]">
+                  Invariant는 허용된 변환 이후에도 반드시 유지되어야 하는 의미적
+                  조건입니다. 출력 분포, 정렬성, 정규화 조건, 상태 일관성 같은
+                  보존 조건이 여기에 해당합니다.
+                </p>
+
+                <ul className="mt-6 space-y-2 text-sm text-slate-500 font-mono">
+                  <li className="flex items-center gap-2">
+                    <Sparkles size={14} className="text-purple-500" />
+                    Semantic Consistency
+                  </li>
+                  <li className="flex items-center gap-2">
+                    <Sparkles size={14} className="text-purple-500" />
+                    Numeric Stability
+                  </li>
+                  <li className="flex items-center gap-2">
+                    <Sparkles size={14} className="text-purple-500" />
+                    Structural Preservation
+                  </li>
+                </ul>
+              </div>
+
+              <div className="bg-[#1e293b]/60 border border-slate-800 rounded-[2rem] p-8 hover:border-emerald-500/30 transition group">
+                <div className="w-12 h-12 rounded-xl bg-emerald-500/10 flex items-center justify-center text-emerald-400 mb-6">
+                  <Workflow size={24} />
+                </div>
+
+                <h3 className="text-2xl font-black text-white">
+                  Ops: The Concrete Profile
+                </h3>
+
+                <p className="mt-4 text-slate-400 leading-relaxed text-[15px]">
+                  Ops Explorer는 개별 operator가 어떤 property profile을 가지는지,
+                  어떤 invariant를 갖는지, 그리고 어떤 lowering family가
+                  자연스러운지를 보여줍니다.
                 </p>
 
                 <ul className="mt-6 space-y-2 text-sm text-slate-500 font-mono">
                   <li className="flex items-center gap-2">
                     <Sparkles size={14} className="text-emerald-500" />
+                    Property Profile
+                  </li>
+                  <li className="flex items-center gap-2">
+                    <Sparkles size={14} className="text-emerald-500" />
+                    Op-Specific Constraints
+                  </li>
+                  <li className="flex items-center gap-2">
+                    <Sparkles size={14} className="text-emerald-500" />
                     Lowering Candidates
-                  </li>
-                  <li className="flex items-center gap-2">
-                    <Sparkles size={14} className="text-emerald-500" />
-                    Operator Fusion Space
-                  </li>
-                  <li className="flex items-center gap-2">
-                    <Sparkles size={14} className="text-emerald-500" />
-                    Semantic Cost Models
                   </li>
                 </ul>
               </div>
             </div>
           </section>
 
-          {/* Meaning to Realization */}
           <section className="bg-[#0b1120] border border-slate-800 rounded-[3rem] p-8 sm:p-10 relative overflow-hidden">
             <div className="text-center max-w-2xl mx-auto mb-12">
               <h2 className="text-3xl font-black text-white italic tracking-tight">
-                "From Meaning to Realization"
+                "From Property to Runtime"
               </h2>
               <p className="mt-4 text-slate-500 leading-relaxed">
-                우리가 연산을 다루는 방식은 단순한 구현이 아니라, 의미에서
-                형태로, 형태에서 실행으로 이어지는 전개입니다.
+                Compute는 의미를 직접 설명하는 계층이 아니라, 허용된 변환과
+                유지되어야 할 조건을 바탕으로 실제 실행 형태를 좁혀가는
+                계층입니다.
               </p>
             </div>
 
-            <div className="flex flex-col md:flex-row items-center justify-between gap-6 max-w-4xl mx-auto">
+            <div className="flex flex-col md:flex-row items-center justify-between gap-6 max-w-5xl mx-auto">
               <div className="flex flex-col items-center">
                 <div className="px-6 py-3 rounded-full bg-blue-900/30 border border-blue-500/50 text-blue-400 font-bold">
-                  Theory
+                  Property
                 </div>
                 <span className="text-[10px] text-slate-600 mt-2 font-mono italic">
-                  Semantic Anchor
+                  Transform Permission
+                </span>
+              </div>
+
+              <ArrowRight className="text-slate-700 hidden md:block" />
+
+              <div className="flex flex-col items-center">
+                <div className="px-6 py-3 rounded-full bg-purple-900/30 border border-purple-500/50 text-purple-400 font-bold">
+                  Invariant
+                </div>
+                <span className="text-[10px] text-slate-600 mt-2 font-mono italic">
+                  Semantic Condition
                 </span>
               </div>
 
@@ -196,7 +240,7 @@ export default function ComputeOverviewPage() {
                   Ops
                 </div>
                 <span className="text-[10px] text-slate-600 mt-2 font-mono italic">
-                  Computational Form
+                  Operator Profile
                 </span>
               </div>
 
@@ -210,21 +254,9 @@ export default function ComputeOverviewPage() {
                   Path Binding
                 </span>
               </div>
-
-              <ArrowRight className="text-slate-700 hidden md:block" />
-
-              <div className="flex flex-col items-center grayscale opacity-70">
-                <div className="px-6 py-3 rounded-full bg-slate-800 border border-slate-700 text-slate-400 font-bold">
-                  Realization
-                </div>
-                <span className="text-[10px] text-slate-600 mt-2 font-mono italic">
-                  Kernel / Memory
-                </span>
-              </div>
             </div>
           </section>
 
-          {/* Runtime Bridge Section */}
           <section className="space-y-10 py-2">
             <div className="flex items-center gap-2 text-violet-400 font-black uppercase tracking-widest text-xs">
               <Gauge size={16} /> Runtime Selection Layer
@@ -233,24 +265,18 @@ export default function ComputeOverviewPage() {
             <div className="flex flex-col lg:flex-row gap-10 items-start">
               <div className="lg:w-1/2 space-y-6">
                 <h2 className="text-4xl font-black tracking-tight text-white leading-tight">
-                  동일한 의미를 유지한 채,
+                  허용된 변환 공간 안에서,
                   <br />
                   <span className="text-violet-400">
-                    런타임에서 가장 가벼운 경로
+                    가장 경제적인 실행 경로
                   </span>
                   를 선택하다
                 </h2>
 
                 <p className="text-slate-400 text-lg leading-relaxed">
-                  Compute는 Theory와 Ops에서 후보를 만드는 데서 멈추지
-                  않습니다. 입력 shape, 메모리 상태, 장치 자원에 따라 현재
-                  시점에서 가장 효율적인 실행 경로를 선택합니다. 핵심은 단순히
-                  빠른 경로가 아니라,
-                  <span className="text-slate-100 font-semibold">
-                    {" "}
-                    불변성을 깨지 않는 가장 경제적인 경로
-                  </span>
-                  를 찾는 데 있습니다.
+                  Runtime은 아무 경로나 고르는 것이 아니라, Property가 허용한
+                  공간과 Invariant가 요구하는 보존 조건 안에서 현재 입력 shape,
+                  메모리 상태, 장치 자원에 맞는 가장 경제적인 경로를 선택합니다.
                 </p>
 
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-2">
@@ -270,13 +296,13 @@ export default function ComputeOverviewPage() {
                       Variant
                     </div>
                     <div className="mt-2 text-slate-500 text-xs uppercase font-bold tracking-wider">
-                      Candidate Kernel
+                      Candidate Path
                     </div>
                   </div>
 
                   <div className="p-5 rounded-2xl bg-slate-800/50 border border-slate-700">
                     <div className="flex items-center gap-2 text-violet-400 font-black text-lg">
-                      <Cpu size={18} />
+                      <Orbit size={18} />
                       Binding
                     </div>
                     <div className="mt-2 text-slate-500 text-xs uppercase font-bold tracking-wider">
@@ -298,18 +324,18 @@ export default function ComputeOverviewPage() {
                   <div className="space-y-4">
                     {[
                       {
-                        label: "Invariant Check",
-                        detail: "의미 보존 조건을 만족하는 경로인지 확인",
+                        label: "Property Match",
+                        detail: "허용 가능한 변환/realization 후보를 좁힘",
                         color: "bg-blue-500",
                       },
                       {
-                        label: "Path Search",
-                        detail: "현재 입력과 장치 상태에 맞는 후보 경로 선택",
-                        color: "bg-violet-500",
+                        label: "Invariant Check",
+                        detail: "의미 보존 조건을 만족하는지 검증",
+                        color: "bg-purple-500",
                       },
                       {
-                        label: "Parameter Binding",
-                        detail: "tile, schedule, variant를 실행 시점에 바인딩",
+                        label: "Path Binding",
+                        detail: "현재 shape / resource 조건에 맞게 실행 경로 선택",
                         color: "bg-emerald-500",
                       },
                     ].map((step) => (

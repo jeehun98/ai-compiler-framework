@@ -141,3 +141,23 @@ export const opFamilyTraits = Object.fromEntries(
     ];
   })
 );
+
+export const opsByInvariant = {
+  semantic_consistency: [
+    { opId: "gemm", status: "strong", score: 0.96 },
+    { opId: "softmax", status: "strong", score: 0.94 },
+    { opId: "layernorm", status: "medium", score: 0.82 },
+  ],
+  numeric_stability: [
+    { opId: "softmax", status: "strong", score: 0.98 },
+    { opId: "layernorm", status: "strong", score: 0.95 },
+    { opId: "rmsnorm", status: "strong", score: 0.93 },
+    { opId: "gemm", status: "conditional", score: 0.74 },
+  ],
+  structural_preservation: [
+    { opId: "gemm", status: "strong", score: 0.95 },
+    { opId: "matmul", status: "strong", score: 0.93 },
+    { opId: "attention", status: "medium", score: 0.81 },
+    { opId: "softmax", status: "conditional", score: 0.72 },
+  ],
+};
