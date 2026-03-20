@@ -3,6 +3,7 @@
 const localAccumulable = {
   id: "LocalAccumulable",
   group: "structural",
+  profileKey: "local_accumulable",
   title: "Local Accumulable",
   subtitle: "Local Summary Property",
   hero: {

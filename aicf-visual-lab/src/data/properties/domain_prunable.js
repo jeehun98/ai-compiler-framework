@@ -3,6 +3,7 @@
 const domainPrunable = {
   id: "DomainPrunable",
   group: "foundational",
+  profileKey: "domain_prunable",
   title: "Domain Prunable",
   subtitle: "Domain Restriction Property",
   hero: {

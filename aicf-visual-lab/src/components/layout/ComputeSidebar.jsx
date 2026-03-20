@@ -1,7 +1,7 @@
 import React from "react";
 import { Link, useLocation } from "react-router-dom";
 import { allOpsData } from "../../data/ops/index.js";
-import { theoryPropertyGroups } from "../../data/theory/properties/index.js";
+import { theoryPropertyGroups as propertyAtlasGroups } from "../../data/properties/index.js";
 
 import {
   Terminal,
@@ -19,18 +19,18 @@ import {
 export default function ComputeSidebar({
   isOpen,
   onClose,
-  version = "v1.1.0 Semantic",
+  version = "v1.1.0 Property View",
 }) {
   const location = useLocation();
   const pathname = location.pathname;
 
   const searchParams = new URLSearchParams(location.search);
   const selectedOpId = searchParams.get("op");
-  const selectedTheoryPropertyId = searchParams.get("property");
+  const selectedPropertyId = searchParams.get("property");
 
   const isComputeHome = pathname === "/compute";
-  const isTheory =
-    pathname === "/compute/theory" || pathname.startsWith("/compute/theory/");
+  const isPropertyAtlas =
+    pathname === "/compute/property" || pathname.startsWith("/compute/property/");
   const isOps =
     pathname === "/compute/ops" || pathname.startsWith("/compute/ops/");
 
@@ -68,20 +68,15 @@ export default function ComputeSidebar({
     foundational: {
       title: "Foundational",
       icon: Boxes,
-      sectionClass: "text-blue-400",
-      chipClass:
-        "border-blue-500/20 bg-blue-500/5 text-blue-300",
-      itemActiveClass:
-        "border-blue-500/20 bg-blue-600/10 text-blue-300",
+      chipClass: "border-blue-500/20 bg-blue-500/5 text-blue-300",
+      itemActiveClass: "border-blue-500/20 bg-blue-600/10 text-blue-300",
       itemActiveSubClass: "text-blue-200/80",
       chevronClass: "text-blue-400",
     },
     reconstructive: {
       title: "Reconstructive",
       icon: RefreshCw,
-      sectionClass: "text-purple-400",
-      chipClass:
-        "border-purple-500/20 bg-purple-500/5 text-purple-300",
+      chipClass: "border-purple-500/20 bg-purple-500/5 text-purple-300",
       itemActiveClass:
         "border-purple-500/20 bg-purple-600/10 text-purple-300",
       itemActiveSubClass: "text-purple-200/80",
@@ -90,11 +85,8 @@ export default function ComputeSidebar({
     structural: {
       title: "Structural",
       icon: GitBranch,
-      sectionClass: "text-amber-400",
-      chipClass:
-        "border-amber-500/20 bg-amber-500/5 text-amber-300",
-      itemActiveClass:
-        "border-amber-500/20 bg-amber-600/10 text-amber-300",
+      chipClass: "border-amber-500/20 bg-amber-500/5 text-amber-300",
+      itemActiveClass: "border-amber-500/20 bg-amber-600/10 text-amber-300",
       itemActiveSubClass: "text-amber-200/80",
       chevronClass: "text-amber-400",
     },
@@ -138,16 +130,16 @@ export default function ComputeSidebar({
         <nav className="space-y-1 border-b border-slate-800 p-4">
           <SectionTitle>Navigation</SectionTitle>
           {navItem("/compute", "Overview", Layers, { exact: true })}
-          {navItem("/compute/theory", "Property Atlas", BookOpen)}
+          {navItem("/compute/property", "Property Atlas", BookOpen)}
           {navItem("/compute/ops", "Ops Explorer", Terminal)}
         </nav>
 
         <div className="scrollbar-thin flex-1 overflow-y-auto space-y-2 p-4 scrollbar-thumb-slate-800">
-          {isTheory && (
+          {isPropertyAtlas && (
             <>
               <SectionTitle>Property Atlas</SectionTitle>
 
-              {theoryPropertyGroups.map((group) => {
+              {propertyAtlasGroups.map((group) => {
                 const meta = groupMeta[group.id] ?? groupMeta.foundational;
                 const GroupIcon = meta.icon;
 
@@ -167,12 +159,12 @@ export default function ComputeSidebar({
 
                     <div className="space-y-1">
                       {group.items.map((spec) => {
-                        const isSelected = selectedTheoryPropertyId === spec.id;
+                        const isSelected = selectedPropertyId === spec.id;
 
                         return (
                           <Link
                             key={spec.id}
-                            to={`/compute/theory?property=${spec.id}`}
+                            to={`/compute/property?property=${spec.id}`}
                             onClick={onClose}
                             className={[
                               "mb-1 flex w-full items-center justify-between rounded-xl border px-4 py-3 text-sm font-bold transition-all",
@@ -281,10 +273,10 @@ export default function ComputeSidebar({
 
                   <div className="mt-3 space-y-2">
                     {[
-                      "Theory defines semantic properties",
+                      "Property Atlas defines reusable semantic properties",
                       "Properties are grouped as foundational, reconstructive, and structural",
-                      "Ops maps operators to property profiles",
-                      "Compute focuses on invariant-preserving execution",
+                      "Ops Explorer maps operators to property profiles",
+                      "Compute focuses on property-guided, meaning-preserving execution",
                     ].map((line) => (
                       <div
                         key={line}
@@ -300,7 +292,7 @@ export default function ComputeSidebar({
             </>
           )}
 
-          {!isComputeHome && !isTheory && !isOps && (
+          {!isComputeHome && !isPropertyAtlas && !isOps && (
             <div className="px-3 py-10 text-center opacity-40">
               <Layers size={24} className="mx-auto mb-2" />
               <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">
@@ -314,12 +306,12 @@ export default function ComputeSidebar({
           <div className="mb-2 flex items-center gap-2 text-emerald-500">
             <ShieldCheck size={12} strokeWidth={3} />
             <span className="font-black uppercase tracking-widest">
-              Semantic Boundary
+              Property Boundary
             </span>
           </div>
 
           <p className="font-medium italic leading-tight text-slate-600">
-            "From semantic property
+            "From reusable property
             <br />
             to executable form."
           </p>

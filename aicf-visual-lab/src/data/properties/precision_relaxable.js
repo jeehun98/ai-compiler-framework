@@ -3,6 +3,7 @@
 const precisionRelaxable = {
   id: "PrecisionRelaxable",
   group: "foundational",
+  profileKey: "precision_relaxable",
   title: "Precision Relaxable",
   subtitle: "Numerical Relaxation Property",
   hero: {

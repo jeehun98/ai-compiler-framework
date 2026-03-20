@@ -3,6 +3,7 @@
 const representationInvariant = {
   id: "RepresentationInvariant",
   group: "foundational",
+  profileKey: "representation_invariant",
   title: "Representation Invariant",
   subtitle: "Representation Invariance Property",
   hero: {

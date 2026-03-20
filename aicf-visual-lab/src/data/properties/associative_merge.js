@@ -2,6 +2,7 @@
 
 const associativeMerge = {
   id: "AssociativeMerge",
+  profileKey: "associative_merge",
   group: "foundational",
   title: "Associative Merge",
   subtitle: "Algebraic Merge Property",

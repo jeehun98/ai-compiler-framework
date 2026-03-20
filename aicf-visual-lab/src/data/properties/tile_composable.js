@@ -3,6 +3,7 @@
 const tileComposable = {
   id: "TileComposable",
   group: "structural",
+  profileKey: "tile_composable",
   title: "Tile Composable",
   subtitle: "Partition Composition Property",
   hero: {

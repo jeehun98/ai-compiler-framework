@@ -3,6 +3,7 @@
 const orderRewritable = {
   id: "OrderRewritable",
   group: "foundational",
+  profileKey: "order_rewritable",
   title: "Order Rewritable",
   subtitle: "Ordering Invariance Property",
   hero: {

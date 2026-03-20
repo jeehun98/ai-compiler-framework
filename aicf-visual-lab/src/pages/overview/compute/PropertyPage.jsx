@@ -1,5 +1,5 @@
-// src/pages/overview/compute/TheoryPage.jsx
-import React, { useEffect, useState } from "react";
+// src/pages/overview/compute/PropertyPage.jsx
+import React, { useEffect, useMemo, useState } from "react";
 import "katex/dist/katex.min.css";
 import { BlockMath, InlineMath } from "react-katex";
 import { Link, useSearchParams } from "react-router-dom";
@@ -25,10 +25,12 @@ import {
 } from "lucide-react";
 
 import ComputeSidebar from "../../../components/layout/ComputeSidebar.jsx";
-import {
-  theoryByPropertyId,
-  theoryPropertyGroups,
-} from "../../../data/theory/properties/index.js";
+const matchedOps = useMemo(() => {
+  if (!activePropertyId) return [];
+  const profileKey = theoryIdToProfileKey[activePropertyId] ?? activePropertyId;
+  return opsByProperty[profileKey] ?? [];
+}, [activePropertyId]);
+import { opsByProperty, allOpsData } from "../../../data/ops/index.js";
 
 const quickProperties = [
   "OrderRewritable",
@@ -47,6 +49,31 @@ const iconMap = {
   workflow: Workflow,
   zap: Zap,
 };
+
+const PROPERTY_STATUS_TONE = {
+  strong: "border-emerald-500/20 bg-emerald-500/5 text-emerald-300",
+  medium: "border-blue-500/20 bg-blue-500/5 text-blue-300",
+  conditional: "border-amber-500/20 bg-amber-500/5 text-amber-300",
+  limited: "border-purple-500/20 bg-purple-500/5 text-purple-300",
+  weak: "border-slate-500/20 bg-slate-500/5 text-slate-300",
+  not_applicable: "border-rose-500/20 bg-rose-500/5 text-rose-300",
+};
+
+function toPropertyProfileKey(propertyId) {
+  const aliasMap = {
+    OrderRewritable: "order_rewritable",
+    TileComposable: "tile_composable",
+    RepresentationInvariant: "representation_invariant",
+    DomainPrunable: "domain_prunable",
+    AssociativeMerge: "associative_merge",
+    LocalAccumulable: "local_accumulable",
+    PrecisionRelaxable: "precision_relaxable",
+    Rematerializable: "rematerializable",
+    ScheduleInvariant: "schedule_invariant",
+  };
+
+  return aliasMap[propertyId] ?? propertyId;
+}
 
 function IconBadge({ icon }) {
   const Icon = iconMap[icon] ?? ShieldCheck;
@@ -147,7 +174,82 @@ function getGroupTheme(groupId) {
   };
 }
 
-export default function TheoryPage() {
+function formatScore(score) {
+  if (typeof score !== "number") return null;
+  return Math.round(score * 100);
+}
+
+function PropertyMatchCard({ match }) {
+  const op = allOpsData[match.opId];
+  if (!op) return null;
+
+  const score = formatScore(match.score);
+  const toneClass =
+    PROPERTY_STATUS_TONE[match.status] ?? PROPERTY_STATUS_TONE.weak;
+
+  return (
+    <Link
+      to={`/compute/ops?op=${match.opId}`}
+      className="group rounded-[2rem] border border-slate-800 bg-[#1e293b] p-6 shadow-xl transition hover:border-blue-500/30"
+    >
+      <div className="mb-3 flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-[10px] font-black uppercase tracking-widest text-blue-500">
+            Operator Match
+          </div>
+          <h3 className="mt-2 break-words text-xl font-black uppercase tracking-tight text-white">
+            {match.opId}
+          </h3>
+        </div>
+
+        <ArrowRight
+          size={18}
+          className="shrink-0 text-slate-600 transition group-hover:text-blue-400"
+        />
+      </div>
+
+      <p className="mb-4 text-sm leading-relaxed text-slate-400">
+        {op.category || "Uncategorized"}
+      </p>
+
+      <div className="mb-4 flex items-center gap-2">
+        <span
+          className={`rounded-xl border px-3 py-1 text-[10px] font-black uppercase tracking-widest ${toneClass}`}
+        >
+          {match.status?.replaceAll("_", " ") || "unknown"}
+        </span>
+        {score !== null && (
+          <span className="rounded-xl border border-slate-700 bg-[#0f172a] px-3 py-1 text-[10px] font-black uppercase tracking-widest text-slate-300">
+            Affinity {score}
+          </span>
+        )}
+      </div>
+
+      {score !== null && (
+        <div className="mb-4">
+          <div className="mb-2 flex items-center justify-between text-[9px] font-black uppercase tracking-widest text-slate-500">
+            <span>Property Affinity</span>
+            <span>{score}</span>
+          </div>
+          <div className="h-2 overflow-hidden rounded-full border border-slate-800 bg-[#0f172a]">
+            <div
+              className="h-full bg-blue-400"
+              style={{ width: `${score}%` }}
+            />
+          </div>
+        </div>
+      )}
+
+      <p className="text-sm leading-relaxed text-slate-500">
+        {op.descriptions?.oneLine ||
+          op.descriptions?.essence ||
+          "Property profile available in Ops Explorer."}
+      </p>
+    </Link>
+  );
+}
+
+export default function PropertyPage() {
   const [searchParams] = useSearchParams();
   const activePropertyId = searchParams.get("property");
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
@@ -157,7 +259,13 @@ export default function TheoryPage() {
   }, [activePropertyId]);
 
   const isMain = !activePropertyId;
-  const spec = activePropertyId ? theoryByPropertyId[activePropertyId] : null;
+  const spec = activePropertyId ? propertyById[activePropertyId] : null;
+
+  const matchedOps = useMemo(() => {
+    if (!activePropertyId) return [];
+    const propertyKey = toPropertyProfileKey(activePropertyId);
+    return opsByProperty[propertyKey] ?? [];
+  }, [activePropertyId]);
 
   if (activePropertyId && !spec) {
     return (
@@ -166,10 +274,10 @@ export default function TheoryPage() {
           Property Not Found
         </div>
         <div className="text-sm text-slate-500">
-          data/theory/properties/index.js에 "{activePropertyId}" 스펙이 없습니다.
+          data/properties index에 "{activePropertyId}" 스펙이 없습니다.
         </div>
         <Link
-          to="/compute/theory"
+          to="/compute/properties"
           className="mt-6 rounded-xl bg-blue-600 px-4 py-2 font-bold text-white"
         >
           Back to Property Atlas
@@ -403,21 +511,21 @@ export default function TheoryPage() {
 
                   <div className="flex flex-wrap gap-3">
                     {quickProperties
-                      .filter((id) => theoryByPropertyId[id])
+                      .filter((id) => propertyById[id])
                       .map((id) => (
                         <Link
                           key={id}
-                          to={`/compute/theory?property=${id}`}
+                          to={`/compute/properties?property=${id}`}
                           className="rounded-2xl border border-slate-800 bg-[#1e293b] px-4 py-3 text-xs font-black uppercase tracking-wider text-slate-200 transition hover:border-purple-500/40 hover:text-white"
                         >
-                          {theoryByPropertyId[id].title}
+                          {propertyById[id].title}
                         </Link>
                       ))}
                   </div>
                 </section>
               )}
 
-              {theoryPropertyGroups.map((group) => {
+              {propertyGroups.map((group) => {
                 const theme = getGroupTheme(group.id);
 
                 return (
@@ -441,7 +549,7 @@ export default function TheoryPage() {
                       {group.items.map((item) => (
                         <Link
                           key={item.id}
-                          to={`/compute/theory?property=${item.id}`}
+                          to={`/compute/properties?property=${item.id}`}
                           className={`group rounded-[2rem] border border-slate-800 bg-[#1e293b] p-6 shadow-xl transition ${theme.cardHover}`}
                         >
                           <div className="mb-3 flex items-center justify-between gap-3">
@@ -762,9 +870,38 @@ export default function TheoryPage() {
                 )}
               </section>
 
+              <section className="space-y-8">
+                <div className="flex items-center gap-3 text-blue-400">
+                  <Workflow size={22} />
+                  <h2 className="text-2xl font-black uppercase tracking-tight text-white">
+                    Operators Matching This Property
+                  </h2>
+                </div>
+
+                <p className="max-w-3xl text-sm leading-relaxed text-slate-400">
+                  아래 operator들은 현재 registry 기준으로 이 property를 강하게
+                  또는 의미 있게 만족하는 순서대로 정렬되어 있습니다.
+                </p>
+
+                {matchedOps.length > 0 ? (
+                  <div className="grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-3">
+                    {matchedOps.map((match) => (
+                      <PropertyMatchCard
+                        key={`${activePropertyId}-${match.opId}`}
+                        match={match}
+                      />
+                    ))}
+                  </div>
+                ) : (
+                  <div className="rounded-[2rem] border border-dashed border-slate-700 bg-[#1e293b] p-8 text-sm text-slate-500">
+                    아직 이 property와 연결된 operator profile이 없습니다.
+                  </div>
+                )}
+              </section>
+
               <div className="flex flex-col items-center justify-center gap-4 border-t border-slate-800 pt-10 sm:flex-row">
                 <Link
-                  to="/compute/theory"
+                  to="/compute/properties"
                   className="flex items-center gap-2 text-sm font-black uppercase text-blue-400 transition hover:text-white"
                 >
                   <BookOpen size={16} /> Back to Property Atlas

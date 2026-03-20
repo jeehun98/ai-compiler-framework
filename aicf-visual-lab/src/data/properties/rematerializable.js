@@ -3,6 +3,7 @@
 const rematerializable = {
   id: "Rematerializable",
   group: "reconstructive",
+  profileKey: "rematerializable",
   title: "Rematerializable",
   subtitle: "Reconstruction Property",
   hero: {

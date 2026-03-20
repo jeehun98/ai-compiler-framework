@@ -18,12 +18,108 @@ import {
   Search,
   BookOpen,
   Boxes,
+  Layers,
 } from "lucide-react";
 
 import { useSearchParams, Link } from "react-router-dom";
-import { allOpsData } from "../../../data/ops/index.js";
+import {
+  allOpsData,
+  opFamilyTraits,
+} from "../../../data/ops/index.js";
 import KernelDeepDive from "../../../components/common/KernelDeepDive.jsx";
 import ComputeSidebar from "../../../components/layout/ComputeSidebar.jsx";
+
+const PROPERTY_TONE = {
+  strong: {
+    badge: "bg-emerald-500/10 text-emerald-300 border-emerald-500/20",
+    bar: "bg-emerald-400",
+    label: "STRONG",
+  },
+  medium: {
+    badge: "bg-blue-500/10 text-blue-300 border-blue-500/20",
+    bar: "bg-blue-400",
+    label: "MEDIUM",
+  },
+  conditional: {
+    badge: "bg-amber-500/10 text-amber-300 border-amber-500/20",
+    bar: "bg-amber-400",
+    label: "CONDITIONAL",
+  },
+  limited: {
+    badge: "bg-purple-500/10 text-purple-300 border-purple-500/20",
+    bar: "bg-purple-400",
+    label: "LIMITED",
+  },
+  weak: {
+    badge: "bg-slate-500/10 text-slate-300 border-slate-500/20",
+    bar: "bg-slate-400",
+    label: "WEAK",
+  },
+  not_applicable: {
+    badge: "bg-rose-500/10 text-rose-300 border-rose-500/20",
+    bar: "bg-rose-400",
+    label: "N/A",
+  },
+};
+
+const FAMILY_TONE = {
+  normalizationFamily: {
+    title: "Normalization Family",
+    accent: "text-purple-400",
+    border: "hover:border-purple-500/30",
+    chip: "border-purple-500/20 bg-purple-500/5 text-purple-300",
+    keyText: "text-purple-300",
+  },
+  gatingFamily: {
+    title: "Gating Family",
+    accent: "text-amber-400",
+    border: "hover:border-amber-500/30",
+    chip: "border-amber-500/20 bg-amber-500/5 text-amber-300",
+    keyText: "text-amber-300",
+  },
+  pathMergeFamily: {
+    title: "Path Merge Family",
+    accent: "text-emerald-400",
+    border: "hover:border-emerald-500/30",
+    chip: "border-emerald-500/20 bg-emerald-500/5 text-emerald-300",
+    keyText: "text-emerald-300",
+  },
+  broadcastShiftFamily: {
+    title: "Broadcast Shift Family",
+    accent: "text-cyan-400",
+    border: "hover:border-cyan-500/30",
+    chip: "border-cyan-500/20 bg-cyan-500/5 text-cyan-300",
+    keyText: "text-cyan-300",
+  },
+  linearProjectionFamily: {
+    title: "Linear Projection Family",
+    accent: "text-blue-400",
+    border: "hover:border-blue-500/30",
+    chip: "border-blue-500/20 bg-blue-500/5 text-blue-300",
+    keyText: "text-blue-300",
+  },
+  competitionFamily: {
+    title: "Competition Family",
+    accent: "text-pink-400",
+    border: "hover:border-pink-500/30",
+    chip: "border-pink-500/20 bg-pink-500/5 text-pink-300",
+    keyText: "text-pink-300",
+  },
+  stateUpdateFamily: {
+    title: "State Update Family",
+    accent: "text-orange-400",
+    border: "hover:border-orange-500/30",
+    chip: "border-orange-500/20 bg-orange-500/5 text-orange-300",
+    keyText: "text-orange-300",
+  },
+  default: {
+    title: "Family Trait",
+    accent: "text-cyan-400",
+    border: "hover:border-cyan-500/30",
+    chip: "border-slate-500/20 bg-slate-500/5 text-slate-300",
+    keyText: "text-slate-300",
+  },
+};
 
 export default function OpsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -66,10 +162,16 @@ export default function OpsPage() {
   const chosenSummary = data?.lowering?.chosen?.summary ?? "";
   const hasDeepDive = !!(data?.kernel_evolution || data?.evolution);
 
-  const invariants = semantic?.invariants ?? [];
-  const downstream = semantic?.downstreamConstraints ?? [];
+  const propertyEntries = Object.entries(data?.propertyProfile ?? {});
+  const opConstraints = data?.opConstraints ?? [];
+  const downstream = data?.downstreamConstraints ?? [];
   const loweringReasons = data?.lowering?.chosen?.reason ?? [];
   const costWeights = data?.costModel?.weights_hint?.default ?? {};
+
+  const familyTraits = opFamilyTraits[activeOpId] ?? {};
+  const familyEntries = Object.entries(familyTraits).filter(
+    ([, value]) => value && typeof value === "object"
+  );
 
   const quickOps = useMemo(
     () => ["AdamStep", "LayerNorm", "Softmax", "GEMM"],
@@ -88,7 +190,7 @@ export default function OpsPage() {
         onClose={() => setIsSidebarOpen(false)}
         activeOpId={activeOpId || ""}
         quickOps={quickOps}
-        version="v1.0.7 Semantic View"
+        version="v1.1.0 Property View"
       />
 
       <main className="flex-1 flex flex-col min-w-0 font-sans">
@@ -103,7 +205,7 @@ export default function OpsPage() {
                   AICF LAB
                 </div>
                 <div className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">
-                  v1.0.7 Semantic View
+                  v1.1.0 Property View
                 </div>
               </div>
             </Link>
@@ -123,7 +225,6 @@ export default function OpsPage() {
         <div className="flex-1 overflow-y-auto p-6 sm:p-10 space-y-14 pb-32 bg-[linear-gradient(180deg,rgba(15,23,42,1),rgba(30,41,59,0.2))]">
           {isMain ? (
             <div className="max-w-5xl mx-auto space-y-20 animate-in fade-in duration-700">
-              {/* Hero */}
               <section className="bg-[#1e293b] border border-slate-800 rounded-[2.5rem] p-10 sm:p-16 shadow-2xl relative overflow-hidden">
                 <div className="absolute -top-10 -right-10 text-[140px] font-black text-blue-500/5 pointer-events-none">
                   OPS
@@ -136,33 +237,32 @@ export default function OpsPage() {
                 <h1 className="text-4xl sm:text-6xl font-black tracking-tight text-white leading-tight">
                   Semantic Meaning & <br />
                   <span className="text-blue-500 text-3xl sm:text-5xl">
-                    Lowering Outlook
+                    Property-Guided Lowering
                   </span>
                 </h1>
 
                 <p className="mt-8 text-slate-400 text-lg sm:text-xl leading-relaxed max-w-3xl font-light">
-                  Ops Explorer는 각 연산이 가지는{" "}
-                  <strong>수학적 의미와 불변성</strong>을 기준으로, 어떤
-                  최적화가 허용되며 어떤 실행 형태로 이어질 수 있는지를
-                  분석합니다.
+                  Ops Explorer는 각 연산의 <strong>canonical spec</strong>과{" "}
+                  <strong>property profile</strong>을 기준으로, 어떤 최적화가
+                  허용되며 어떤 실행 형태로 이어질 수 있는지를 분석합니다.
                   <br />
-                  즉, Theory가 정의한 의미를 실제 optimization candidate로
-                  연결하는{" "}
-                  <strong>semantic-to-lowering bridge</strong> 역할을 합니다.
+                  즉, <strong>Property Atlas</strong>가 정의한 semantic
+                  property를 개별 operator의 profile로 투영하고, 이를 실제
+                  lowering candidate로 연결하는{" "}
+                  <strong>property-to-lowering bridge</strong> 역할을 합니다.
                 </p>
 
                 <div className="mt-8 inline-flex items-center gap-2 rounded-2xl border border-blue-500/20 bg-blue-500/5 px-4 py-2 text-[11px] font-bold uppercase tracking-widest text-blue-300">
                   <ShieldCheck size={14} />
-                  Semantic / Compute View
+                  Semantic / Property View
                 </div>
               </section>
 
-              {/* Bridge */}
               <section className="bg-[#0b1120] border border-slate-800 rounded-[2.5rem] p-8 sm:p-10">
                 <div className="flex items-center gap-3 text-emerald-400 mb-6">
                   <GitMerge size={22} />
                   <h2 className="text-2xl font-black uppercase tracking-tight text-white">
-                    From Theory to Realization
+                    From Property Atlas to Realization
                   </h2>
                 </div>
 
@@ -170,18 +270,18 @@ export default function OpsPage() {
                   {[
                     {
                       step: "01",
-                      title: "Theory Spec",
-                      desc: "연산의 수학적 정의와 보존 성질을 규정합니다.",
+                      title: "Property Atlas",
+                      desc: "재사용 가능한 semantic property와 rewrite law를 정의합니다.",
                     },
                     {
                       step: "02",
-                      title: "Invariant Space",
-                      desc: "어떤 재배치, 융합, 근사가 의미적으로 허용되는지 판별합니다.",
+                      title: "Op Property Profile",
+                      desc: "개별 연산이 어떤 property를 얼마나 만족하는지 판정합니다.",
                     },
                     {
                       step: "03",
                       title: "Lowering Family",
-                      desc: "허용된 공간 안에서 어떤 realization family가 자연스러운지 좁혀갑니다.",
+                      desc: "허용된 property 공간 안에서 자연스러운 realization family를 좁혀갑니다.",
                     },
                   ].map((item) => (
                     <div
@@ -202,7 +302,6 @@ export default function OpsPage() {
                 </div>
               </section>
 
-              {/* Analysis Framework */}
               <section className="space-y-8">
                 <div className="flex items-center gap-3 text-emerald-400">
                   <Terminal size={24} />
@@ -215,21 +314,21 @@ export default function OpsPage() {
                   {[
                     {
                       step: "1",
-                      title: "연산 의미 정의",
-                      desc: "수식, 축 의미, 입출력 관계를 통해 연산이 보존해야 할 본질을 정의합니다.",
-                      tag: "SEMANTICS",
+                      title: "Op Canonical Spec",
+                      desc: "수식, 축 의미, 입출력 관계를 통해 연산의 canonical form을 정리합니다.",
+                      tag: "SPEC",
                     },
                     {
                       step: "2",
-                      title: "불변성 기반 제약 확인",
-                      desc: "허용 가능한 최적화가 어떤 의미 보존 조건 아래 성립하는지 식별합니다.",
-                      tag: "INVARIANTS",
+                      title: "Property Atlas Matching",
+                      desc: "재사용 가능한 property 집합 중 어떤 성질이 이 연산에 성립하는지 평가합니다.",
+                      tag: "PROPERTIES",
                     },
                     {
                       step: "3",
-                      title: "후행 연산 기반 Lowering 후보 탐색",
-                      desc: "연쇄 구조와 downstream 민감도를 바탕으로 가능한 realization family를 좁힙니다.",
-                      tag: "LOWERING",
+                      title: "Op-Specific Constraint 확인",
+                      desc: "이 연산만의 상태 정렬성, 수치 안정성, 시간 순서 제약을 확인합니다.",
+                      tag: "CONSTRAINTS",
                     },
                   ].map((item) => (
                     <div
@@ -255,14 +354,14 @@ export default function OpsPage() {
                 </div>
               </section>
 
-              {/* Select operators */}
               <section className="bg-blue-600/5 border border-blue-500/20 rounded-[3rem] p-12 text-center">
                 <h2 className="text-2xl font-black text-white uppercase mb-4">
                   Select an Operator to Explore
                 </h2>
                 <p className="text-slate-400 text-sm max-w-2xl mx-auto leading-relaxed mb-8">
-                  각 연산이 어떤 의미를 가지며, 어떤 invariant를 통해 어떤
-                  lowering family로 이어질 수 있는지 확인할 수 있습니다.
+                  각 연산이 어떤 canonical spec을 가지며, 어떤 property profile과
+                  op-specific constraint를 통해 어떤 lowering family로 이어질 수
+                  있는지 확인할 수 있습니다.
                 </p>
 
                 <div className="flex flex-wrap justify-center gap-4">
@@ -285,40 +384,38 @@ export default function OpsPage() {
                 </div>
               </section>
 
-              {/* CTA to Theory */}
               <section className="bg-[#1e293b] border border-slate-800 rounded-[2.5rem] p-10 text-center">
                 <div className="flex items-center justify-center gap-2 text-blue-400 mb-4">
                   <BookOpen size={18} />
                   <span className="text-[11px] font-black uppercase tracking-widest">
-                    Semantic Basis
+                    Property Layer
                   </span>
                 </div>
 
                 <h2 className="text-2xl font-black text-white uppercase mb-4">
-                  Need the Mathematical Basis First?
+                  Need the Property Atlas First?
                 </h2>
 
                 <p className="text-slate-400 max-w-2xl mx-auto leading-relaxed mb-8">
-                  Ops Explorer는 lowering과 optimization candidate를
-                  설명합니다. 각 연산의 수학적 정의, 기하학적 해석, 등가
-                  조건을 먼저 보려면 Theory Specs를 확인하세요.
+                  Ops Explorer는 개별 연산의 property profile과 lowering candidate를
+                  설명합니다. 재사용 가능한 semantic property, rewrite law, 성립
+                  조건과 제한 조건을 먼저 보려면 Property Atlas를 확인하세요.
                 </p>
 
                 <Link
-                  to="/compute/theory"
+                  to="/compute/properties"
                   className="inline-flex items-center gap-2 px-8 py-4 rounded-2xl bg-blue-600/10 border border-blue-500/20 text-blue-300 font-black uppercase tracking-widest hover:bg-blue-600/20 transition"
                 >
-                  View Theory Specs <ArrowUpRight size={16} />
+                  View Property Atlas <ArrowUpRight size={16} />
                 </Link>
               </section>
             </div>
           ) : (
             <div className="animate-in slide-in-from-bottom-4 duration-500 space-y-12">
-              {/* Header */}
               <section className="flex flex-col lg:flex-row lg:items-end justify-between gap-6 border-b border-slate-800 pb-8">
                 <div className="space-y-2 min-w-0">
                   <div className="flex items-center gap-2 text-blue-500 font-mono text-[10px] font-black uppercase tracking-[0.3em]">
-                    <Activity size={14} /> Semantic Trace Report
+                    <Activity size={14} /> Operator Property Report
                   </div>
                   <h2 className="text-4xl sm:text-6xl font-black tracking-tight text-white leading-tight break-words">
                     {data.id}{" "}
@@ -329,16 +426,15 @@ export default function OpsPage() {
                 </div>
 
                 <div className="flex items-center gap-2 text-emerald-400 font-bold bg-emerald-400/5 px-4 py-2 rounded-xl border border-emerald-400/10 text-[11px] uppercase tracking-widest w-fit">
-                  <ShieldCheck size={16} /> Semantic Anchored
+                  <ShieldCheck size={16} /> Property Anchored
                 </div>
               </section>
 
-              {/* Spec + Invariants */}
               <section className="space-y-6">
                 <div className="flex items-center gap-3 text-blue-400">
                   <Share2 size={24} />
                   <h3 className="text-2xl font-black uppercase tracking-tight">
-                    1. Canonical Spec & Invariant Space
+                    1. Canonical Spec & Property Profile
                   </h3>
                 </div>
 
@@ -371,7 +467,7 @@ export default function OpsPage() {
                     </div>
 
                     <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-4">
-                      데이터 흐름 및 축별 의미
+                      Canonical dataflow & axis meaning
                     </p>
 
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -389,7 +485,9 @@ export default function OpsPage() {
                           </div>
 
                           <div className="relative z-10 text-sm font-bold text-slate-200 break-words">
-                            {interpretation?.[axis] || "정의되지 않음"}
+                            {semantic.axes[axis].description ||
+                              interpretation?.[axis] ||
+                              "정의되지 않음"}
                           </div>
 
                           <div className="relative z-10 mt-4 pt-3 border-t border-slate-800/60 text-[10px] text-slate-500">
@@ -406,76 +504,123 @@ export default function OpsPage() {
                   <div className="col-span-12 lg:col-span-4 space-y-4">
                     <div className="flex items-center justify-between px-2">
                       <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">
-                        Invariant-Preserving Optimization Space
+                        Property Profile
                       </p>
                       <span className="text-[9px] text-emerald-500 font-bold bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
-                        VERIFIED
+                        ANALYZED
                       </span>
                     </div>
 
-                    {invariants.length > 0 ? (
-                      invariants.map((inv) => (
-                        <div
-                          key={inv.id}
-                          className="bg-[#1e293b] p-6 rounded-3xl border border-slate-800 hover:border-blue-500/30 transition shadow-lg relative overflow-hidden"
-                        >
-                          <div className="absolute top-2 right-4 text-[8px] font-mono text-slate-700 opacity-60 uppercase tracking-tighter">
-                            {inv.id}
-                          </div>
-
-                          <div className="text-blue-400 font-black text-xs uppercase tracking-tight mb-3">
-                            {inv.name}
-                          </div>
-
-                          <div className="bg-[#0f172a] p-3 rounded-xl border border-slate-800 font-mono text-[11px] text-blue-200/70 mb-3 italic overflow-x-auto scrollbar-hide">
-                            <InlineMath math={inv.metric} />
-                          </div>
-
-                          <div className="grid grid-cols-2 gap-2 mb-3">
-                            <div className="bg-emerald-500/5 px-3 py-2 rounded-xl border border-emerald-500/10">
-                              <p className="text-[8px] text-emerald-600 font-black uppercase tracking-widest mb-1 font-mono text-center">
-                                Threshold
-                              </p>
-                              <div className="text-[10px] text-emerald-400 font-bold text-center leading-none">
-                                <InlineMath math={inv.threshold} />
-                              </div>
-                            </div>
-
-                            <div className="bg-blue-500/5 px-3 py-2 rounded-xl border border-blue-500/10">
-                              <p className="text-[8px] text-blue-600 font-black uppercase tracking-widest mb-1 font-mono text-center">
-                                Allow Range
-                              </p>
-                              <div className="text-[10px] text-blue-300 font-bold text-center leading-none">
-                                {inv.allows?.length ?? 0} Strategies
-                              </div>
-                            </div>
-                          </div>
-
-                          <div className="flex flex-wrap gap-1">
-                            {inv.allows?.map((a) => (
-                              <span
-                                key={a}
-                                className="text-[8px] font-bold bg-slate-900 text-slate-500 px-2 py-0.5 rounded border border-slate-800 uppercase tracking-tighter hover:text-blue-400/80 transition-colors"
-                              >
-                                + {a}
-                              </span>
-                            ))}
-                          </div>
-                        </div>
+                    {propertyEntries.length > 0 ? (
+                      propertyEntries.map(([key, prop]) => (
+                        <PropertyCard key={key} propertyKey={key} prop={prop} />
                       ))
                     ) : (
-                      <EmptyCard message="정의된 invariant가 없습니다." />
+                      <EmptyCard message="정의된 property profile이 없습니다." />
                     )}
                   </div>
                 </div>
               </section>
 
-              {/* Downstream */}
+              <section className="space-y-6">
+                <div className="flex items-center gap-3 text-cyan-400">
+                  <Boxes size={24} />
+                  <h3 className="text-2xl font-black uppercase tracking-tight">
+                    2. Family Traits
+                  </h3>
+                </div>
+
+                <p className="text-slate-500 text-sm leading-relaxed max-w-3xl">
+                  이 섹션은 property profile과 별개로, 해당 연산이 어떤 구조적
+                  family에 속하는지를 보여줍니다. normalization, gating,
+                  path-merge, projection, competition, state-update 같은
+                  도메인 특화 패턴을 compact하게 표시합니다.
+                </p>
+
+                {familyEntries.length > 0 ? (
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    {familyEntries.map(([familyKey, familyValue]) => (
+                      <FamilyTraitCard
+                        key={familyKey}
+                        familyKey={familyKey}
+                        familyValue={familyValue}
+                      />
+                    ))}
+                  </div>
+                ) : (
+                  <EmptyCard message="정의된 family traits가 없습니다." />
+                )}
+              </section>
+
+              <section className="space-y-6">
+                <div className="flex items-center gap-3 text-purple-400">
+                  <Layers size={24} />
+                  <h3 className="text-2xl font-black uppercase tracking-tight">
+                    3. Op-Specific Constraints
+                  </h3>
+                </div>
+
+                <p className="text-slate-500 text-sm leading-relaxed max-w-3xl">
+                  Property Atlas의 reusable property와 별개로, 이 연산만이
+                  가지는 상태 정렬성, 수치 안정성, 시간 순서 제약을 표시합니다.
+                </p>
+
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                  {opConstraints.length > 0 ? (
+                    opConstraints.map((constraint) => (
+                      <div
+                        key={constraint.id}
+                        className="bg-[#1e293b] p-6 rounded-[2rem] border border-slate-800 shadow-xl"
+                      >
+                        <div className="flex items-center justify-between gap-3 mb-4">
+                          <div className="text-[10px] font-black uppercase tracking-widest text-purple-400">
+                            {constraint.id}
+                          </div>
+                          <div className="text-[9px] text-slate-500 border border-slate-700 rounded px-2 py-0.5">
+                            OP LOCAL
+                          </div>
+                        </div>
+
+                        <h4 className="text-white font-black text-lg tracking-tight mb-3">
+                          {constraint.name}
+                        </h4>
+
+                        {constraint.metric ? (
+                          <div className="bg-[#0f172a] p-3 rounded-xl border border-slate-800 font-mono text-[11px] text-blue-200/70 mb-4 overflow-x-auto scrollbar-hide">
+                            <InlineMath math={constraint.metric} />
+                          </div>
+                        ) : null}
+
+                        <p className="text-sm text-slate-400 leading-relaxed mb-4">
+                          {constraint.detail}
+                        </p>
+
+                        <div className="flex flex-wrap gap-2">
+                          {(constraint.consequence ?? []).map((item) => (
+                            <span
+                              key={item}
+                              className="text-[9px] font-bold bg-purple-500/10 text-purple-300 px-2 py-1 rounded border border-purple-500/20 uppercase tracking-tight"
+                            >
+                              {item}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <EmptyCard
+                      className="lg:col-span-3"
+                      message="정의된 op-specific constraint가 없습니다."
+                    />
+                  )}
+                </div>
+              </section>
+
               <section className="space-y-6">
                 <div className="flex items-center gap-3 text-purple-400">
                   <Eye size={24} />
                   <h3 className="text-2xl font-black uppercase tracking-tight">
-                    2. Constraint-Aware Lowering Strategy
+                    4. Constraint-Aware Lowering Strategy
                   </h3>
                 </div>
 
@@ -520,12 +665,11 @@ export default function OpsPage() {
                 </div>
               </section>
 
-              {/* Lowering Decision */}
               <section className="space-y-6">
                 <div className="flex items-center gap-3 text-emerald-400">
                   <Zap size={24} />
                   <h3 className="text-2xl font-black uppercase tracking-tight">
-                    3. Lowering Decision Snapshot
+                    5. Lowering Decision Snapshot
                   </h3>
                 </div>
 
@@ -547,13 +691,13 @@ export default function OpsPage() {
                         tone="blue"
                       />
                       <CompactMetaCard
-                        label="Invariant Count"
-                        value={`${invariants.length}`}
+                        label="Property Count"
+                        value={`${propertyEntries.length}`}
                         tone="emerald"
                       />
                       <CompactMetaCard
-                        label="Downstream Rules"
-                        value={`${downstream.length}`}
+                        label="Op Constraints"
+                        value={`${opConstraints.length}`}
                         tone="purple"
                       />
                     </div>
@@ -634,7 +778,6 @@ export default function OpsPage() {
                 </div>
               </section>
 
-              {/* Related links */}
               <section className="space-y-5">
                 <div className="flex items-center gap-3 text-blue-400">
                   <BookOpen size={22} />
@@ -645,20 +788,20 @@ export default function OpsPage() {
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
                   <Link
-                    to={`/compute/theory?op=${data.id}`}
+                    to="/compute/properties"
                     className="group bg-[#1e293b] border border-slate-800 rounded-[2rem] p-6 hover:border-blue-500/30 transition"
                   >
                     <div className="text-[10px] font-black uppercase tracking-widest text-blue-500 mb-2">
-                      Meaning Layer
+                      Property Layer
                     </div>
                     <div className="flex items-center justify-between gap-4">
                       <div>
                         <h4 className="text-lg font-black text-white uppercase mb-2">
-                          View Theory Spec
+                          View Property Atlas
                         </h4>
                         <p className="text-sm text-slate-400 leading-relaxed">
-                          수학적 정의, 기하학적 해석, 등가 조건, 의미 거리 기준을
-                          확인합니다.
+                          재사용 가능한 semantic property, rewrite law, 성립 조건과
+                          제한 조건을 확인합니다.
                         </p>
                       </div>
                       <ArrowUpRight
@@ -702,7 +845,6 @@ export default function OpsPage() {
                 </div>
               </section>
 
-              {/* Footer */}
               <div className="pt-10 border-t border-slate-800 flex flex-col sm:flex-row items-center justify-between gap-4">
                 <Link
                   to="/compute/ops"
@@ -716,7 +858,7 @@ export default function OpsPage() {
                 </Link>
 
                 <div className="text-[10px] text-slate-700 uppercase tracking-[0.2em] font-bold">
-                  Meaning → Realization → Mechanism
+                  Property → Profile → Family → Constraint → Realization
                 </div>
               </div>
             </div>
@@ -741,6 +883,140 @@ export default function OpsPage() {
       `}</style>
     </div>
   );
+}
+
+function PropertyCard({ propertyKey, prop }) {
+  const tone = PROPERTY_TONE[prop?.status] ?? PROPERTY_TONE.weak;
+  const score =
+    typeof prop?.score === "number"
+      ? Math.max(0, Math.min(100, Math.round(prop.score * 100)))
+      : null;
+
+  return (
+    <div className="bg-[#1e293b] p-6 rounded-3xl border border-slate-800 hover:border-blue-500/30 transition shadow-lg relative overflow-hidden">
+      <div className="flex items-start justify-between gap-3 mb-3">
+        <div className="min-w-0">
+          <div className="text-blue-400 font-black text-xs uppercase tracking-tight break-words">
+            {propertyKey}
+          </div>
+          {prop?.summary ? (
+            <div className="text-[11px] text-slate-500 mt-1 leading-relaxed">
+              {prop.summary}
+            </div>
+          ) : null}
+        </div>
+
+        <span
+          className={`shrink-0 text-[9px] font-black px-2 py-1 rounded-lg border uppercase tracking-widest ${tone.badge}`}
+        >
+          {tone.label}
+        </span>
+      </div>
+
+      {prop?.reason ? (
+        <div className="bg-[#0f172a] p-3 rounded-xl border border-slate-800 font-mono text-[11px] text-blue-200/70 mb-4 italic overflow-x-auto scrollbar-hide">
+          <InlineMath math={prop.reason} />
+        </div>
+      ) : null}
+
+      {score !== null ? (
+        <div className="mb-4">
+          <div className="flex items-center justify-between text-[9px] uppercase font-black tracking-widest text-slate-500 mb-2">
+            <span>Affinity</span>
+            <span>{score}</span>
+          </div>
+          <div className="h-2 rounded-full bg-[#0f172a] border border-slate-800 overflow-hidden">
+            <div
+              className={`h-full ${tone.bar}`}
+              style={{ width: `${score}%` }}
+            />
+          </div>
+        </div>
+      ) : null}
+
+      <div className="flex flex-wrap gap-1">
+        {(prop?.allows ?? []).map((item) => (
+          <span
+            key={item}
+            className="text-[8px] font-bold bg-slate-900 text-slate-400 px-2 py-0.5 rounded border border-slate-800 uppercase tracking-tighter"
+          >
+            + {item}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function FamilyTraitCard({ familyKey, familyValue }) {
+  const tone = FAMILY_TONE[familyKey] ?? FAMILY_TONE.default;
+  const label = tone.title;
+
+  return (
+    <div
+      className={`bg-[#1e293b] p-6 rounded-[2rem] border border-slate-800 shadow-xl transition ${tone.border}`}
+    >
+      <div className="flex items-center justify-between gap-3 mb-4">
+        <div>
+          <div
+            className={`text-[10px] font-black uppercase tracking-widest mb-2 ${tone.accent}`}
+          >
+            Family Trait
+          </div>
+          <h4 className="text-xl font-black uppercase tracking-tight text-white break-words">
+            {label}
+          </h4>
+        </div>
+
+        <div
+          className={`text-[9px] font-black uppercase tracking-widest border rounded px-2 py-1 ${tone.chip}`}
+        >
+          STRUCTURAL
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        {Object.entries(familyValue).map(([k, v]) => (
+          <div
+            key={k}
+            className="rounded-2xl border border-slate-800 bg-[#0f172a] p-4"
+          >
+            <div
+              className={`text-[9px] font-black uppercase tracking-widest mb-2 break-words ${tone.keyText}`}
+            >
+              {formatFamilyKey(k)}
+            </div>
+            <div className="text-sm font-bold text-slate-200 break-words">
+              {formatFamilyValue(v)}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function formatFamilyKey(key) {
+  return key
+    .replace(/([A-Z])/g, " $1")
+    .replace(/_/g, " ")
+    .trim();
+}
+
+function formatFamilyValue(value) {
+  if (Array.isArray(value)) {
+    return value.join(", ");
+  }
+
+  if (typeof value === "boolean") {
+    return value ? "Yes" : "No";
+  }
+
+  if (value === null || value === undefined) {
+    return "N/A";
+  }
+
+  return String(value);
 }
 
 function CompactMetaCard({ label, value, tone = "blue" }) {

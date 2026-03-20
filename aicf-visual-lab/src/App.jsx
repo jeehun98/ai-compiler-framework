@@ -7,7 +7,7 @@ import ComputeOverviewPage from "./pages/overview/ComputeOverviewPage.jsx";
 import MemoryOverviewPage from "./pages/overview/MemoryOverviewPage.jsx";
 import AICFLabPage from "./pages/overview/AICFLabPage.jsx";
 
-import TheoryPage from "./pages/overview/compute/TheoryPage.jsx";
+import PropertyPage from "./pages/overview/compute/PropertyPage.jsx";
 import OpsPage from "./pages/overview/compute/OpsPage.jsx";
 
 import MemoryMethodsPage from "./pages/overview/memory/MemoryMethodsPage.jsx";
@@ -27,7 +27,7 @@ export default function App() {
         <Route path="/lab" element={<AICFLabPage />} />
 
         {/* compute */}
-        <Route path="/compute/theory" element={<TheoryPage />} />
+        <Route path="/compute/property" element={<PropertyPage />} />
         <Route path="/compute/ops" element={<OpsPage />} />
 
         {/* memory */}

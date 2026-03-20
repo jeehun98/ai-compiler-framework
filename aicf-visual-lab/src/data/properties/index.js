@@ -24,8 +24,20 @@ export const theoryPropertyList = [
 
 export const theoryPropertyIds = theoryPropertyList.map((item) => item.id);
 
+export const theoryPropertyProfileKeys = theoryPropertyList.map(
+  (item) => item.profileKey ?? item.id
+);
+
 export const theoryByPropertyId = Object.fromEntries(
   theoryPropertyList.map((item) => [item.id, item])
+);
+
+export const theoryByProfileKey = Object.fromEntries(
+  theoryPropertyList.map((item) => [item.profileKey ?? item.id, item])
+);
+
+export const theoryIdToProfileKey = Object.fromEntries(
+  theoryPropertyList.map((item) => [item.id, item.profileKey ?? item.id])
 );
 
 export const foundationalProperties = theoryPropertyList.filter(

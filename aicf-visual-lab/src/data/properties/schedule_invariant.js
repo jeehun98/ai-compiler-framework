@@ -3,6 +3,7 @@
 const scheduleInvariant = {
   id: "ScheduleInvariant",
   group: "foundational",
+  profileKey: "schedule_invariant",
   title: "Schedule Invariant",
   subtitle: "Execution Independence Property",
   hero: {
