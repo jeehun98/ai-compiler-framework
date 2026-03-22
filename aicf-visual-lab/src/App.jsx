@@ -9,7 +9,7 @@ import AICFLabPage from "./pages/overview/AICFLabPage.jsx";
 
 import PropertyPage from "./pages/overview/compute/PropertyPage.jsx";
 import OpsPage from "./pages/overview/compute/OpsPage.jsx";
-import InvariantPage from "./pages/overview/compute/InvariantPage.jsx";
+import PreservationGuidePage from "./pages/overview/compute/PreservationGuidePage.jsx";
 
 import MemoryMethodsPage from "./pages/overview/memory/MemoryMethodsPage.jsx";
 import MemoryMethodDetailPage from "./pages/overview/memory/MemoryMethodDetailPage.jsx";
@@ -29,7 +29,7 @@ export default function App() {
 
         {/* compute */}
         <Route path="/compute/properties" element={<PropertyPage />} />
-        <Route path="/compute/invariants" element={<InvariantPage />} />
+        <Route path="/compute/invariants" element={<PreservationGuidePage />} />
         <Route path="/compute/ops" element={<OpsPage />} />
 
         {/* legacy aliases */}

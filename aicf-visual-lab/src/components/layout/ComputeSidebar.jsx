@@ -2,7 +2,7 @@ import React from "react";
 import { Link, useLocation } from "react-router-dom";
 import { allOpsData } from "../../data/ops/index.js";
 import { theoryPropertyGroups as propertyAtlasGroups } from "../../data/properties/index.js";
-import { theoryInvariantGroups as invariantAtlasGroups } from "../../data/invariants/index.js";
+import { theoryInvariantGroups as preservationGuideGroups } from "../../data/invariants/index.js";
 
 import {
   Terminal,
@@ -22,7 +22,9 @@ import {
 export default function ComputeSidebar({
   isOpen,
   onClose,
-  version = "v1.1.0 Property View",
+  version = "v1.2.0 Preservation View",
+  activeRuleId = "",
+  quickRules = [],
 }) {
   const location = useLocation();
   const pathname = location.pathname;
@@ -30,20 +32,20 @@ export default function ComputeSidebar({
   const searchParams = new URLSearchParams(location.search);
   const selectedOpId = searchParams.get("op");
   const selectedPropertyId = searchParams.get("property");
-  const selectedInvariantId = searchParams.get("invariant");
+  const selectedRuleId = searchParams.get("invariant") || activeRuleId || "";
 
   const isComputeHome = pathname === "/compute";
   const isPropertyAtlas =
     pathname === "/compute/properties" ||
     pathname.startsWith("/compute/properties/");
-  const isInvariantAtlas =
+  const isPreservationGuide =
     pathname === "/compute/invariants" ||
     pathname.startsWith("/compute/invariants/");
   const isOps =
     pathname === "/compute/ops" || pathname.startsWith("/compute/ops/");
 
   const SectionTitle = ({ children }) => (
-    <p className="mt-4 mb-2 px-3 text-[10px] font-black uppercase tracking-widest text-slate-500 first:mt-0">
+    <p className="mb-2 px-3 text-[10px] font-black uppercase tracking-widest text-slate-500">
       {children}
     </p>
   );
@@ -51,11 +53,11 @@ export default function ComputeSidebar({
   const navItem = (to, label, Icon, options = {}) => {
     const { exact = false, activeMatchers = [] } = options;
 
-    const isActive =
-      exact
-        ? pathname === to
-        : pathname === to || pathname.startsWith(`${to}/`) ||
-          activeMatchers.some((matcher) => matcher(pathname));
+    const isActive = exact
+      ? pathname === to
+      : pathname === to ||
+        pathname.startsWith(`${to}/`) ||
+        activeMatchers.some((matcher) => matcher(pathname));
 
     return (
       <Link
@@ -102,7 +104,50 @@ export default function ComputeSidebar({
     },
   };
 
-  const invariantGroupMeta = {
+  const ruleGroupMeta = {
+    "execution-meaning": {
+      title: "Execution",
+      icon: Lock,
+      chipClass: "border-blue-500/20 bg-blue-500/5 text-blue-300",
+      itemActiveClass: "border-blue-500/20 bg-blue-600/10 text-blue-300",
+      itemActiveSubClass: "text-blue-200/80",
+      chevronClass: "text-blue-400",
+    },
+    "normalization-safety": {
+      title: "Normalization",
+      icon: Sigma,
+      chipClass: "border-emerald-500/20 bg-emerald-500/5 text-emerald-300",
+      itemActiveClass:
+        "border-emerald-500/20 bg-emerald-600/10 text-emerald-300",
+      itemActiveSubClass: "text-emerald-200/80",
+      chevronClass: "text-emerald-400",
+    },
+    pruning: {
+      title: "Pruning",
+      icon: GitBranch,
+      chipClass: "border-amber-500/20 bg-amber-500/5 text-amber-300",
+      itemActiveClass: "border-amber-500/20 bg-amber-600/10 text-amber-300",
+      itemActiveSubClass: "text-amber-200/80",
+      chevronClass: "text-amber-400",
+    },
+    "numeric-safety": {
+      title: "Numeric",
+      icon: Sigma,
+      chipClass: "border-purple-500/20 bg-purple-500/5 text-purple-300",
+      itemActiveClass:
+        "border-purple-500/20 bg-purple-600/10 text-purple-300",
+      itemActiveSubClass: "text-purple-200/80",
+      chevronClass: "text-purple-400",
+    },
+    "downstream-aware": {
+      title: "Tolerance",
+      icon: RefreshCw,
+      chipClass: "border-rose-500/20 bg-rose-500/5 text-rose-300",
+      itemActiveClass: "border-rose-500/20 bg-rose-600/10 text-rose-300",
+      itemActiveSubClass: "text-rose-200/80",
+      chevronClass: "text-rose-400",
+    },
+
     semantic: {
       title: "Semantic",
       icon: Lock,
@@ -183,7 +228,7 @@ export default function ComputeSidebar({
               (p) => p.startsWith("/compute/property/"),
             ],
           })}
-          {navItem("/compute/invariants", "Invariant Atlas", ShieldCheck, {
+          {navItem("/compute/invariants", "Preservation Guide", ShieldCheck, {
             activeMatchers: [
               (p) => p === "/compute/invariant",
               (p) => p.startsWith("/compute/invariant/"),
@@ -192,18 +237,19 @@ export default function ComputeSidebar({
           {navItem("/compute/ops", "Ops Explorer", Terminal)}
         </nav>
 
-        <div className="scrollbar-thin flex-1 overflow-y-auto space-y-2 p-4 scrollbar-thumb-slate-800">
+        <div className="scrollbar-thin flex-1 overflow-y-auto px-4 pb-4 pt-3 scrollbar-thumb-slate-800">
           {isPropertyAtlas && (
             <>
               <SectionTitle>Property Atlas</SectionTitle>
 
               {propertyAtlasGroups.map((group) => {
-                const meta = propertyGroupMeta[group.id] ?? propertyGroupMeta.foundational;
+                const meta =
+                  propertyGroupMeta[group.id] ?? propertyGroupMeta.foundational;
                 const GroupIcon = meta.icon;
 
                 return (
-                  <div key={group.id} className="mb-4">
-                    <div className="mb-2 flex items-center gap-2 px-3">
+                  <div key={group.id} className="mb-3">
+                    <div className="mb-1.5 flex items-center gap-2 px-3">
                       <div
                         className={[
                           "inline-flex items-center gap-1.5 rounded-xl border px-2.5 py-1 text-[9px] font-black uppercase tracking-widest",
@@ -270,20 +316,21 @@ export default function ComputeSidebar({
             </>
           )}
 
-          {isInvariantAtlas && (
+          {isPreservationGuide && (
             <>
-              <SectionTitle>Invariant Atlas</SectionTitle>
+              <SectionTitle>Preservation Guide</SectionTitle>
 
-              {invariantAtlasGroups.map((group) => {
+              {preservationGuideGroups.map((group) => {
                 if (!group.items?.length) return null;
 
                 const meta =
-                  invariantGroupMeta[group.id] ?? invariantGroupMeta.semantic;
+                  ruleGroupMeta[group.id] ??
+                  ruleGroupMeta["execution-meaning"];
                 const GroupIcon = meta.icon;
 
                 return (
-                  <div key={group.id} className="mb-4">
-                    <div className="mb-2 flex items-center gap-2 px-3">
+                  <div key={group.id} className="mb-3">
+                    <div className="mb-1.5 flex items-center gap-2 px-3">
                       <div
                         className={[
                           "inline-flex items-center gap-1.5 rounded-xl border px-2.5 py-1 text-[9px] font-black uppercase tracking-widest",
@@ -297,7 +344,7 @@ export default function ComputeSidebar({
 
                     <div className="space-y-1">
                       {group.items.map((spec) => {
-                        const isSelected = selectedInvariantId === spec.id;
+                        const isSelected = selectedRuleId === spec.id;
 
                         return (
                           <Link
@@ -330,7 +377,7 @@ export default function ComputeSidebar({
                                     : "text-slate-500",
                                 ].join(" ")}
                               >
-                                {spec?.subtitle || "Invariant"}
+                                {spec?.subtitle || "Rule"}
                               </span>
                             </div>
 
@@ -403,7 +450,7 @@ export default function ComputeSidebar({
             <>
               <SectionTitle>Compute Overview</SectionTitle>
 
-              <div className="space-y-4 rounded-2xl border border-slate-800 bg-[#111827] p-4">
+              <div className="rounded-2xl border border-slate-800 bg-[#111827] p-4">
                 <div>
                   <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">
                     Structure
@@ -412,9 +459,9 @@ export default function ComputeSidebar({
                   <div className="mt-3 space-y-2">
                     {[
                       "Property Atlas defines reusable transformation permissions",
-                      "Invariant Atlas defines conditions that must remain preserved",
-                      "Ops Explorer maps operators to property and invariant profiles",
-                      "Compute focuses on guarded, meaning-preserving execution",
+                      "Preservation Guide defines what must hold and where variation is allowed",
+                      "Ops Explorer maps operators to property and preservation profiles",
+                      "Compute focuses on guarded, runtime-bound execution",
                     ].map((line) => (
                       <div
                         key={line}
@@ -430,14 +477,17 @@ export default function ComputeSidebar({
             </>
           )}
 
-          {!isComputeHome && !isPropertyAtlas && !isInvariantAtlas && !isOps && (
-            <div className="px-3 py-10 text-center opacity-40">
-              <Layers size={24} className="mx-auto mb-2" />
-              <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">
-                No Active Compute Context
-              </p>
-            </div>
-          )}
+          {!isComputeHome &&
+            !isPropertyAtlas &&
+            !isPreservationGuide &&
+            !isOps && (
+              <div className="px-3 py-10 text-center opacity-40">
+                <Layers size={24} className="mx-auto mb-2" />
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">
+                  No Active Compute Context
+                </p>
+              </div>
+            )}
         </div>
 
         <div className="border-t border-slate-800 bg-[#0b0f1a] p-6 text-[10px]">

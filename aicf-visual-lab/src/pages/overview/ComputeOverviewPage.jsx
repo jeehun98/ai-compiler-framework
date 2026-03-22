@@ -51,28 +51,28 @@ export default function ComputeOverviewPage() {
             </div>
 
             <div className="flex items-center gap-2 text-blue-400 font-mono text-xs uppercase tracking-[0.35em] font-black">
-              <Cpu size={16} /> Property to Executable Form
+              <Cpu size={16} /> From Property to Runtime Execution
             </div>
 
             <h1 className="mt-6 text-4xl sm:text-6xl font-black tracking-tight leading-[1.08] text-white">
-              연산이 허용하는 성질과
+              연산이 허용하는 변환과
               <br />
-              <span className="text-blue-500">반드시 지켜야 할 조건</span>이
-              계산 구조를 결정하는 공간
+              <span className="text-blue-500">보존되어야 할 의미 조건</span>이
+              실행 구조를 좁혀가는 공간
             </h1>
 
             <p className="mt-6 max-w-3xl text-slate-400 text-base sm:text-lg leading-relaxed">
-              Compute 레이어는 연산을 단순한 커널 호출로 보지 않습니다.
-              먼저 연산이나 구조가 어떤 변환을 허용하는지{" "}
+              Compute 레이어는 연산을 단순한 커널 호출로 다루지 않습니다.
+              먼저 이 연산이 어떤 재구성, 재배치, 분해, 병합을 허용하는지를{" "}
               <span className="text-slate-100 font-semibold italic">
                 Property
               </span>
-              로 보고, 그 과정에서도 반드시 유지되어야 하는 의미적 조건을{" "}
+              로 파악하고, 그 과정에서 유지되어야 할 의미적 조건과 허용 범위를{" "}
               <span className="text-slate-100 font-semibold italic">
-                Invariant
+                Preservation Rule
               </span>
-              로 고정합니다. 그리고 개별 operator는 이 성질과 조건 위에서 어떤
-              lowering family로 이어질 수 있는지 분석됩니다.
+              로 함께 봅니다. 그 위에서 각 operator가 어떤 lowering family와
+              runtime path로 이어질 수 있는지 분석합니다.
             </p>
 
             <div className="mt-10 flex flex-wrap gap-4">
@@ -87,7 +87,7 @@ export default function ComputeOverviewPage() {
                 to="/compute/invariants"
                 className="inline-flex items-center gap-2 px-7 py-4 rounded-2xl bg-purple-600 text-white font-bold text-sm uppercase tracking-widest shadow-lg hover:bg-purple-500 transition-all active:scale-95"
               >
-                Invariant Atlas 탐색 <ArrowRight size={18} />
+                Preservation Guide 탐색 <ArrowRight size={18} />
               </Link>
 
               <Link
@@ -111,13 +111,13 @@ export default function ComputeOverviewPage() {
                 </div>
 
                 <h3 className="text-2xl font-black text-white">
-                  Property: What Is Allowed
+                  Property: What Transform Is Allowed
                 </h3>
 
                 <p className="mt-4 text-slate-400 leading-relaxed text-[15px]">
-                  Property는 이 연산이나 구조가 어떤 변환을 허용하는지를
-                  나타냅니다. 재배치, 분해, 병합, 타일링, 재구성 같은 변환이
-                  의미 보존 아래에서 가능한지 규정합니다.
+                  Property는 이 연산이나 구조가 어떤 변환과 재구성을 허용하는지를
+                  나타냅니다. 재배치, 분해, 병합, 타일링, 재물질화 같은 실행
+                  변형이 의미 보존 아래에서 가능한지 규정합니다.
                 </p>
 
                 <ul className="mt-6 space-y-2 text-sm text-slate-500 font-mono">
@@ -142,13 +142,13 @@ export default function ComputeOverviewPage() {
                 </div>
 
                 <h3 className="text-2xl font-black text-white">
-                  Invariant: What Must Remain
+                  Preservation Rule: What Must Hold
                 </h3>
 
                 <p className="mt-4 text-slate-400 leading-relaxed text-[15px]">
-                  Invariant는 허용된 변환 이후에도 반드시 유지되어야 하는 의미적
-                  조건입니다. 출력 분포, 정렬성, 정규화 조건, 상태 일관성 같은
-                  보존 조건이 여기에 해당합니다.
+                  Preservation Rule은 허용된 변환 이후에도 유지되어야 할 의미적
+                  조건과 허용 범위를 나타냅니다. 출력 의미, 수치 안정성, 정규화
+                  성질, 구조적 일관성 같은 조건이 여기에 포함됩니다.
                 </p>
 
                 <ul className="mt-6 space-y-2 text-sm text-slate-500 font-mono">
@@ -158,11 +158,11 @@ export default function ComputeOverviewPage() {
                   </li>
                   <li className="flex items-center gap-2">
                     <Sparkles size={14} className="text-purple-500" />
-                    Numeric Stability
+                    Numeric Tolerance
                   </li>
                   <li className="flex items-center gap-2">
                     <Sparkles size={14} className="text-purple-500" />
-                    Structural Preservation
+                    Structural Conditions
                   </li>
                 </ul>
               </div>
@@ -178,8 +178,8 @@ export default function ComputeOverviewPage() {
 
                 <p className="mt-4 text-slate-400 leading-relaxed text-[15px]">
                   Ops Explorer는 개별 operator가 어떤 property profile을 가지는지,
-                  어떤 invariant를 갖는지, 그리고 어떤 lowering family가
-                  자연스러운지를 보여줍니다.
+                  어떤 보존 조건과 제약이 연결되는지, 그리고 어떤 lowering
+                  family가 자연스러운지를 보여줍니다.
                 </p>
 
                 <ul className="mt-6 space-y-2 text-sm text-slate-500 font-mono">
@@ -206,8 +206,8 @@ export default function ComputeOverviewPage() {
                 "From Property to Runtime"
               </h2>
               <p className="mt-4 text-slate-500 leading-relaxed">
-                Compute는 의미를 직접 설명하는 계층이 아니라, 허용된 변환과
-                유지되어야 할 조건을 바탕으로 실제 실행 형태를 좁혀가는
+                Compute는 연산의 의미 자체를 정의하는 계층이 아니라, 허용 가능한
+                변환과 보존 조건을 바탕으로 실제 실행 형태를 점점 좁혀가는
                 계층입니다.
               </p>
             </div>
@@ -226,7 +226,7 @@ export default function ComputeOverviewPage() {
 
               <div className="flex flex-col items-center">
                 <div className="px-6 py-3 rounded-full bg-purple-900/30 border border-purple-500/50 text-purple-400 font-bold">
-                  Invariant
+                  Preservation
                 </div>
                 <span className="text-[10px] text-slate-600 mt-2 font-mono italic">
                   Semantic Condition
@@ -275,7 +275,7 @@ export default function ComputeOverviewPage() {
 
                 <p className="text-slate-400 text-lg leading-relaxed">
                   Runtime은 아무 경로나 고르는 것이 아니라, Property가 허용한
-                  공간과 Invariant가 요구하는 보존 조건 안에서 현재 입력 shape,
+                  변환 공간과 보존 규칙이 요구하는 조건 안에서 현재 입력 shape,
                   메모리 상태, 장치 자원에 맞는 가장 경제적인 경로를 선택합니다.
                 </p>
 
@@ -286,7 +286,7 @@ export default function ComputeOverviewPage() {
                       Guard
                     </div>
                     <div className="mt-2 text-slate-500 text-xs uppercase font-bold tracking-wider">
-                      Invariant Safety
+                      Preservation Safety
                     </div>
                   </div>
 
@@ -329,13 +329,14 @@ export default function ComputeOverviewPage() {
                         color: "bg-blue-500",
                       },
                       {
-                        label: "Invariant Check",
-                        detail: "의미 보존 조건을 만족하는지 검증",
+                        label: "Preservation Check",
+                        detail: "보존 조건과 허용 범위를 만족하는지 검증",
                         color: "bg-purple-500",
                       },
                       {
                         label: "Path Binding",
-                        detail: "현재 shape / resource 조건에 맞게 실행 경로 선택",
+                        detail:
+                          "현재 shape / resource 조건에 맞게 실행 경로 선택",
                         color: "bg-emerald-500",
                       },
                     ].map((step) => (

@@ -1,79 +1,56 @@
-import semanticConsistency from "./semantic_consistency.js";
-import numericStability from "./numeric_stability.js";
-import structuralPreservation from "./structural_preservation.js";
-
-export const theoryInvariantList = [
-  semanticConsistency,
-  numericStability,
-  structuralPreservation,
-];
-
-export const theoryInvariantIds = theoryInvariantList.map((item) => item.id);
-
-export const theoryInvariantProfileKeys = theoryInvariantList.map(
-  (item) => item.profileKey ?? item.id
-);
-
-export const theoryByInvariantId = Object.fromEntries(
-  theoryInvariantList.map((item) => [item.id, item])
-);
-
-export const theoryByInvariantProfileKey = Object.fromEntries(
-  theoryInvariantList.map((item) => [item.profileKey ?? item.id, item])
-);
-
-export const theoryIdToInvariantProfileKey = Object.fromEntries(
-  theoryInvariantList.map((item) => [item.id, item.profileKey ?? item.id])
-);
-
-export const semanticInvariants = theoryInvariantList.filter(
-  (item) => item.group === "semantic"
-);
-
-export const numericInvariants = theoryInvariantList.filter(
-  (item) => item.group === "numeric"
-);
-
-export const structuralInvariants = theoryInvariantList.filter(
-  (item) => item.group === "structural"
-);
-
-export const statefulInvariants = theoryInvariantList.filter(
-  (item) => item.group === "stateful"
-);
-
-export const semanticInvariantIds = semanticInvariants.map((item) => item.id);
-export const numericInvariantIds = numericInvariants.map((item) => item.id);
-export const structuralInvariantIds = structuralInvariants.map((item) => item.id);
-export const statefulInvariantIds = statefulInvariants.map((item) => item.id);
+import reductionEquivalence from "./reduction_equivalence";
+import normalizationPreservation from "./normalization_preservation";
+import domainPruningPreservation from "./domain_pruning_preservation";
+import tiledExecutionEquivalence from "./tiled_execution_equivalence";
+import representationEquivalence from "./representation_equivalence";
+import boundedNumericDrift from "./bounded_numeric_drift";
+import decisionTolerance from "./decision_tolerance";
 
 export const theoryInvariantGroups = [
   {
-    id: "semantic",
-    title: "Semantic Invariants",
+    id: "execution-meaning",
+    title: "Execution Meaning Preservation",
     description:
-      "Meaning-level conditions that must remain unchanged after transformation, lowering, or runtime specialization.",
-    items: semanticInvariants,
+      "Execution schedule, merge order, tiling, and representation may change, but the intended operation meaning must remain intact.",
+    items: [
+      reductionEquivalence,
+      tiledExecutionEquivalence,
+      representationEquivalence,
+    ],
   },
   {
-    id: "numeric",
-    title: "Numeric Invariants",
+    id: "normalization-safety",
+    title: "Normalization & Distribution Safety",
     description:
-      "Conditions on numerical behavior such as stability, bounded deviation, and normalization-safe execution.",
-    items: numericInvariants,
+      "Normalization factor, denominator interpretation, and stable output form must survive online or blockwise realization.",
+    items: [normalizationPreservation, boundedNumericDrift],
   },
   {
-    id: "structural",
-    title: "Structural Invariants",
+    id: "pruning",
+    title: "Pruning & Boundary Safety",
     description:
-      "Conditions on shape relations, dependency structure, and reduction contracts that must remain preserved.",
-    items: structuralInvariants,
+      "Skipping masked or inactive regions is allowed only when it does not alter observable meaning or downstream boundary behavior.",
+    items: [domainPruningPreservation],
   },
   {
-    id: "stateful",
-    title: "Stateful Invariants",
+    id: "downstream-aware",
+    title: "Downstream Decision Tolerance",
     description:
-      "Conditions ensuring consistent state evolution and valid state transition semantics.",
-    items: statefulInvariants,
+      "Exact numeric equality is not always required, but downstream decisions such as argmax, top-k, sign, or routing must stay stable when required.",
+    items: [decisionTolerance],
   },
 ];
+
+export const theoryByInvariantId = Object.fromEntries(
+  theoryInvariantGroups.flatMap((group) =>
+    group.items.map((item) => [item.id, item])
+  )
+);
+
+export const theoryIdToInvariantProfileKey = Object.fromEntries(
+  theoryInvariantGroups.flatMap((group) =>
+    group.items.map((item) => [item.id, item.profileKey])
+  )
+);
+
+export default theoryInvariantGroups;
